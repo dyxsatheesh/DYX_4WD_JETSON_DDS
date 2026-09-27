@@ -4,6 +4,13 @@
 Pure observer. Polls GET /api/mission/status and runs `ros2 bag record` while
 a mission is starting or active. Never blocks Start/Stop. Never talks to PX4.
 
+The recorder is ARMED (already subscribed and recording) before START, as soon
+as a mission is loaded/prepared or has just completed (a one-tap rerun is
+possible then). `ros2 bag record` needs 0.4-2.6 s to subscribe, longer than
+START itself now takes, so a recorder started on START missed START and first
+motion entirely (2026-09-26 bags). An armed session that never sees START is
+discarded (deleted), and re-armed after BAG_ARM_MAX_S so idle time is bounded.
+
 Env:
   ROVER_API_BASE              default http://127.0.0.1:5001
   ROVER_USERNAME / ROVER_PASSWORD
@@ -24,6 +31,8 @@ Env:
   BAG_FCU_PARAMS              default 1
   BAG_PARAM_DUMP_TIMEOUT_S    default 15
   BAG_AUTO_ANALYZE            default 0
+  BAG_ARM_MAX_S               default 600 (armed-without-START session is
+                              discarded and re-armed after this long)
 """
 
 from __future__ import annotations
@@ -84,6 +93,11 @@ MISSION_METADATA = os.environ.get(
 
 # Motion-active mission_manager states. PREPARING is excluded (RTK wait).
 ACTIVE_STATES = {"RUNNING", "PAUSED", "WAITING_FOR_NEXT"}
+# States in which START may follow; the recorder arms (records) here so the
+# START sequence and first motion are captured. COMPLETED and the ARCHIVED
+# terminal marker cover the app's one-tap rerun (restore -> load -> start).
+ARM_STATES = {"LOADED", "PREPARING", "READY", "COMPLETED"}
+ARM_MAX_S = float(os.environ.get("BAG_ARM_MAX_S", "600"))
 # Start service publishes these on /mission_manager/status before state=RUNNING.
 START_STAGES = {
     "PRECHECK",
@@ -376,9 +390,21 @@ def _auth_headers(*, force_login: bool = False) -> dict[str, str]:
 
 
 def _mission_should_record(mission: dict) -> bool:
+    """START is in progress or the mission is active: keep this session."""
     state = str(mission.get("state") or "").strip().upper()
     stage = str(mission.get("start_stage") or "IDLE").strip().upper()
     return state in ACTIVE_STATES or stage in START_STAGES
+
+
+def _mission_should_arm(mission: dict) -> bool:
+    """START may follow: be recording already, so START itself is captured."""
+    if _mission_should_record(mission):
+        return True
+    state = str(mission.get("state") or "").strip().upper()
+    if state in ARM_STATES:
+        return True
+    cleanup = str(mission.get("terminal_cleanup_status") or "").strip().upper()
+    return cleanup == "ARCHIVED"
 
 
 def poll_status() -> tuple[bool, dict | None, str | None]:
@@ -585,6 +611,14 @@ def reconcile_incomplete(bags_dir: str) -> None:
         outcome = manifest.get("outcome") or {}
         if outcome.get("recorder_end"):
             continue
+        if outcome.get("status") == "ARMED":
+            # Armed before a crash and START never observed: nothing to keep.
+            try:
+                shutil.rmtree(bundle)
+                log(f"reconcile: {os.path.basename(bundle)} armed, never started → removed")
+            except OSError as error:
+                log(f"reconcile: could not remove armed {bundle}: {error}")
+            continue
         log(f"reconcile: {os.path.basename(bundle)} → INCOMPLETE")
         try:
             with open(os.path.join(bundle, INCOMPLETE_SENTINEL), "w", encoding="utf-8") as handle:
@@ -697,6 +731,8 @@ class Recorder:
         self.bag_dir: str | None = None
         self.manifest: dict | None = None
         self.start_t: float = 0.0
+        self.arm_t: float = 0.0
+        self.started: bool = False
         self._last_refuse_log: float = 0.0
         self._last_start_fail: float = 0.0
         self._finalise_threads: list[threading.Thread] = []
@@ -722,9 +758,18 @@ class Recorder:
         started = _now_utc()
         stamp = started.astimezone(IST).strftime("%Y%m%d_%H%M%S")
         label = mission.get("filename") or mission.get("mission_id") or "mission"
-        name = f"{_safe_name(str(label))}_{stamp}"
+        base_name = f"{_safe_name(str(label))}_{stamp}"
+        # A session re-arms immediately after a mission completes, often in
+        # the same second as the bundle just finalised: never reuse its name
+        # (ros2 bag refuses an existing output folder, and the kept bundle's
+        # manifest would be overwritten).
+        name = base_name
+        suffix = 2
+        while os.path.exists(os.path.join(BAGS_DIR, name)):
+            name = f"{base_name}_{suffix}"
+            suffix += 1
         self.bundle_dir = os.path.join(BAGS_DIR, name)
-        os.makedirs(self.bundle_dir, exist_ok=True)
+        os.makedirs(self.bundle_dir)
         self.bag_dir = os.path.join(self.bundle_dir, "bag")
 
         command = ["ros2", "bag", "record", "-o", self.bag_dir]
@@ -755,7 +800,8 @@ class Recorder:
             log(f"ERROR ros2 bag exited immediately rc={exit_code}")
             self.stop("rosbag_start_failed")
             return
-        self.start_t = time.time()
+        self.arm_t = self.start_t = time.time()
+        self.started = False
         self._start_csv_logger(self.bundle_dir)
 
         copied = [
@@ -774,7 +820,7 @@ class Recorder:
             "identity": _identity_from_mission(mission),
             "timestamps": {
                 "recorder_start": _stamp(started),
-                "mission_start_observed": _stamp(started),
+                "mission_start_observed": None,
             },
             "as_run_config": {
                 "ros_params": {"status": "pending"},
@@ -788,9 +834,10 @@ class Recorder:
                 },
             },
             "environment": _environment(),
-            "outcome": {"status": "RECORDING", "recorder_end": None},
+            "outcome": {"status": "ARMED", "recorder_end": None},
         }
         _write_manifest(self.bundle_dir, self.manifest)
+        log("  ARMED: recording before START; discarded if START never comes")
 
         # Enforce retention asynchronously to avoid blocking recorder start
         threading.Thread(
@@ -800,6 +847,37 @@ class Recorder:
             daemon=True,
         ).start()
 
+    def mark_started(self, mission: dict) -> None:
+        """START observed in an armed session: this bundle is now kept."""
+        if self.started or self.bundle_dir is None or self.manifest is None:
+            return
+        self.started = True
+        self.start_t = time.time()
+        observed = _now_utc()
+        # restore/upload may have replaced the active mission since arming.
+        copied = [
+            name
+            for name in (
+                _copy_if_exists(MISSION_FILE, self.bundle_dir, "mission.csv"),
+                _copy_if_exists(
+                    MISSION_METADATA, self.bundle_dir, "mission_metadata.json"
+                ),
+            )
+            if name
+        ]
+        self.manifest["identity"] = _identity_from_mission(mission)
+        self.manifest["timestamps"]["mission_start_observed"] = _stamp(observed)
+        self.manifest["as_run_config"]["recorder"]["copied_files"] = copied
+        self.manifest["as_run_config"]["recorder"]["armed_before_start_s"] = round(
+            self.start_t - self.arm_t, 3
+        )
+        self.manifest["outcome"]["status"] = "RECORDING"
+        _write_manifest(self.bundle_dir, self.manifest)
+        log(
+            f"  START observed after {self.start_t - self.arm_t:.1f}s armed "
+            f"→ keeping {os.path.basename(self.bundle_dir)}"
+        )
+        # Parameter snapshots only for kept sessions (they are heavy).
         thread = threading.Thread(
             target=self._capture_ros_params,
             args=(self.bundle_dir,),
@@ -855,21 +933,25 @@ class Recorder:
         except Exception as error:
             log(f"  ros param dump failed (ignored): {error}")
 
-    def stop(self, reason: str) -> None:
+    def stop(self, reason: str, *, discard: bool = False) -> None:
         if self.proc is None:
             return
         proc, bundle, manifest = self.proc, self.bundle_dir, self.manifest
+        self.started = False
         self.proc = None
         self.bundle_dir = None
         self.bag_dir = None
         self.manifest = None
         self._stop_csv_logger()
-        log(f"STOP ({reason}) → {os.path.basename(bundle or '')}")
+        log(
+            f"{'DISCARD' if discard else 'STOP'} ({reason}) → "
+            f"{os.path.basename(bundle or '')}"
+        )
         with _FINALISING_LOCK:
             _FINALISING.add(bundle)
         thread = threading.Thread(
             target=self._finalise,
-            args=(proc, bundle, manifest, reason),
+            args=(proc, bundle, manifest, reason, discard),
             name=f"finalise-{os.path.basename(bundle or '')}",
             daemon=False,
         )
@@ -877,14 +959,34 @@ class Recorder:
         self._finalise_threads.append(thread)
         thread.start()
 
-    def _finalise(self, proc, bundle, manifest, reason: str) -> None:
+    def _finalise(self, proc, bundle, manifest, reason: str, discard: bool = False) -> None:
         try:
-            self._finalise_inner(proc, bundle, manifest, reason)
+            if discard:
+                self._discard_inner(proc, bundle)
+            else:
+                self._finalise_inner(proc, bundle, manifest, reason)
         except Exception as error:
             log(f"  finalise thread error (bag is safe): {error}")
         finally:
             with _FINALISING_LOCK:
                 _FINALISING.discard(bundle)
+
+    def _discard_inner(self, proc, bundle) -> None:
+        """Stop an armed session that never saw START and delete it."""
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+            proc.wait(timeout=15)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                pass
+        if bundle and os.path.isdir(bundle):
+            try:
+                shutil.rmtree(bundle)
+                log(f"  discarded {os.path.basename(bundle)}")
+            except OSError as error:
+                log(f"  discard failed for {bundle}: {error}")
 
     def _finalise_inner(self, proc, bundle, manifest, reason: str) -> None:
         try:
@@ -934,6 +1036,34 @@ class Recorder:
         )
 
 
+def step_session(recorder: "Recorder", mission: dict) -> None:
+    """One poll: arm before START, keep on START, discard if START never came."""
+    record = _mission_should_record(mission)
+    arm = _mission_should_arm(mission)
+    state = str(mission.get("state") or "terminal")
+
+    if not recorder.session_open:
+        if arm:
+            recorder.start(mission)
+            if record and recorder.session_open:
+                recorder.mark_started(mission)
+        return
+
+    if recorder.started:
+        if not record:
+            recorder.stop(f"mission {state}")
+        return
+
+    # Armed, START not yet observed.
+    if record:
+        recorder.mark_started(mission)
+    elif not arm:
+        recorder.stop(f"disarmed without START ({state})", discard=True)
+    elif time.time() - recorder.arm_t > ARM_MAX_S:
+        # Bound idle recording; the next poll re-arms a fresh session.
+        recorder.stop("arm window expired without START", discard=True)
+
+
 def main() -> int:
     recorder = Recorder()
     stop_flag = {"v": False}
@@ -966,30 +1096,31 @@ def main() -> int:
 
     while not stop_flag["v"]:
         if recorder.session_open and not recorder.active:
-            recorder.stop("rosbag_exited")
+            recorder.stop("rosbag_exited", discard=not recorder.started)
 
         ok, mission, error = poll_status()
         if ok and mission is not None:
             api_fail_since = None
-            active = _mission_should_record(mission)
-            if active and not recorder.session_open:
-                recorder.start(mission)
-            elif (not active) and recorder.session_open:
-                state = str(mission.get("state") or "terminal")
-                recorder.stop(f"mission {state}")
+            step_session(recorder, mission)
         elif recorder.session_open:
             api_fail_since = api_fail_since or time.time()
             if time.time() - api_fail_since > API_GRACE_S:
-                recorder.stop(f"api_unreachable:{error}")
+                recorder.stop(
+                    f"api_unreachable:{error}", discard=not recorder.started
+                )
                 api_fail_since = None
 
-        if recorder.active and (time.time() - recorder.start_t) > MAX_S:
+        if (
+            recorder.active
+            and recorder.started
+            and (time.time() - recorder.start_t) > MAX_S
+        ):
             recorder.stop("max_duration_cap")
 
         time.sleep(POLL_S)
 
     if recorder.active:
-        recorder.stop("service_shutdown")
+        recorder.stop("service_shutdown", discard=not recorder.started)
     for thread in list(recorder._finalise_threads):
         thread.join(timeout=60)
         if thread.is_alive():
