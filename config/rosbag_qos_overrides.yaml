@@ -137,6 +137,11 @@
   depth: 1
   reliability: reliable
   durability: transient_local
+/cmd_vel_bridge/stats:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile
 /rtk_correction_bridge/healthy:
   history: keep_last
   depth: 1
@@ -159,9 +164,11 @@
   depth: 10
   reliability: best_effort
   durability: volatile
+# depth 10, not 1: setpoints arrive in bursts (~1 ms apart); with depth 1 the
+# recorder can overwrite one before writing it and under-count the stream.
 /mavros/setpoint_raw/local:
   history: keep_last
-  depth: 1
+  depth: 10
   reliability: best_effort
   durability: volatile
 /mavros/gpsstatus/gps1/raw:

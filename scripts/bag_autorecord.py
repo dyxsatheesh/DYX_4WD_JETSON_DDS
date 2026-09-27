@@ -174,6 +174,7 @@ TOPICS = [
     "/mission_complete",
     "/rover_backend/heartbeat",
     "/cmd_vel_bridge/backend_heartbeat_healthy",
+    "/cmd_vel_bridge/stats",
     "/rpp/acceleration_active",
     "/rpp/acceleration_progress_m",
     "/rpp/deceleration_active",

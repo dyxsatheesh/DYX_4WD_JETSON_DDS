@@ -107,6 +107,7 @@ TOPICS=(
   /rpp/terminal_certificate
   /rpp/terminal_result
   /cmd_vel_bridge/backend_heartbeat_healthy
+  /cmd_vel_bridge/stats
   /rtk_correction_bridge/healthy
   /rtk_correction_bridge/correction_age_sec
   /spray/status

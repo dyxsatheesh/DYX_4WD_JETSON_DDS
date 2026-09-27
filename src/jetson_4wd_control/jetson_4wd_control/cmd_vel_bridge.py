@@ -22,10 +22,16 @@ to straight driving at 12 degrees or less.
 RPP owns acceleration, deceleration and all requested speed shaping. This bridge preserves
 finite RPP speeds from 0.00 through 1.00 m/s and clamps only commands above the
 configured safety maximum. Each accepted RPP command is gated and forwarded to
-PX4 as soon as it arrives (RPP runs at 50 Hz). The 50 Hz timer still evaluates
-every safety gate and publishes immediately when the gate outcome changes; it
-repeats the last command only as a keep-alive when no command has been
-forwarded for KEEPALIVE_PERIODS stream periods (an RPP stall).
+PX4 as soon as it arrives (RPP runs at 50 Hz). A 100 Hz check timer still
+evaluates every safety gate and publishes immediately when the gate outcome
+changes; it repeats the last command only as a keep-alive when no command has
+been forwarded for KEEPALIVE_PERIODS stream periods (an RPP stall). Checking at
+100 Hz bounds a stall's output gap to ~25-30 ms; a 50 Hz check let it reach
+~45 ms (measured p90 45-51 ms, 2026-09-26 bags).
+
+/cmd_vel_bridge/stats (1 Hz JSON, see bridge_stats.py) reports RPP commands
+received vs setpoints published by source, RPP stamp gaps, RPP->bridge
+latency, output gaps and timer lateness.
 Literal zero remains the stop command for all safety conditions.
 
 On every new MAVROS connection the bridge also asks PX4 to stream
@@ -34,6 +40,7 @@ LOCAL_POSITION_NED (the pose RPP steers from) at local_position_rate_hz.
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -50,7 +57,9 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
-from std_msgs.msg import Bool, UInt64
+from std_msgs.msg import Bool, String, UInt64
+
+from jetson_4wd_control.bridge_stats import BridgeStreamStats
 
 from jetson_4wd_control.mavlink_stream_rate import (
     MAVLINK_MSG_ID_LOCAL_POSITION_NED,
@@ -62,6 +71,11 @@ class CmdVelBridge(Node):
     """Gate RPP vectors and stream safe PX4 PositionTarget messages."""
 
     STREAM_HZ = 50.0
+    # Gate/keep-alive check rate. Twice STREAM_HZ so a keep-alive goes out
+    # within ~KEEPALIVE_PERIODS of silence instead of up to one extra 20 ms
+    # tick later.
+    CHECK_HZ = 100.0
+    STATS_PERIOD_SEC = 1.0
     # Timer keep-alive: repeat the last setpoint only if nothing was published
     # for this many stream periods. RPP normally publishes every period.
     KEEPALIVE_PERIODS = 1.25
@@ -227,6 +241,15 @@ class CmdVelBridge(Node):
             "/cmd_vel_bridge/backend_heartbeat_healthy",
             retained_qos,
         )
+        self.stats_pub = self.create_publisher(
+            String,
+            "/cmd_vel_bridge/stats",
+            safety_qos,
+        )
+        self._stats = BridgeStreamStats(
+            nominal_period_s=1.0 / self.STREAM_HZ,
+            gap_threshold_s=self.KEEPALIVE_PERIODS / self.STREAM_HZ + 0.005,
+        )
 
         self.latest_north = 0.0
         self.latest_east = 0.0
@@ -273,15 +296,19 @@ class CmdVelBridge(Node):
 
         self._publish_heartbeat_health(False, force=True)
         self.timer = self.create_timer(
-            1.0 / self.STREAM_HZ,
+            1.0 / self.CHECK_HZ,
             self._control_loop,
+        )
+        self.stats_timer = self.create_timer(
+            self.STATS_PERIOD_SEC,
+            self._publish_stats,
         )
 
         self.get_logger().warn(
             "===== PX4 NATIVE ROVER VELOCITY BRIDGE STARTED ====="
         )
         self.get_logger().warn(
-            "RPP velocity bridge: 0.00..1.00 m/s at 50 Hz"
+            "RPP velocity bridge: 0.00..1.00 m/s, 50 Hz stream, 100 Hz gate check"
         )
         self.get_logger().warn(
             "PX4 native pivot contract: enter 45deg, drive at 12deg"
@@ -303,7 +330,25 @@ class CmdVelBridge(Node):
             <= self.backend_heartbeat_timeout_sec
         )
 
+    def _note_rpp_command(self, message: Any) -> None:
+        stamp = message.header.stamp
+        stamp_s = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        self._stats.on_rpp_command(self._now_s(), stamp_s)
+
+    def _now_s(self) -> float:
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def _publish_stats(self) -> None:
+        message = String()
+        message.data = json.dumps(
+            self._stats.snapshot(self._now_s()),
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self.stats_pub.publish(message)
+
     def _rpp_callback(self, message: Vector3Stamped) -> None:
+        self._note_rpp_command(message)
         north = float(message.vector.x)
         east = float(message.vector.y)
         unused_z = float(message.vector.z)
@@ -352,6 +397,7 @@ class CmdVelBridge(Node):
         self._evaluate_and_publish(from_timer=False)
 
     def _rpp_command_callback(self, message: RppCommand) -> None:
+        self._note_rpp_command(message)
         try:
             north = float(message.velocity_north_mps)
             east = float(message.velocity_east_mps)
@@ -539,6 +585,7 @@ class CmdVelBridge(Node):
             interval = (
                 loop_time - self._previous_loop_time
             ).nanoseconds / 1e9
+            self._stats.on_timer(interval, late_threshold_s=2.0 / self.STREAM_HZ)
             if interval > 2.0 / self.STREAM_HZ:
                 self._late_cycle_count += 1
                 self.get_logger().warn(
@@ -615,6 +662,13 @@ class CmdVelBridge(Node):
             self.latest_yaw_valid = False
             self.latest_command_time = None
 
+        if not from_timer:
+            source = "rpp"
+        elif reason != self._last_published_reason:
+            source = "gate_change"
+        else:
+            source = "keepalive"
+
         self._publish_local_velocity(
             north,
             east,
@@ -622,6 +676,7 @@ class CmdVelBridge(Node):
             yaw_rate_enu_radps=yaw_rate_enu,
             yaw_valid=yaw_valid,
         )
+        self._stats.on_publish(loop_time.nanoseconds / 1e9, source)
         self._last_publish_time = loop_time
         self._last_published_reason = reason
 
