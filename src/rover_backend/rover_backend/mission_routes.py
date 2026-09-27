@@ -71,6 +71,43 @@ CONTROL_CONFLICT_STATES = {
 
 _mission_mutation_lock = asyncio.Lock()
 
+# /restore (and /start with an archived mission_id) return once the restored
+# mission is ready for START instead of immediately after requesting
+# preparation. Preparation is ~25-45 ms plus Mission Manager install
+# (2026-09-26 bags), so the app's post-restore status poll (REST round trip +
+# 400 ms sleep) is skipped. Bounded: on timeout the response is exactly what
+# it was before and the app falls back to its own poll.
+PREPARE_READY_WAIT_SEC = 3.0
+PREPARE_READY_POLL_SEC = 0.02
+
+
+async def _await_prepared_for_start(timeout_sec: float = PREPARE_READY_WAIT_SEC) -> bool:
+    """Wait (in-process, bounded) until the restored mission is START-ready.
+
+    Checks the same conditions /load (loaded + trajectory_ready) and /start
+    (Mission Manager READY) gate on. Returns False on error or timeout.
+    Called while the mission mutation lock is held; the rover cannot be
+    driving here (_require_not_active / _require_not_driving) and the E-stop
+    assert path does not take that lock.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    while True:
+        try:
+            ready, error = ros_bridge.preparation_readiness()
+        except RuntimeError:
+            return False
+        mission = _mission_state()
+        if (
+            ready
+            and mission.get("loaded") is True
+            and mission.get("trajectory_ready") is True
+        ):
+            return True
+        if error or loop.time() >= deadline:
+            return False
+        await asyncio.sleep(PREPARE_READY_POLL_SEC)
+
 
 async def _serialize_mission_mutation() -> AsyncIterator[None]:
     """Keep mission file checks and ROS control mutations in one transaction."""
@@ -434,6 +471,8 @@ async def restore_mission(
             },
         ) from error
 
+    await _await_prepared_for_start()
+
     return {
         "success": True,
         "operation": "restore",
@@ -730,6 +769,7 @@ async def start_mission(
             raise
         except (OSError, RuntimeError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+        await _await_prepared_for_start()
         mission = _mission_state()
         if mission.get("trajectory_ready") is not True:
             raise HTTPException(

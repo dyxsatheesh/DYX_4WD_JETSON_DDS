@@ -3886,6 +3886,22 @@ class RoverBackendRosNode(Node):
 
         return rover_state.section("mission")
 
+    def preparation_readiness(self) -> tuple[bool, str | None]:
+        """(ready_for_start, error) of the prepared mission; no ROS I/O.
+
+        Ready means trajectory_generator published READY and Mission Manager
+        installed it and reports READY, i.e. /load, the execution-mode set and
+        /start will all pass their readiness gates.
+        """
+        with self._runtime_lock:
+            error = self._trajectory_error or self._mission_manager_error
+            ready = (
+                self._trajectory_ready
+                and self._mission_manager_ready
+                and not self._preparation_in_progress
+            )
+        return ready, error
+
     def set_execution_mode(
         self,
         execution_mode: str,
@@ -4227,6 +4243,10 @@ class RosBridgeRuntime:
     def prepare_trajectory(self) -> dict[str, Any]:
         with self._operation_lock:
             return self.node.prepare_trajectory()
+
+    def preparation_readiness(self) -> tuple[bool, str | None]:
+        # Read-only snapshot; deliberately not behind _operation_lock.
+        return self.node.preparation_readiness()
 
     def set_execution_mode(
         self,
