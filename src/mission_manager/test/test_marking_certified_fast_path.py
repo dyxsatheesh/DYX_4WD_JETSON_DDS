@@ -108,7 +108,9 @@ def build(clock: Clock, *, mode: str = "radial20", execution: str = "AUTO"):
     # Raw-GNSS spray gate: OFF here so these tests keep pinning the RPP-only
     # contract; test_raw_gnss_spray_gate.py covers the gate-enabled path.
     m.raw_gnss_spray_gate_enabled = False
-    m.raw_gnss_spray_gate_config = RawGnssSprayGateConfig()
+    # Gate logic tests are written around a 1.0 s window; production uses
+    # 0.5 s (pinned in test_raw_gnss_spray_gate.py).
+    m.raw_gnss_spray_gate_config = RawGnssSprayGateConfig(window_sec=1.0)
     m.raw_gnss_spray_evaluates_rpp_settled_miss = True
     m._raw_gnss_gate_started = None
     m._raw_gnss_gate_marking_number = None
@@ -301,9 +303,9 @@ def test_marking_stays_active_through_spray_then_completes_auto(clock):
     assert names == ["ACCURACY_ACHIEVED"]
     assert m._point_status[0] == "ACTIVE"
 
+    # The spray result completes the point inside the callback itself, with
+    # no wait for the next 20 Hz control tick.
     spray_success(m, "P0001")
-    clock.t += 0.05
-    m._control_loop()
     names = [e[1] for e in events if e[0] == "point_event"]
     assert names == ["ACCURACY_ACHIEVED", "COMPLETED"]
     assert m._point_status[0] == "COMPLETED"
@@ -319,12 +321,12 @@ def test_marking_stays_active_through_spray_then_completes_auto(clock):
     assert m._last_marking_timing["point_id"] == "P0001"
     assert "spray_success_rx" in m._last_marking_timing
 
-    # AUTO next-goal release still waits the unchanged 1.0 s.
+    # AUTO next-goal release waits AUTO_CONTINUE_DELAY_SEC (0.3 s).
     goals_before = [e for e in events if e[0] == "goal"]
-    clock.t += 0.5
+    clock.t += 0.25
     m._control_loop()
     assert [e for e in events if e[0] == "goal"] == goals_before
-    clock.t += 0.55
+    clock.t += 0.1
     m._control_loop()
     assert "next_goal_released" in m._last_marking_timing
 
@@ -552,16 +554,16 @@ def test_patch_does_not_change_spray_stop_or_auto_constants():
         encoding="utf-8"
     )
     assert '"spray_duration_sec": 0.20' in launch
-    assert '"pre_spray_stable_sec": 0.25' in launch
+    assert '"pre_spray_stable_sec": 0.05' in launch
     assert '"radial_stop_stationary_window_sec": 0.50' in launch
     assert '"marking_hold_sec": 3.00' in launch
     assert 'TERMINAL_STOP_MODE = "radial20"' in launch
-    assert MissionManager.AUTO_CONTINUE_DELAY_SEC == 1.0
+    assert MissionManager.AUTO_CONTINUE_DELAY_SEC == 0.3
     spray = (
         root / "spray_controller" / "spray_controller" / "spray_controller_node.py"
     ).read_text(encoding="utf-8")
     assert 'self.declare_parameter("spray_duration_sec", 0.20)' in spray
-    assert 'self.declare_parameter("pre_spray_stable_sec", 0.25)' in spray
+    assert 'self.declare_parameter("pre_spray_stable_sec", 0.05)' in spray
     regulator = (
         root / "rpp_controller" / "rpp_controller" / "terminal_stop_regulator.py"
     ).read_text(encoding="utf-8")

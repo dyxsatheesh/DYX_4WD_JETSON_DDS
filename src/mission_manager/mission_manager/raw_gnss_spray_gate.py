@@ -56,7 +56,7 @@ MEASUREMENT_SOURCE = "RAW_GNSS_SURVEY"
 @dataclass(frozen=True)
 class RawGnssSprayGateConfig:
     tolerance_m: float = 0.030
-    window_sec: float = 1.0
+    window_sec: float = 0.5
     minimum_samples: int = 3
     max_scatter_m: float = 0.020
     timeout_sec: float = 3.0

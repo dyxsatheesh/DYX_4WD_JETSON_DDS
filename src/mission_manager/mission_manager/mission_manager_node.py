@@ -119,7 +119,9 @@ class MissionManager(Node):
     # FAILED with AUTO continue), hold the rover stopped for this long before
     # the next semantic goal is published. Monotonic deadline, not a sleep;
     # cleared by _reset_point_timers() on every stop/abort/reset path.
-    AUTO_CONTINUE_DELAY_SEC = 1.0
+    # 0.3 s: the release is already PX4-ACKed when a point completes; this
+    # only covers the servo physically swinging back before the rover moves.
+    AUTO_CONTINUE_DELAY_SEC = 0.3
 
     POINT_PASS_THROUGH = 0
     POINT_DUMMY_ALIGNMENT = 1
@@ -176,7 +178,7 @@ class MissionManager(Node):
         self.declare_parameter("raw_gnss_spray_tolerance_m", 0.030)
         # Only fixes received after the stop are used: window, sample count
         # and cluster scatter must all hold, every fix RTK FIXED.
-        self.declare_parameter("raw_gnss_spray_window_sec", 1.0)
+        self.declare_parameter("raw_gnss_spray_window_sec", 0.5)
         self.declare_parameter("raw_gnss_spray_minimum_samples", 3)
         self.declare_parameter("raw_gnss_spray_max_scatter_m", 0.020)
         # No trustworthy measurement by this time after the stop -> FAILED.
@@ -1918,11 +1920,15 @@ class MissionManager(Node):
         if not isinstance(point_id, str) or not point_id:
             return
 
+        wake_control_loop = False
         with self._lock:
             if run_id != self._mission_run_id:
                 return
 
             key = (run_id, point_id)
+            if result in {"SUCCESS", "FAILED"}:
+                # Complete the point now rather than on the next 20 Hz tick.
+                wake_control_loop = True
             if result == "SUCCESS":
                 if (
                     self._spray_request_started is not None
@@ -1937,9 +1943,8 @@ class MissionManager(Node):
                     "mission progression is independent of spray result"
                 )
                 self._publish_status(force=True)
-                return
 
-            if result == "FAILED":
+            elif result == "FAILED":
                 reason = str(payload.get("reason", "UNKNOWN_SPRAY_FAILURE"))
                 self._spray_failure_keys[key] = reason
                 self._spray_success_keys.discard(key)
@@ -1952,6 +1957,12 @@ class MissionManager(Node):
                     self._last_message,
                 )
                 self._publish_status(force=True)
+
+        if wake_control_loop:
+            # One extra control tick, outside the lock like the timer's. The
+            # body re-takes the lock and only acts on current state, so it is
+            # equivalent to the timer firing early.
+            self._control_loop()
 
     def _spray_status_age_sec(self) -> float:
         if self._spray_status_last_rx_monotonic is None:

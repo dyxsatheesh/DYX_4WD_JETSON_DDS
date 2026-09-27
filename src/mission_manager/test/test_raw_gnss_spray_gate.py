@@ -76,7 +76,8 @@ def fixes_at(target, start, end, north_m=0.0, east_m=0.0, fix_type=6, rate=10.0)
     return out
 
 
-CONFIG = RawGnssSprayGateConfig()
+# Logic tests use a 1.0 s window; the production default is pinned below.
+CONFIG = RawGnssSprayGateConfig(window_sec=1.0)
 
 
 def gate(fixes, *, now, stop=100.0, target=TARGETS[1], **kw):
@@ -96,6 +97,23 @@ def gate(fixes, *, now, stop=100.0, target=TARGETS[1], **kw):
 
 def test_defaults_are_the_30mm_contract():
     assert CONFIG.tolerance_m == 0.030
+
+
+def test_production_window_is_half_a_second():
+    # 0.5 s at 10 Hz PVT = 5 fixes, above minimum_samples; the node default
+    # and the launch file must agree with the dataclass.
+    default = RawGnssSprayGateConfig()
+    assert default.window_sec == 0.5
+    assert default.minimum_samples <= 5
+    root = Path(__file__).resolve().parents[2]
+    launch = (root / "rover_bringup" / "launch" / "rover.launch.py").read_text(
+        encoding="utf-8"
+    )
+    node = (
+        root / "mission_manager" / "mission_manager" / "mission_manager_node.py"
+    ).read_text(encoding="utf-8")
+    assert '"raw_gnss_spray_window_sec": 0.5,' in launch
+    assert 'declare_parameter("raw_gnss_spray_window_sec", 0.5)' in node
 
 
 def test_waits_for_the_post_stop_window():

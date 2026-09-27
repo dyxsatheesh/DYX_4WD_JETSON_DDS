@@ -108,7 +108,7 @@ class SprayController(Node):
         self.declare_parameter("press_value", -1.0)
         self.declare_parameter("release_value", 0.090909)
         self.declare_parameter("spray_duration_sec", 0.20)
-        self.declare_parameter("pre_spray_stable_sec", 0.25)
+        self.declare_parameter("pre_spray_stable_sec", 0.05)
 
         self.declare_parameter("command_timeout_sec", 1.0)
         self.declare_parameter("release_retry_interval_sec", 0.25)

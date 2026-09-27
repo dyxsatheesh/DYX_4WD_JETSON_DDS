@@ -261,7 +261,7 @@ def generate_launch_description() -> LaunchDescription:
                         # mission_manager already requires <=30 mm radial error,
                         # <=0.01 m/s rover speed, then holds the marking point
                         # for 3.0 s total. Spray actuator ON time is only 0.2 s.
-                        "pre_spray_stable_sec": 0.25,
+                        "pre_spray_stable_sec": 0.05,
                         "command_timeout_sec": 1.0,
                         ("release_retry_interval_sec"): 0.25,
                         # Independent hard watchdog.
@@ -337,7 +337,7 @@ def generate_launch_description() -> LaunchDescription:
                         # the surveyed point <= 30 mm, else the point FAILS.
                         "raw_gnss_spray_gate_enabled": True,
                         "raw_gnss_spray_tolerance_m": 0.030,
-                        "raw_gnss_spray_window_sec": 1.0,
+                        "raw_gnss_spray_window_sec": 0.5,
                         "raw_gnss_spray_minimum_samples": 3,
                         "raw_gnss_spray_max_scatter_m": 0.020,
                         "raw_gnss_spray_timeout_sec": 3.0,
