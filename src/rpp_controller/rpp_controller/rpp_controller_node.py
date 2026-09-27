@@ -2389,6 +2389,12 @@ class RPPController(Node):
         self._rpp_debug_cycle_start_ns = None
         self._rpp_debug_pending = None
         self._rpp_debug_snapshot = None
+        # (goal_x, goal_y, path_bearing, segment_goal_number, path signature)
+        # of the last cycle that computed geometry. While motion is held
+        # (pause / E-stop / marking hold) /rpp/debug keeps reporting live
+        # geometry against it, monitor-only; see
+        # _record_rpp_debug_hold_geometry.
+        self._rpp_hold_geometry_reference = None
         self._rpp_debug_last_error_log_ns = 0
         self._rpp_debug_callback_group = MutuallyExclusiveCallbackGroup()
 
@@ -8795,6 +8801,49 @@ class RPPController(Node):
             }
         )
 
+    def _record_rpp_debug_hold_geometry(self, hold_mode):
+        """Keep /rpp/debug geometry live while motion is held. Monitor only.
+
+        Pause, E-stop and the marking hold return from control_loop before
+        any geometry is computed, so /rpp/debug went available=false and the
+        tablet's RPP panels froze for the whole hold. This recomputes the
+        same fields with the same formulas from the live pose against the
+        goal and path bearing of the last computing cycle. It reads state and
+        writes only the debug sample: no command, latch, filter or regulator
+        is touched. It reports nothing if the pose is stale or the reference
+        belongs to another goal or path.
+        """
+        pending = self._rpp_debug_pending
+        if pending is None:
+            return
+        pending["control_mode"] = hold_mode
+        pending["reason"] = hold_mode
+        reference = self._rpp_hold_geometry_reference
+        if reference is None:
+            return
+        goal_x, goal_y, path_bearing, goal_number, signature = reference
+        if (
+            goal_number != self.segment_goal_number
+            or signature != self.geometry_installed_signature
+        ):
+            return
+        if self.current_x is None or self.current_y is None or self.current_yaw is None:
+            return
+        if not self.is_fresh(self.last_odom_time, self.odom_timeout_sec):
+            return
+        delta_east = self.current_x - goal_x
+        delta_north = self.current_y - goal_y
+        self._record_rpp_debug_geometry(
+            path_bearing_rad=path_bearing,
+            heading_error_rad=self.normalize_angle(path_bearing - self.current_yaw),
+            distance_to_goal_m=math.hypot(delta_east, delta_north),
+            signed_cross_track_m=(
+                -math.sin(path_bearing) * delta_east
+                + math.cos(path_bearing) * delta_north
+            ),
+            along_remaining_m=self.along_track_remaining(path_bearing, goal_x, goal_y),
+        )
+
     def _finish_rpp_debug_cycle(self):
         pending = self._rpp_debug_pending
         if pending is None:
@@ -10960,16 +11009,19 @@ class RPPController(Node):
         self.approach_speed_cap_mps = math.inf
         if self.emergency_stop:
             self.publish_stop()
+            self._record_rpp_debug_hold_geometry("HOLD_ESTOP")
             self.log_waiting("emergency stop active")
             return
         if not self.mission_enabled:
             self.publish_stop()
+            self._record_rpp_debug_hold_geometry("HOLD_MISSION_DISABLED")
             self.log_waiting("mission disabled")
             return
         if self.marking_active:
             self.publish_stop()
             if self.precision_terminal_enabled:
                 self._step_precision_terminal_hold_cycle()
+            self._record_rpp_debug_hold_geometry("HOLD_MARKING")
             self.log_waiting("continuous marking hold")
             return
         if not self.marking_metadata_received:
@@ -11000,6 +11052,7 @@ class RPPController(Node):
             return
         if self.marking_missed:
             self.publish_stop()
+            self._record_rpp_debug_hold_geometry("HOLD_MARKING_MISSED")
             self.log_waiting("marking capture safe hold active")
             return
 
@@ -11236,6 +11289,13 @@ class RPPController(Node):
             distance_to_goal_m=goal_distance,
             signed_cross_track_m=goal_signed_cross_track,
             along_remaining_m=goal_along_remaining,
+        )
+        self._rpp_hold_geometry_reference = (
+            goal_x,
+            goal_y,
+            path_bearing,
+            self.segment_goal_number,
+            self.geometry_installed_signature,
         )
 
         # Phase-5 terminal authority is evaluated after current projection,
