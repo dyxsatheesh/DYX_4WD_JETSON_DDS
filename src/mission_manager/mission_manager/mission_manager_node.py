@@ -36,7 +36,7 @@ from typing import Any, Optional
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from geometry_msgs.msg import PoseStamped
-from mavros_msgs.msg import GPSRAW, State
+from mavros_msgs.msg import GPSRAW, PositionTarget, State
 from mavros_msgs.srv import CommandBool, CommandLong
 from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import SetParametersResult
@@ -109,7 +109,18 @@ class MissionManager(Node):
     RTK_FLOAT_MANUAL_AFTER_SEC = 120.0
     RTK_STATUS_STALE_SEC = 15.0
     MAX_RTK_CORRECTION_AGE_SEC = 20.0
-    OFFBOARD_STREAM_SETTLE_SEC = 0.60
+    # START and the degraded RESUME/NEXT paths wait for cmd_vel_bridge's zero
+    # setpoint stream to be OBSERVED live before requesting OFFBOARD, instead
+    # of sleeping a fixed 0.60 s and assuming it. Live = every setpoint for
+    # the last ZERO_STREAM_LIVE_SEC was zero velocity with no gap longer than
+    # ZERO_STREAM_MAX_GAP_SEC, and the newest is at most ZERO_STREAM_FRESH_SEC
+    # old. Sized from the 2026-09-26 bags (publisher header stamps: 38-40 Hz,
+    # gap p99 67-76 ms, max 332 ms). Normally already true when START is
+    # pressed, so the wait is ~0.
+    ZERO_STREAM_LIVE_SEC = 0.30
+    ZERO_STREAM_MAX_GAP_SEC = 0.25
+    ZERO_STREAM_FRESH_SEC = 0.10
+    ZERO_STREAM_TIMEOUT_SEC = 1.0
     SERVICE_DISCOVERY_TIMEOUT_SEC = 3.0
     SERVICE_RESPONSE_TIMEOUT_SEC = 5.0
     VEHICLE_STATE_CONFIRM_TIMEOUT_SEC = 3.0
@@ -439,6 +450,15 @@ class MissionManager(Node):
             retained_qos,
             callback_group=self._io_group,
         )
+        # Observed only to prove the zero stream is live before OFFBOARD.
+        # cmd_vel_bridge publishes it BEST_EFFORT; odom_qos matches.
+        self.create_subscription(
+            PositionTarget,
+            "/mavros/setpoint_raw/local",
+            self._setpoint_stream_callback,
+            odom_qos,
+            callback_group=self._io_group,
+        )
         self.create_subscription(
             Bool,
             "/cmd_vel_bridge/backend_heartbeat_healthy",
@@ -676,6 +696,11 @@ class MissionManager(Node):
         self._spray_controller_state: Optional[str] = None
         self._spray_fault_reason: Optional[str] = None
         self._spray_status_last_rx_monotonic: Optional[float] = None
+        # Own lock: the setpoint callback runs at ~40 Hz and must never wait
+        # on the main control lock.
+        self._setpoint_stream_cond = threading.Condition()
+        self._last_setpoint_rx_monotonic: Optional[float] = None
+        self._zero_setpoint_stream_since: Optional[float] = None
         self._spray_status_timestamp_unix_ns: Optional[int] = None
         self._spray_success_keys: set[tuple[str, str]] = set()
         self._spray_failure_keys: dict[tuple[str, str], str] = {}
@@ -1896,6 +1921,61 @@ class MissionManager(Node):
     # ==============================================================
     # Spray controller handshake
     # ==============================================================
+    def _setpoint_stream_callback(self, message: PositionTarget) -> None:
+        now = time.monotonic()
+        velocity = message.velocity
+        zero = velocity.x == 0.0 and velocity.y == 0.0 and velocity.z == 0.0
+        with self._setpoint_stream_cond:
+            last = self._last_setpoint_rx_monotonic
+            if not zero:
+                self._zero_setpoint_stream_since = None
+            elif (
+                self._zero_setpoint_stream_since is None
+                or last is None
+                or now - last > self.ZERO_STREAM_MAX_GAP_SEC
+            ):
+                self._zero_setpoint_stream_since = now
+            self._last_setpoint_rx_monotonic = now
+            self._setpoint_stream_cond.notify_all()
+
+    def _zero_setpoint_stream_live(self, now: float) -> bool:
+        """Caller holds _setpoint_stream_cond."""
+        since = self._zero_setpoint_stream_since
+        last = self._last_setpoint_rx_monotonic
+        return (
+            since is not None
+            and last is not None
+            and now - last <= self.ZERO_STREAM_FRESH_SEC
+            and now - since >= self.ZERO_STREAM_LIVE_SEC
+        )
+
+    def _wait_for_zero_setpoint_stream(self) -> None:
+        """Return once the zero setpoint stream is observed live.
+
+        Replaces the fixed pre-OFFBOARD settle sleep. PX4 only enters
+        OFFBOARD on a live setpoint stream, and it must be zero so ARM cannot
+        be followed by a stale non-zero command. Raises on timeout so the
+        caller never requests OFFBOARD without it.
+        """
+        deadline = time.monotonic() + self.ZERO_STREAM_TIMEOUT_SEC
+        with self._setpoint_stream_cond:
+            while True:
+                now = time.monotonic()
+                if self._zero_setpoint_stream_live(now):
+                    return
+                remaining = deadline - now
+                if remaining <= 0.0:
+                    last = self._last_setpoint_rx_monotonic
+                    age = "never" if last is None else f"{now - last:.2f}s ago"
+                    raise RuntimeError(
+                        "Zero setpoint stream not live within "
+                        f"{self.ZERO_STREAM_TIMEOUT_SEC:.1f}s "
+                        f"(last setpoint {age}); check cmd_vel_bridge"
+                    )
+                # Setpoints notify at ~40 Hz; the short cap re-checks the
+                # time-based LIVE condition between them.
+                self._setpoint_stream_cond.wait(timeout=min(remaining, 0.05))
+
     def _spray_status_callback(self, message: String) -> None:
         try:
             payload = json.loads(message.data)
@@ -2751,7 +2831,7 @@ class MissionManager(Node):
             self._start_stage = "ZERO_SETPOINT_SETTLE"
             with self._lock:
                 self._disable_motion_preserve_estop()
-            time.sleep(self.OFFBOARD_STREAM_SETTLE_SEC)
+            self._wait_for_zero_setpoint_stream()
 
             self._start_stage = "SWITCHING_OFFBOARD"
             # Always requested, even if the last HEARTBEAT (up to ~1 s old)
@@ -2919,7 +2999,7 @@ class MissionManager(Node):
             if not px4_already_controlled:
                 # Degraded/recovery path: unchanged conservative sequence.
                 self._resume_stage = "ZERO_SETPOINT_SETTLE"
-                time.sleep(self.OFFBOARD_STREAM_SETTLE_SEC)
+                self._wait_for_zero_setpoint_stream()
 
                 self._resume_stage = "SWITCHING_OFFBOARD"
                 # ACK-confirmed and never skipped on a stale HEARTBEAT.
@@ -3020,7 +3100,7 @@ class MissionManager(Node):
 
             if not px4_already_controlled:
                 # Degraded/recovery path: unchanged conservative sequence.
-                time.sleep(self.OFFBOARD_STREAM_SETTLE_SEC)
+                self._wait_for_zero_setpoint_stream()
 
                 # ACK-confirmed and never skipped on a stale HEARTBEAT.
                 self._request_px4_mode("OFFBOARD")

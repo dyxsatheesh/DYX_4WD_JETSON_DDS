@@ -72,18 +72,18 @@ def test_long_running_motion_commands_validate_generation_before_commit():
         assert source.index("self._enable_motion()") > source.index(first_commit)
 
 
-def test_start_keeps_pre_offboard_settle_and_has_no_post_offboard_dwell():
-    assert "OFFBOARD_STREAM_SETTLE_SEC = 0.60" in SOURCE
+def test_start_waits_for_observed_zero_stream_and_has_no_fixed_dwell():
+    assert "OFFBOARD_STREAM_SETTLE_SEC" not in SOURCE
     assert "OFFBOARD_BEFORE_ARM_SETTLE_SEC" not in SOURCE
     start = function_source("_start_service")
-    settle = start.index("time.sleep(self.OFFBOARD_STREAM_SETTLE_SEC)")
+    settle = start.index("self._wait_for_zero_setpoint_stream()")
     offboard = start.index('self._request_px4_mode("OFFBOARD")')
     arm = start.index("self._request_arm(True)")
     commit = start.index('self._state = "RUNNING"')
     enable = start.index("self._enable_motion()")
     assert settle < offboard < arm < commit < enable
-    # The pre-OFFBOARD settle is the only fixed sleep left in START.
-    assert start.count("time.sleep(") == 1
+    # START has no fixed sleep left; the stream wait is event-driven.
+    assert start.count("time.sleep(") == 0
     # A newer hard stop between the OFFBOARD ACK and ARM prevents ARM.
     between = start[offboard:arm]
     assert "if self._emergency_stop:" in between

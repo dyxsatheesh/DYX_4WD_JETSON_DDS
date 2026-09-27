@@ -59,7 +59,7 @@ def _install_ros_stubs() -> None:
     module("geometry_msgs")
     module("geometry_msgs.msg", PoseStamped=_Msg)
     module("mavros_msgs")
-    module("mavros_msgs.msg", GPSRAW=_Msg, State=_Msg)
+    module("mavros_msgs.msg", GPSRAW=_Msg, PositionTarget=_Msg, State=_Msg)
     module("mavros_msgs.srv", CommandBool=_Srv, CommandLong=_Srv)
     module("nav_msgs")
     module("nav_msgs.msg", Odometry=_Msg, Path=_Msg)
@@ -148,6 +148,7 @@ def build_manager(
     manager._disable_motion_preserve_estop = record("disable_motion")
     manager._request_px4_mode = lambda m: events.append(f"set_mode:{m}")
     manager._request_arm = lambda value: events.append(f"arm:{value}")
+    manager._wait_for_zero_setpoint_stream = record("zero_stream_live")
     manager._publish_safety = record("publish_safety")
     manager._publish_status = lambda force=False: events.append(
         ("status", manager._state, manager._mission_enable, manager._stop_stage)
@@ -217,9 +218,8 @@ def test_resume_degraded_path_keeps_settle_and_reacquisition(sleeps, mode, armed
         state="PAUSED", mode=mode, armed=armed, connected=connected, fcu_age_sec=age
     )
     MissionManager._resume_service(manager, None, Response())
-    assert sleeps == [MissionManager.OFFBOARD_STREAM_SETTLE_SEC]
-    if mode != "OFFBOARD":
-        assert "set_mode:OFFBOARD" in events
+    assert sleeps == []  # observed-stream wait, no fixed settle
+    assert events.index("zero_stream_live") < events.index("set_mode:OFFBOARD")
     if not armed:
         assert "arm:True" in events
         assert events.index("arm:True") < events.index("enable_motion")
@@ -317,7 +317,8 @@ def test_next_degraded_path_keeps_settle(sleeps):
         state="WAITING_FOR_NEXT", execution_mode="MANUAL", armed=False
     )
     assert MissionManager._next_point_service(manager, None, Response()).success
-    assert sleeps == [MissionManager.OFFBOARD_STREAM_SETTLE_SEC]
+    assert sleeps == []
+    assert events.index("zero_stream_live") < events.index("set_mode:OFFBOARD")
     assert events.index("arm:True") < events.index("enable_motion")
 
 
@@ -369,12 +370,30 @@ def build_start_manager():
     return manager, events
 
 
-def test_start_has_only_pre_offboard_settle(sleeps):
+def test_start_waits_on_observed_zero_stream_not_a_fixed_sleep(sleeps):
     manager, events = build_start_manager()
     response = MissionManager._start_service(manager, None, Response())
     assert response.success, response.message
-    assert sleeps == [MissionManager.OFFBOARD_STREAM_SETTLE_SEC]
-    assert events.index("set_mode:OFFBOARD") < events.index("arm:True") < events.index("enable_motion")
+    assert sleeps == []
+    assert (
+        events.index("disable_motion")
+        < events.index("zero_stream_live")
+        < events.index("set_mode:OFFBOARD")
+        < events.index("arm:True")
+        < events.index("enable_motion")
+    )
+
+
+def test_start_fails_before_offboard_when_zero_stream_not_live(sleeps):
+    manager, events = build_start_manager()
+
+    def not_live():
+        raise RuntimeError("Zero setpoint stream not live within 1.0s")
+
+    manager._wait_for_zero_setpoint_stream = not_live
+    response = MissionManager._start_service(manager, None, Response())
+    assert not response.success and "Zero setpoint stream" in response.message
+    assert px4_calls(events) == [] and "enable_motion" not in events
 
 
 def test_start_offboard_rejection_never_arms(sleeps):
@@ -430,14 +449,14 @@ def test_start_estop_during_arm_request_invalidates(sleeps):
     assert not response.success and "enable_motion" not in events
 
 
-def test_start_estop_during_settle_invalidates(monkeypatch):
+def test_start_estop_during_settle_invalidates(sleeps):
     manager, events = build_start_manager()
 
-    def settle(seconds):
+    def settle():
         manager._emergency_stop = True
         manager._safety_generation += 1
 
-    monkeypatch.setattr(node_module.time, "sleep", settle)
+    manager._wait_for_zero_setpoint_stream = settle
     response = MissionManager._start_service(manager, None, Response())
     assert not response.success
     assert "arm:True" not in events and "enable_motion" not in events
@@ -613,3 +632,93 @@ def test_degraded_resume_requests_offboard_even_when_heartbeat_says_offboard(sle
     response = MissionManager._resume_service(manager, None, Response())
     assert response.success, response.message
     assert events.index("set_mode:OFFBOARD") < events.index("arm:True")
+
+
+# --------------------------------------------- observed zero setpoint stream
+
+
+class StreamClock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+
+def stream_manager(monkeypatch):
+    clock = StreamClock()
+    monkeypatch.setattr(node_module.time, "monotonic", clock.monotonic)
+    manager = object.__new__(MissionManager)
+    manager._setpoint_stream_cond = threading.Condition()
+    manager._last_setpoint_rx_monotonic = None
+    manager._zero_setpoint_stream_since = None
+    return manager, clock
+
+
+def setpoint(vx=0.0, vy=0.0, vz=0.0):
+    return SimpleNamespace(velocity=SimpleNamespace(x=vx, y=vy, z=vz))
+
+
+def feed_stream(manager, clock, seconds, *, period=0.025, **velocity):
+    for _ in range(int(round(seconds / period))):
+        clock.t += period
+        MissionManager._setpoint_stream_callback(manager, setpoint(**velocity))
+
+
+def live(manager, clock):
+    return MissionManager._zero_setpoint_stream_live(manager, clock.t)
+
+
+def test_zero_stream_live_after_continuous_window(monkeypatch):
+    manager, clock = stream_manager(monkeypatch)
+    feed_stream(manager, clock, 0.25)
+    assert not live(manager, clock)
+    feed_stream(manager, clock, 0.10)
+    assert live(manager, clock)
+
+
+def test_nonzero_setpoint_restarts_the_window(monkeypatch):
+    manager, clock = stream_manager(monkeypatch)
+    feed_stream(manager, clock, 0.5)
+    feed_stream(manager, clock, 0.025, vx=0.3)
+    assert not live(manager, clock)
+    feed_stream(manager, clock, 0.25)
+    assert not live(manager, clock)
+    feed_stream(manager, clock, 0.10)
+    assert live(manager, clock)
+
+
+def test_gap_restarts_the_window(monkeypatch):
+    manager, clock = stream_manager(monkeypatch)
+    feed_stream(manager, clock, 0.5)
+    clock.t += MissionManager.ZERO_STREAM_MAX_GAP_SEC + 0.01
+    feed_stream(manager, clock, 0.1)
+    assert not live(manager, clock)
+
+
+def test_measured_worst_gap_does_not_break_a_live_stream_for_long(monkeypatch):
+    # 2026-09-26 bags: p99 gap 67-76 ms stays live throughout.
+    manager, clock = stream_manager(monkeypatch)
+    feed_stream(manager, clock, 0.5, period=0.075)
+    assert live(manager, clock)
+
+
+def test_stale_stream_is_not_live(monkeypatch):
+    manager, clock = stream_manager(monkeypatch)
+    feed_stream(manager, clock, 0.5)
+    clock.t += MissionManager.ZERO_STREAM_FRESH_SEC + 0.01
+    assert not live(manager, clock)
+
+
+def test_wait_returns_immediately_when_already_live(monkeypatch):
+    manager, clock = stream_manager(monkeypatch)
+    feed_stream(manager, clock, 0.5)
+    MissionManager._wait_for_zero_setpoint_stream(manager)
+
+
+def test_wait_times_out_without_a_stream(monkeypatch):
+    manager, _clock = stream_manager(monkeypatch)
+    monkeypatch.setattr(node_module.time, "monotonic", time.perf_counter)
+    manager.ZERO_STREAM_TIMEOUT_SEC = 0.05
+    with pytest.raises(RuntimeError, match="last setpoint never"):
+        MissionManager._wait_for_zero_setpoint_stream(manager)
