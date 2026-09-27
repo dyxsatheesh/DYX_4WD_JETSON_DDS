@@ -16,6 +16,7 @@ import threading
 import time
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -59,7 +60,7 @@ def _install_ros_stubs() -> None:
     module("geometry_msgs.msg", PoseStamped=_Msg)
     module("mavros_msgs")
     module("mavros_msgs.msg", GPSRAW=_Msg, State=_Msg)
-    module("mavros_msgs.srv", CommandBool=_Srv, SetMode=_Srv)
+    module("mavros_msgs.srv", CommandBool=_Srv, CommandLong=_Srv)
     module("nav_msgs")
     module("nav_msgs.msg", Odometry=_Msg, Path=_Msg)
     module("rcl_interfaces")
@@ -551,3 +552,64 @@ def test_resume_refused_while_spray_fault_latched(sleeps):
     assert not response.success
     assert "MARKING_HOLD_LOST_DURING_SPRAY" in response.message
     assert manager._state == "PAUSED" and "enable_motion" not in events
+
+
+# ------------------------------------------- OFFBOARD must be PX4-ACK confirmed
+
+
+def mode_request_manager(*, success: bool, result: int = 0):
+    manager = object.__new__(MissionManager)
+    manager._command_client = object()
+    calls: list = []
+
+    def call(client, request, label):
+        calls.append((client, request, label))
+        return SimpleNamespace(success=success, result=result)
+
+    manager._call_service = call
+    return manager, calls
+
+
+def test_offboard_uses_acked_do_set_mode_not_fire_and_forget_set_mode():
+    manager, calls = mode_request_manager(success=True)
+    MissionManager._request_px4_mode(manager, "OFFBOARD")
+    [(client, request, _label)] = calls
+    assert client is manager._command_client
+    assert request.command == 176  # MAV_CMD_DO_SET_MODE
+    assert request.param1 == 1.0  # MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+    assert request.param2 == 6.0  # PX4_CUSTOM_MAIN_MODE_OFFBOARD
+    assert request.param3 == 0.0 and request.confirmation == 0
+    assert request.broadcast is False
+    source = Path(node_module.__file__).read_text(encoding="utf-8")
+    assert 'SetMode, "/mavros/set_mode"' not in source
+
+
+@pytest.mark.parametrize("result", [1, 2, 4])  # TEMP_REJECTED, DENIED, FAILED
+def test_offboard_not_accepted_raises(result):
+    manager, _calls = mode_request_manager(success=False, result=result)
+    with pytest.raises(RuntimeError, match="did not accept mode OFFBOARD"):
+        MissionManager._request_px4_mode(manager, "OFFBOARD")
+
+
+def test_only_offboard_is_ever_requested():
+    manager, calls = mode_request_manager(success=True)
+    with pytest.raises(RuntimeError):
+        MissionManager._request_px4_mode(manager, "MANUAL")
+    assert calls == []
+
+
+def test_start_requests_offboard_even_when_heartbeat_already_says_offboard(sleeps):
+    # After an automatic STOP PX4 is left disarmed in OFFBOARD; that ~1 s old
+    # HEARTBEAT must not let START skip the ACK-confirmed request and ARM.
+    manager, events = build_start_manager()
+    manager._px4_mode = "OFFBOARD"
+    response = MissionManager._start_service(manager, None, Response())
+    assert response.success, response.message
+    assert events.index("set_mode:OFFBOARD") < events.index("arm:True")
+
+
+def test_degraded_resume_requests_offboard_even_when_heartbeat_says_offboard(sleeps):
+    manager, events = build_manager(state="PAUSED", mode="OFFBOARD", armed=False)
+    response = MissionManager._resume_service(manager, None, Response())
+    assert response.success, response.message
+    assert events.index("set_mode:OFFBOARD") < events.index("arm:True")

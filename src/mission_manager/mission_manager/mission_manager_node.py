@@ -37,7 +37,7 @@ import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.msg import GPSRAW, State
-from mavros_msgs.srv import CommandBool, SetMode
+from mavros_msgs.srv import CommandBool, CommandLong
 from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -114,6 +114,18 @@ class MissionManager(Node):
     SERVICE_RESPONSE_TIMEOUT_SEC = 5.0
     VEHICLE_STATE_CONFIRM_TIMEOUT_SEC = 3.0
     GOAL_PLANE_OVERSHOOT_TRIGGER_M = 0.020
+
+    # OFFBOARD is requested with MAV_CMD_DO_SET_MODE over /mavros/cmd/command,
+    # which MAVROS only reports as success on an ACCEPTED COMMAND_ACK.
+    # /mavros/set_mode is NOT used: it sends a SET_MODE message and returns
+    # mode_sent=true without waiting for PX4 (mavros sys_status set_mode_cb),
+    # so a lost or refused mode change would be followed by ARM in the old
+    # mode. Values: MAVLink MAV_CMD_DO_SET_MODE / MAV_MODE_FLAG_CUSTOM_MODE_
+    # ENABLED, PX4 px4_custom_mode.h PX4_CUSTOM_MAIN_MODE_OFFBOARD.
+    MAV_CMD_DO_SET_MODE = 176
+    MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1
+    MAV_RESULT_ACCEPTED = 0
+    PX4_CUSTOM_MAIN_MODE = {"OFFBOARD": 6}
 
     # Non-blocking AUTO-continue hold: after a point reaches COMPLETED (or
     # FAILED with AUTO continue), hold the rover stopped for this long before
@@ -570,8 +582,8 @@ class MissionManager(Node):
         self._arming_client = self.create_client(
             CommandBool, "/mavros/cmd/arming", callback_group=self._io_group
         )
-        self._mode_client = self.create_client(
-            SetMode, "/mavros/set_mode", callback_group=self._io_group
+        self._command_client = self.create_client(
+            CommandLong, "/mavros/cmd/command", callback_group=self._io_group
         )
 
         # ----------------------------------------------------------
@@ -2467,11 +2479,34 @@ class MissionManager(Node):
         return result
 
     def _request_px4_mode(self, mode: str) -> None:
-        request = SetMode.Request()
-        request.custom_mode = mode
-        result = self._call_service(self._mode_client, request, f"set_mode({mode})")
-        if not bool(result.mode_sent):
-            raise RuntimeError(f"PX4 rejected mode {mode}")
+        """Change PX4 mode and return only once PX4 has ACCEPTED it.
+
+        Raises on anything but an ACCEPTED COMMAND_ACK (rejection or ACK
+        timeout), so a caller never ARMs or enables motion after a mode
+        change PX4 did not take.
+        """
+        main_mode = self.PX4_CUSTOM_MAIN_MODE.get(mode.upper())
+        if main_mode is None:
+            raise RuntimeError(f"Mission Manager does not request PX4 mode {mode}")
+        request = CommandLong.Request()
+        request.broadcast = False
+        request.command = self.MAV_CMD_DO_SET_MODE
+        request.confirmation = 0
+        request.param1 = float(self.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED)
+        request.param2 = float(main_mode)
+        request.param3 = 0.0
+        request.param4 = 0.0
+        request.param5 = 0.0
+        request.param6 = 0.0
+        request.param7 = 0.0
+        result = self._call_service(
+            self._command_client, request, f"DO_SET_MODE({mode})"
+        )
+        if not bool(result.success):
+            raise RuntimeError(
+                f"PX4 did not accept mode {mode} "
+                f"(MAV_RESULT={getattr(result, 'result', None)})"
+            )
 
     def _request_arm(self, arm: bool) -> None:
         request = CommandBool.Request()
@@ -2719,18 +2754,17 @@ class MissionManager(Node):
             time.sleep(self.OFFBOARD_STREAM_SETTLE_SEC)
 
             self._start_stage = "SWITCHING_OFFBOARD"
-            if self._px4_mode != "OFFBOARD":
-                self._request_px4_mode("OFFBOARD")
-                # SET_MODE is COMMAND_ACK-confirmed by PX4 before this service
-                # call returns -- that IS the confirmation. Don't also wait for
-                # /mavros/state to catch up on PX4's ~1 Hz HEARTBEAT.
-                # _monitor_runtime_px4_control() re-checks this against real
-                # telemetry every control tick once RUNNING and will pause the
-                # mission within one heartbeat if this is ever wrong.
-                with self._lock:
-                    self._px4_mode = "OFFBOARD"
+            # Always requested, even if the last HEARTBEAT (up to ~1 s old)
+            # says OFFBOARD: PX4 may have left it since. _request_px4_mode
+            # returns only on an ACCEPTED COMMAND_ACK, which IS the
+            # confirmation; no wait for /mavros/state's ~1 Hz HEARTBEAT.
+            # _monitor_runtime_px4_control() still re-checks real telemetry
+            # every control tick once RUNNING.
+            self._request_px4_mode("OFFBOARD")
+            with self._lock:
+                self._px4_mode = "OFFBOARD"
 
-            # No fixed post-OFFBOARD dwell: the SET_MODE ACK above is the
+            # No fixed post-OFFBOARD dwell: the DO_SET_MODE ACK above is the
             # OFFBOARD confirmation and the zero stream is already live. ARM
             # follows immediately, but never after a newer hard stop.
             with self._lock:
@@ -2888,10 +2922,10 @@ class MissionManager(Node):
                 time.sleep(self.OFFBOARD_STREAM_SETTLE_SEC)
 
                 self._resume_stage = "SWITCHING_OFFBOARD"
-                if self._px4_mode != "OFFBOARD":
-                    self._request_px4_mode("OFFBOARD")
-                    with self._lock:
-                        self._px4_mode = "OFFBOARD"
+                # ACK-confirmed and never skipped on a stale HEARTBEAT.
+                self._request_px4_mode("OFFBOARD")
+                with self._lock:
+                    self._px4_mode = "OFFBOARD"
 
                 self._resume_stage = "ARMING"
                 if not self._px4_armed:
@@ -2988,10 +3022,10 @@ class MissionManager(Node):
                 # Degraded/recovery path: unchanged conservative sequence.
                 time.sleep(self.OFFBOARD_STREAM_SETTLE_SEC)
 
-                if self._px4_mode != "OFFBOARD":
-                    self._request_px4_mode("OFFBOARD")
-                    with self._lock:
-                        self._px4_mode = "OFFBOARD"
+                # ACK-confirmed and never skipped on a stale HEARTBEAT.
+                self._request_px4_mode("OFFBOARD")
+                with self._lock:
+                    self._px4_mode = "OFFBOARD"
 
                 if not self._px4_armed:
                     self._request_arm(True)
