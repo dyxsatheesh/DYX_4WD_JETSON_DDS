@@ -80,6 +80,23 @@ class SprayController(Node):
     JOURNAL_RELEASE_UNCONFIRMED = "RELEASE_UNCONFIRMED"
     JOURNAL_COMPLETED = "COMPLETED"
     JOURNAL_FAILED_SAFE = "FAILED_SAFE"
+    # Spray cut short by an operator/mission stop with the RELEASE
+    # acknowledged by PX4. Not uncertain, so it neither latches a fault nor
+    # triggers recovery on restart.
+    JOURNAL_ABORTED_BY_STOP = "ABORTED_BY_STOP"
+
+    # Abort reasons that an operator STOP / E-stop produces. The node sees
+    # /marking_active, /mission_enable, /emergency_stop and the raw-GNSS gate
+    # in /mission_manager/status drop together, in whichever order they
+    # arrive, so any of the four can be recorded first.
+    STOP_ABORT_REASONS = frozenset(
+        {
+            "MARKING_HOLD_LOST_DURING_SPRAY",
+            "MISSION_DISABLED_DURING_SPRAY",
+            "EMERGENCY_STOP_DURING_SPRAY",
+            "RAW_GNSS_SPRAY_GATE_LOST_DURING_SPRAY",
+        }
+    )
 
     def __init__(self) -> None:
         super().__init__("spray_controller")
@@ -90,7 +107,7 @@ class SprayController(Node):
         self.declare_parameter("enabled", True)
         self.declare_parameter("press_value", -1.0)
         self.declare_parameter("release_value", 0.090909)
-        self.declare_parameter("spray_duration_sec", 0.50)
+        self.declare_parameter("spray_duration_sec", 0.20)
         self.declare_parameter("pre_spray_stable_sec", 0.25)
 
         self.declare_parameter("command_timeout_sec", 1.0)
@@ -1106,6 +1123,26 @@ class SprayController(Node):
         if self.failure_after_release is not None:
             reason = self.failure_after_release
 
+            if self._aborted_by_stop(reason):
+                # The mission was stopped mid-spray and PX4 confirmed the
+                # servo is released: report the point as not sprayed, but do
+                # not latch a fault that would silently block every later
+                # mission until someone calls /spray/reset_fault.
+                self._write_journal(
+                    state=self.JOURNAL_ABORTED_BY_STOP,
+                    reason=reason,
+                )
+                self._publish_result(
+                    result="FAILED",
+                    reason=reason,
+                )
+                self.state = self.STATE_WAIT_MARKING_CLEAR
+                self.get_logger().warn(
+                    "Spray cut short by mission stop; RELEASE confirmed, "
+                    f"no fault latched: {reason}"
+                )
+                return
+
             self._write_journal(
                 state=self.JOURNAL_FAILED_SAFE,
                 reason=reason,
@@ -1144,6 +1181,18 @@ class SprayController(Node):
             f"duration={self.spray_duration_sec:.3f}s | "
             f"release={self.release_value:+.3f} | "
             f"timing={self._transaction_timing_summary()}"
+        )
+
+    def _aborted_by_stop(self, reason: str) -> bool:
+        """True when an abort was caused by the mission being stopped.
+
+        Evaluated at RELEASE ACK time, after the stop's E-stop and
+        mission-disable messages have had the PX4 round trip to arrive. A
+        marking-hold loss while the mission is still enabled and the E-stop
+        clear stays a latched fault.
+        """
+        return reason in self.STOP_ABORT_REASONS and (
+            self.emergency_stop or not self.mission_enable
         )
 
     def _transaction_timing_summary(self) -> str:
