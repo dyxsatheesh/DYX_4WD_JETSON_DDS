@@ -1,6 +1,7 @@
 """Patch-5 zero-translation pivot plus explicit-yaw safety tests."""
 
 import ast
+import json
 import math
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 RPP = ROOT / "src/rpp_controller/rpp_controller/rpp_controller_node.py"
 BRIDGE = ROOT / "src/jetson_4wd_control/jetson_4wd_control/cmd_vel_bridge.py"
 STREAM_RATE = ROOT / "src/jetson_4wd_control/jetson_4wd_control/mavlink_stream_rate.py"
+BRIDGE_STATS = ROOT / "src/jetson_4wd_control/jetson_4wd_control/bridge_stats.py"
 LAUNCH = ROOT / "src/rover_bringup/launch/rover.launch.py"
 MODE = "rpp_explicit_yaw_enabled"
 TOPICS = {False: "/rpp/velocity_ned", True: "/rpp/command"}
@@ -39,7 +41,7 @@ def mode_setup(path, owner):
 
 class Message:
     def __init__(self):
-        self.header = NS(stamp=None, frame_id="")
+        self.header = NS(stamp=NS(sec=0, nanosec=0), frame_id="")
         self.vector = NS(x=0.0, y=0.0, z=0.0)
         self.velocity = NS(x=0.0, y=0.0, z=0.0)
         self.position = NS(x=0.0, y=0.0, z=0.0)
@@ -109,7 +111,7 @@ class Node:
         )
 
     def create_timer(self, period, callback):
-        self.period = period
+        self.timers = getattr(self, "timers", []) + [(period, callback)]
         return callback
 
     def create_client(self, kind, name):
@@ -159,6 +161,11 @@ class Future:
         return self.value
 
 
+class StringMessage:
+    def __init__(self):
+        self.data = ""
+
+
 class MessageInterval:
     class Request:
         def __init__(self):
@@ -171,9 +178,13 @@ def namespace():
                 VOLATILE=4, TRANSIENT_LOCAL=5)
     stream_rate = {"__name__": "mavlink_stream_rate"}
     exec(compile(STREAM_RATE.read_text(), str(STREAM_RATE), "exec"), stream_rate)
-    return dict(Node=Node, math=math, Any=object, Vector3Stamped=Vector,
+    bridge_stats = {"__name__": "bridge_stats"}
+    exec(compile(BRIDGE_STATS.read_text(), str(BRIDGE_STATS), "exec"), bridge_stats)
+    return dict(Node=Node, math=math, json=json, Any=object, Vector3Stamped=Vector,
                 RppCommand=Atomic, PositionTarget=Target, State=Message,
-                Bool=Message, UInt64=Message, ParameterDescriptor=NS,
+                Bool=Message, String=StringMessage, UInt64=Message,
+                ParameterDescriptor=NS,
+                BridgeStreamStats=bridge_stats["BridgeStreamStats"],
                 QoSProfile=NS, HistoryPolicy=policy, ReliabilityPolicy=policy,
                 DurabilityPolicy=policy, MessageInterval=MessageInterval,
                 StreamRateRequester=stream_rate["StreamRateRequester"],
@@ -203,9 +214,11 @@ def rpp(enabled=None):
     execute(selection, env)
     # Real course-bias helpers, feature off: pre-existing harness behaviour.
     execute([method(RPP, "RPPController", "_reset_moving_course_bias"),
-             method(RPP, "RPPController", "_update_moving_course_bias")], env)
+             method(RPP, "RPPController", "_update_moving_course_bias"),
+             method(RPP, "RPPController", "course_compensated_yaw")], env)
     node._reset_moving_course_bias = env["_reset_moving_course_bias"].__get__(node)
     node._update_moving_course_bias = env["_update_moving_course_bias"].__get__(node)
+    node.course_compensated_yaw = env["course_compensated_yaw"].__get__(node)
     node.moving_course_bias_enabled = False
     node._reset_moving_course_bias()
     # Pivot yaw-rate ramp off: pre-existing stationary-pivot behaviour.
@@ -297,6 +310,14 @@ def _bind_real_yaw_rate_command(node, env):
     node.moving_yaw_rate_output = 0.0
     node.moving_yaw_rate_last_time = None
     node.last_commanded_yaw_rate_radps = 0.0
+    # Measured-yaw-rate damping (c84e7db), launch values; rover not rotating.
+    node.current_yaw_rate_radps = 0.0
+    node.moving_yaw_damping_gain_min = 0.20
+    node.moving_yaw_damping_gain_max = 0.32
+    node.moving_yaw_rate_filter_alpha = 0.20
+    node.moving_yaw_damping_limit = 0.08
+    node.steering_reference_speed = 0.60
+    node.filtered_moving_yaw_rate = 0.0
     node.CONTROL_HZ = 20.0
     node.deceleration_max_dt_sec = 0.10
     node.normalize_angle = lambda v: math.atan2(math.sin(v), math.cos(v))
@@ -499,7 +520,10 @@ def test_production_c_to_p1_post_pivot_reanchor_is_disabled():
     assert "self.reanchor_c_to_p1_after_pivot()" not in RPP.read_text()
 
 
-def test_heading_speed_supervisor_keeps_full_speed_through_fixed_4deg_boundary():
+def test_heading_speed_supervisor_never_caps_speed_on_heading_error():
+    # ba5c182 (V4.2) removed the intermediate 0.40 m/s heading-speed tier:
+    # heading error alone no longer reduces translation; the result is only
+    # clamped to [0, cruise_speed].
     env = {"math": math}
     execute([method(RPP, "RPPController", "apply_heading_speed_limit")], env)
     node = NS(
@@ -511,18 +535,14 @@ def test_heading_speed_supervisor_keeps_full_speed_through_fixed_4deg_boundary()
     )
     fn = env["apply_heading_speed_limit"]
 
-    # Fixed coordination boundary: requested 0.60 m/s is retained through 4deg.
-    assert fn(node, 0.60, math.radians(0.0)) == pytest.approx(0.60)
-    assert fn(node, 0.60, math.radians(2.0)) == pytest.approx(0.60)
-    assert fn(node, 0.60, math.radians(3.0)) == pytest.approx(0.60)
-    assert fn(node, 0.60, math.radians(4.0)) == pytest.approx(0.60)
-
-    # Immediately outside the 4deg envelope, use the existing alignment cap.
-    assert fn(node, 0.60, math.radians(4.01)) == pytest.approx(0.40)
-    assert fn(node, 0.60, math.radians(-4.01)) == pytest.approx(0.40)
+    for degrees in (0.0, 2.0, 4.0, 4.01, -4.01, 30.0, 180.0):
+        assert fn(node, 0.60, math.radians(degrees)) == pytest.approx(0.60)
 
     # Never raise a lower speed from another authority/profile.
     assert fn(node, 0.25, math.radians(5.0)) == pytest.approx(0.25)
+    # Still clamped to cruise speed and to zero.
+    assert fn(node, 0.90, math.radians(0.0)) == pytest.approx(0.60)
+    assert fn(node, -0.10, math.radians(0.0)) == 0.0
 
 
 def test_patch3_adapter_never_reconstructs_yaw_from_velocity():
@@ -557,7 +577,10 @@ def test_a_bridge_preserves_enu_mask_stream_rate_and_timeout():
     assert (out.velocity.x, out.velocity.y, out.velocity.z) == (0.4, 0.3, 0.0)
     assert out.type_mask == 3527
     assert out.yaw == out.yaw_rate == 0.0
-    assert node.period == 1.0 / 50.0
+    # a8cd701: 50 Hz stream, gates/keep-alive checked at 100 Hz (CHECK_HZ).
+    assert node.STREAM_HZ == 50.0
+    periods = {callback.__name__: period for period, callback in node.timers}
+    assert periods["_control_loop"] == 1.0 / 100.0
     stale = Time()
     stale.nanoseconds = -300_000_000
     node.latest_command_time = stale

@@ -28,7 +28,8 @@ def test_terminal_flag_defaults_off_and_preserves_legacy_30mm_contract():
     assert 'declare_parameter("precision_terminal_enabled", False)' in NODE
     assert '"precision_terminal_enabled": False' in LAUNCH
     assert '"precision_terminal_radial_tolerance_m", 0.010' in NODE
-    assert '"waypoint_tolerance_m": 0.03' in LAUNCH
+    # fcc3785 tightened the legacy launch gate 30 -> 20 mm.
+    assert '"waypoint_tolerance_m": 0.02' in LAUNCH
     assert "target_distance <= self.waypoint_tolerance" in function_source(
         "latch_exact_marking_stop"
     )
@@ -98,11 +99,12 @@ def test_10mm_capture_preempts_legacy_latch_and_every_moving_floor():
 
 
 def test_precision_mode_20mm_does_not_enter_legacy_30mm_latch():
-    """The 10--30 mm annulus remains moving under precision authority."""
+    """The 10--20 mm annulus remains moving under precision authority."""
 
     control = function_source("control_loop")
     assert '"precision_terminal_radial_tolerance_m", 0.010' in NODE
-    assert '"waypoint_tolerance_m": 0.03' in LAUNCH
+    # fcc3785 tightened the legacy launch gate 30 -> 20 mm.
+    assert '"waypoint_tolerance_m": 0.02' in LAUNCH
     assert (
         "self.legacy_terminal_stop_active\n"
         "            and goal_requires_precision_stop\n"

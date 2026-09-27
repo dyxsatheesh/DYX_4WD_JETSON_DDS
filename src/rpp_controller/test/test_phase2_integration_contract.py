@@ -106,7 +106,9 @@ def test_phase2_cannot_create_an_early_terminal_zero():
 
     assert '"precision_terminal_target_speed_mps", 0.15' in init_source
     assert '"precision_minimum_moving_speed_mps", 0.04' in init_source
-    assert '"waypoint_tolerance_m": 0.03' in LAUNCH_SOURCE
+    # fcc3785 tightened the launch stop gate 30 -> 20 mm (with
+    # mission_manager marking_tolerance_m).
+    assert '"waypoint_tolerance_m": 0.02' in LAUNCH_SOURCE
     assert "max(resolved_speed, self.precision_minimum_moving_speed)" in publication
     assert control.index("latch_exact_marking_stop") < control.index(
         "publish_precision_velocity_ned"
@@ -153,16 +155,36 @@ def test_legacy_publisher_mode_a_transport_remains_direct():
     b_source = "\n".join(ast.unparse(node) for node in selection.body)
     a_source = "\n".join(ast.unparse(node) for node in selection.orelse)
 
-    assert "publish_with_yaw(msg, yaw_enu_rad)" in b_source
-    assert "self.velocity_pub.publish(msg)" not in b_source
+    # B: a zero/no-yaw-rate command goes out as the adapter's atomic no-yaw
+    # stop; every moving command carries course-compensated yaw (9089c50)
+    # plus Jetson-owned yaw-rate (102d103).
+    zero_split = [
+        node
+        for node in selection.body
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "output_speed <= 1e-09"
+    ]
+    assert len(zero_split) == 1
+    zero_source = "\n".join(ast.unparse(node) for node in zero_split[0].body)
+    moving_source = "\n".join(
+        ast.unparse(node) for node in zero_split[0].orelse
+    )
+    assert zero_source == "self.velocity_pub.publish(msg)"
+    assert (
+        "publish_with_yaw(msg, self.course_compensated_yaw(yaw_enu_rad), "
+        "yaw_rate_enu)"
+    ) in moving_source
+    assert "publish_with_yaw" in b_source
 
     assert "self.velocity_pub.publish(msg)" in a_source
     assert "publish_with_yaw" not in a_source
 
 
 def test_native_pivot_math_remains_byte_exact():
+    # Re-pinned by d8e31d9 (intentional); same pin as
+    # test_legacy_alignment_lifecycle.NATIVE_HASH.
     expected = (
-        "ab1a69086a10d69a3719dea04fdfd772887dfec02ee318020c47e93b3e0cea00"
+        "565ee3785dca8b06443498848866bb26948afd6fbf19fb76342b9c2a96795f29"
     )
     digest = hashlib.sha256(
         _method_source("terminal_native_pivot_command").encode("utf-8")
@@ -247,7 +269,10 @@ def test_precision_reset_boundaries_are_explicit():
         "PATH_INSTALLED",
         "GEOMETRY_INVALIDATED",
         "LOCALIZATION_JUMP",
-        "PIVOT_COMPLETE_RECAPTURE_ARMED",
+        # e9b91fa: post-pivot reanchor removed; the pivot-complete
+        # boundary resets under the fixed-geometry reasons.
+        "C_TO_P1_POST_PIVOT_FIXED_GEOMETRY",
+        "POST_PIVOT_LATER_LEG_FIXED_GEOMETRY",
         "PIVOT_RECAPTURE_COMPLETE",
     ):
         assert reason in NODE_SOURCE

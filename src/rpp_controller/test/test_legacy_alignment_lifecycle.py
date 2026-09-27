@@ -1028,7 +1028,11 @@ def test_c_to_p1_geometry_is_not_reanchored_by_alignment_adapter():
     assert "reanchor_runtime_path_after_pivot" not in reanchor_block
 
 def test_mid_leg_reentry_is_suppressed_during_intentional_xtrack_recovery():
-    """V3 regression: 15deg path error must not interrupt 22deg recovery."""
+    """Xtrack recovery below pivot_enter_angle must not re-trigger a pivot.
+
+    ce2c42d bounded the guard by pivot_enter_angle (launch 15deg) instead of
+    MAX_MOVING_HEADING_ERROR_RAD (30deg).
+    """
     method = _controller_method("suppress_mid_leg_alignment_reentry")
     namespace = {"math": math}
     module = ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[]))
@@ -1037,16 +1041,17 @@ def test_mid_leg_reentry_is_suppressed_during_intentional_xtrack_recovery():
 
     class Dummy:
         MAX_MOVING_HEADING_ERROR_RAD = math.radians(30.0)
+        pivot_enter_angle = math.radians(15.0)
         xtrack_priority_enter = 0.015
         xtrack_priority_active = False
 
     dummy = Dummy()
 
-    assert guard(dummy, math.radians(15.1), 0.40) is True
-    assert guard(dummy, math.radians(22.0), 0.40) is True
+    assert guard(dummy, math.radians(11.0), 0.40) is True
+    assert guard(dummy, math.radians(14.9), 0.40) is True
 
     dummy.xtrack_priority_active = True
-    assert guard(dummy, math.radians(20.0), 0.010) is True
+    assert guard(dummy, math.radians(12.0), 0.010) is True
 
 
 def test_mid_leg_reentry_guard_still_allows_real_alignment_failures():
@@ -1059,13 +1064,17 @@ def test_mid_leg_reentry_guard_still_allows_real_alignment_failures():
 
     class Dummy:
         MAX_MOVING_HEADING_ERROR_RAD = math.radians(30.0)
+        pivot_enter_angle = math.radians(15.0)
         xtrack_priority_enter = 0.015
         xtrack_priority_active = False
 
     dummy = Dummy()
 
     assert guard(dummy, math.radians(31.0), 0.40) is False
-    assert guard(dummy, math.radians(20.0), 0.005) is False
+    # At/above pivot_enter_angle stationary pivot owns it, even mid-recovery.
+    assert guard(dummy, math.radians(15.0), 0.40) is False
+    assert guard(dummy, math.radians(22.0), 0.40) is False
+    assert guard(dummy, math.radians(10.0), 0.005) is False
 
 
 def test_control_loop_gates_mid_leg_alignment_reentry_with_recovery_guard():

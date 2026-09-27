@@ -212,12 +212,16 @@ achieves a real stop.
   an explicit `/spray/reset_fault`; a persistent journal prevents re-spray
   after a mid-spray crash. Independent hard watchdog `hard_press_timeout_sec
   = 5.0`.
-- **Spray point-gating lives in `mission_manager`**: 30mm radial tolerance
-  (`marking_tolerance_m: 0.03`), rover must sit under
-  `stationary_speed_tolerance_mps: 0.01` continuously for
-  `arrival_settle_sec: 0.30` before spray is requested, then held for
-  `marking_hold_sec: 3.00` total — all confirmed live in the same-day param
-  capture.
+- **Spray point-gating lives in `mission_manager`**: ⚠ updated 2026-09-27.
+  The stop/marking tolerance is **20 mm** since `fcc3785` (2026-09-19:
+  `marking_tolerance_m` and RPP `waypoint_tolerance_m` both 0.03 -> 0.02).
+  Since `9c4aa8c` spray and COMPLETED are authorized **only** by the raw-GNSS
+  gate: raw RTK-FIXED radial vs the surveyed point <= 30 mm
+  (`raw_gnss_spray_tolerance_m: 0.030`, 0.5 s window since `737cf63`). The
+  rover must be stationary (`stationary_speed_tolerance_mps: 0.01`). The
+  2026-08-31 values this bullet used to quote (30 mm,
+  `arrival_settle_sec: 0.30`, `marking_hold_sec: 3.00`) were the live capture
+  of that day; read `rover.launch.py` for current ones.
 - **Symlink-install is confirmed**: the local Mac `install/` tree's
   egg-links point at the Jetson's own build path
   (`/home/flash/rover_ws/build/<pkg>`), for `jetson_4wd_control`,
@@ -305,6 +309,11 @@ achieves a real stop.
 > `precision_pivot_stop_speed_tolerance_mps` and the new
 > `post_pivot_reanchor_all_legs`, use the table in §"2026-09-01 field
 > session" instead. Everything else below still held as of that session.
+
+> ⚠ **Also moved since:** `waypoint_tolerance_m` and `marking_tolerance_m`
+> are **0.02** since `fcc3785` (2026-09-19); every "30 mm latch" in this table
+> and in the dated sections below describes the 30 mm build of its day. The
+> raw-GNSS spray gate (`9c4aa8c`) is still 30 mm.
 
 Pulled from `bags_jet/evening_session_20260831/mission.csv_20260831_191653/params/*.yaml`
 — **prefer this over any static `.params` export in `px4-params/`**, which

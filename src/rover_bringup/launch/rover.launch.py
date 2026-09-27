@@ -308,8 +308,8 @@ def generate_launch_description() -> LaunchDescription:
                         # bypasses this additional manager dwell.
                         "marking_hold_sec": 3.00,
                         "stationary_speed_tolerance_mps": 0.01,
-                        # Extension/dummy semantic goal uses the SAME exact
-                        # 30 mm waypoint radius as marking points, but is never
+                        # Extension/dummy semantic goal uses its own exact
+                        # 30 mm radius (marking points use 20 mm), but is never
                         # sprayed or counted as a marking point.
                         "dummy_arrival_tolerance_m": 0.03,
                         # Spray is requested only after positional verification.
@@ -383,7 +383,7 @@ def generate_launch_description() -> LaunchDescription:
                         #   P1/P2/P3/... AND extension/dummy goals both use
                         #   the final 0.50 m deceleration profile.
                         #   Fixed 1.00 m/s mission: 1.00 -> 0.15 m/s.
-                        #   exact zero remains radial <=30 mm for BOTH classes.
+                        #   exact zero remains radial <=20 mm (waypoint_tolerance_m) for BOTH classes.
                         #   Only P1/P2/P3/... are spray/marking points.
                         # Pass-through/interpolation points do not stop/decelerate.
                         "cruise_speed_mps": CRUISE_SPEED_MPS,
@@ -461,7 +461,7 @@ def generate_launch_description() -> LaunchDescription:
                         "command_speed_fall_limit_mps2": 2.00,
                         # Final approach profile for marking + extension goals.
                         # v = sqrt(floor^2 + 2*a*s) from here down to
-                        # deceleration_floor_speed_mps at the 30 mm boundary.
+                        # deceleration_floor_speed_mps at the 20 mm (waypoint_tolerance_m) boundary.
                         #
                         # 0.50 -> 1.00 m on 2026-09-01, ahead of the first run
                         # that can actually reach cruise speed. Until now
@@ -690,12 +690,12 @@ def generate_launch_description() -> LaunchDescription:
                         # - final distance profile is semantic-goal-only and uses the
                         #   configured cruise/floor pair;
                         # - terminal command is min(distance profile, xtrack cap);
-                        # - measured radial <=30 mm still commands immediate zero.
+                        # - measured radial <=20 mm still commands immediate zero.
                         # Trajectory-generator path ownership:
                         # - /nav_path is the full retained 50 mm interpolated path;
                         # - RPP advances through those points without stopping;
                         # - /segment_goal is only the semantic endpoint used for
-                        #   500 mm final deceleration and the exact 30 mm stop.
+                        #   500 mm final deceleration and the exact 20 mm stop.
                         # Straight-line and cross-track guidance uses the local
                         # /nav_path tangent and a path-distance lookahead.
                         # 2026-09-23: 18 -> 11 (below the 15 deg pivot re-entry);
@@ -802,7 +802,7 @@ def generate_launch_description() -> LaunchDescription:
                         "precision_corner_target_speed_mps": 0.12,
                         "precision_corner_accel_block_buffer_m": 0.10,
                         # Positive by design: Phase 2 never owns terminal zero.
-                        # The existing 30 mm radial latch remains authoritative.
+                        # The existing 20 mm radial latch remains authoritative.
                         "precision_terminal_target_speed_mps": 0.15,
                         "precision_minimum_moving_speed_mps": 0.04,
                         "precision_braking_latency_sec": 0.10,
@@ -984,10 +984,10 @@ def generate_launch_description() -> LaunchDescription:
                         "terminal_xtrack_crossing_rate_threshold_mps": 0.010,
                         "terminal_xtrack_crossing_predicted_threshold_m": 0.004,
                         # Active speed profile:
-                        # - distance is measured to the 30 mm radius boundary;
+                        # - distance is measured to the 20 mm radius boundary;
                         # - final 0.50 m uses constant deceleration to 0.15 m/s
                         #   for either supported fixed cruise speed;
-                        # - measured radial <=30 mm commands immediate zero.
+                        # - measured radial <=20 mm commands immediate zero.
                         # The legacy staged values below remain compatibility
                         # parameters for validation and telemetry only.
                         "slow_distance_m": 0.80,
@@ -1001,7 +1001,7 @@ def generate_launch_description() -> LaunchDescription:
                         "alignment_release_accel_distance_m": 0.20,
                         "heading_full_speed_deg": 2.0,
                         "heading_min_speed_deg": 4.0,
-                        # Strict 30 mm circular stop gate for marking AND extension.
+                        # Strict 20 mm circular stop gate (0.03 -> 0.02 in fcc3785).
                         "waypoint_tolerance_m": 0.02,
                         "marking_final_creep_cross_track_m": 0.025,
                         "terminal_capture_gate_cross_track_m": 0.025,
@@ -1030,7 +1030,7 @@ def generate_launch_description() -> LaunchDescription:
                         "segment_fast_capture_max_cross_track_m": 0.05,
                         "terminal_close_recovery_distance_m": 0.08,
                         "terminal_unready_hold_along_m": 0.05,
-                        # Exact 30 mm stop/capture safety. The latency/buffer
+                        # Exact 20 mm stop/capture safety. The latency/buffer
                         # parameters remain compatibility-only and do not
                         # trigger zero in this build.
                         "marking_stop_settle_timeout_sec": 3.0,
