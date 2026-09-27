@@ -4294,8 +4294,15 @@ class RosBridgeRuntime:
             )
 
     def stop_mission(self) -> dict[str, Any]:
-        with self._operation_lock:
-            return self.node.stop_mission()
+        # Like E-stop, STOP must not queue behind an ordinary operation
+        # holding _operation_lock (START/RESUME/NEXT can wait seconds on PX4).
+        # Mission Manager serializes STOP itself and invalidates the overlapped
+        # command by safety generation. Bump the local generation too, so a
+        # RELEASE queued before this STOP is rejected rather than clearing it.
+        with self._safety_command_lock:
+            self._safety_generation += 1
+
+        return self.node.stop_mission()
 
     def clear_mission(self) -> dict[str, Any]:
         with self._operation_lock:

@@ -838,8 +838,10 @@ async def skip_point(
 @mission_router.post("/stop")
 async def stop_mission(
     _session: AuthenticatedSession = Depends(require_auth),
-    _mutation: None = Depends(_serialize_mission_mutation),
 ) -> dict[str, Any]:
+    # Deliberately NOT serialized with other mission mutations: STOP must not
+    # wait behind an in-flight START/RESUME/restore. See
+    # RosBridgeRuntime.stop_mission for why that is safe.
     mission_id = str(_mission_state().get("mission_id") or "")
 
     response = await _run_ros_operation(

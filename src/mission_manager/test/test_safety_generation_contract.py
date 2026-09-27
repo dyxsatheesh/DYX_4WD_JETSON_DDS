@@ -122,3 +122,24 @@ def test_command_ack_published_only_after_successful_handler():
     payload = function_source("_status_payload")
     assert '"command_acks": dict(self._command_acks)' in payload
     assert '"command_ack_epoch": self._command_ack_epoch' in payload
+
+
+def test_stop_has_its_own_callback_group_so_it_never_queues_behind_start():
+    init = function_source("__init__")
+
+    def group_of(service):
+        at = init.index(f'"/mission_manager/{service}"')
+        start = init.index("callback_group=", at)
+        return init[start:init.index(",", start)]
+
+    assert group_of("stop") == "callback_group=self._stop_service_group"
+    for serialized in ("start", "pause", "resume", "next_point", "skip_point", "clear"):
+        assert group_of(serialized) == "callback_group=self._mission_service_group"
+    assert group_of("emergency_stop") == "callback_group=self._io_group"
+    assert "self._stop_service_group = MutuallyExclusiveCallbackGroup()" in init
+    # STOP's hard stop must bump the generation the overlapped command checks.
+    stop = function_source("_execute_stop_cleanup")
+    assert stop.index("self._assert_emergency_stop()") < stop.index(
+        "self._best_effort_px4_disarm_only()"
+    )
+    assert "MultiThreadedExecutor(num_threads=6)" in SOURCE

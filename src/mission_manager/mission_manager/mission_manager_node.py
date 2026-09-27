@@ -164,6 +164,14 @@ class MissionManager(Node):
         # the 20 Hz control loop. START/RESUME/NEXT can legitimately wait on
         # PX4 state transitions; control supervision must continue meanwhile.
         self._mission_service_group = MutuallyExclusiveCallbackGroup()
+        # STOP must never queue behind an in-flight START/RESUME/NEXT (up to
+        # ~16 s of service waits). It asserts the hard stop and bumps
+        # _safety_generation first; START/RESUME/NEXT re-check that generation
+        # before ARM and before committing RUNNING, so an overlapping command
+        # aborts. Serial with itself only. PAUSE stays in the mission group:
+        # it does not bump the generation, so a PAUSE running inside a RESUME
+        # could be overridden by that RESUME's commit.
+        self._stop_service_group = MutuallyExclusiveCallbackGroup()
 
         self._lock = threading.RLock()
 
@@ -579,7 +587,7 @@ class MissionManager(Node):
             Trigger,
             "/mission_manager/stop",
             self._acknowledged_trigger("stop", self._stop_service),
-            callback_group=self._mission_service_group,
+            callback_group=self._stop_service_group,
         )
         self.create_service(
             Trigger,
@@ -5115,7 +5123,10 @@ class MissionManager(Node):
 def main(args: Optional[list[str]] = None) -> None:
     rclpy.init(args=args)
     node = MissionManager()
-    executor = MultiThreadedExecutor(num_threads=4)
+    # START (mission group) and STOP (stop group) can each block in PX4
+    # service waits at the same time; both need I/O callbacks (service
+    # responses, /mavros/state) and the control loop keeps ticking.
+    executor = MultiThreadedExecutor(num_threads=6)
     executor.add_node(node)
     try:
         executor.spin()
