@@ -1966,13 +1966,35 @@ class MissionManager(Node):
         return max(rx_age, max(0.0, wall_delta))
 
     def _spray_ready_for_mission_start(self) -> bool:
+        return self._spray_not_ready_reason() is None
+
+    def _spray_not_ready_reason(self) -> Optional[str]:
+        """Why a mission needing spray must not START/RESUME, or None.
+
+        Spray failures do not gate point progression, so a latched spray
+        fault would otherwise let a whole mission run and mark every point
+        COMPLETED without spraying any of them.
+        """
         if not self.spray_required:
-            return True
-        return (
-            self._spray_controller_ready
-            and self._spray_fault_reason is None
-            and self._spray_status_age_sec() <= self.spray_status_timeout_sec
-        )
+            return None
+        age = self._spray_status_age_sec()
+        if age > self.spray_status_timeout_sec:
+            return (
+                "Spray controller status not received "
+                f"({age:.1f}s old); check that spray_controller is running"
+            )
+        if self._spray_fault_reason is not None:
+            return (
+                f"Spray controller fault latched ({self._spray_fault_reason}); "
+                "check the servo, then reset with "
+                "'ros2 service call /spray/reset_fault std_srvs/srv/Trigger'"
+            )
+        if not self._spray_controller_ready:
+            return (
+                "Spray controller not ready "
+                f"(state={self._spray_controller_state})"
+            )
+        return None
 
     # ==============================================================
     # RTK safety
@@ -2671,6 +2693,9 @@ class MissionManager(Node):
                     raise RuntimeError(
                         "START requires PX4 disarmed so sequence is OFFBOARD then ARM"
                     )
+                spray_reason = self._spray_not_ready_reason()
+                if spray_reason is not None:
+                    raise RuntimeError(spray_reason)
                 safety_generation = self._safety_generation
             self._require_motion_health(
                 require_ready_state=True,
@@ -2831,6 +2856,9 @@ class MissionManager(Node):
                     response.success = False
                     response.message = "Mission is not paused"
                     return response
+                spray_reason = self._spray_not_ready_reason()
+                if spray_reason is not None:
+                    raise RuntimeError(spray_reason)
                 safety_generation = self._safety_generation
             self._require_motion_health(
                 require_ready_state=False, require_estop_released=True

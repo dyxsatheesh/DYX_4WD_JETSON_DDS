@@ -129,6 +129,14 @@ def build_manager(
     manager._spray_success_keys = set()
     manager._spray_failure_keys = set()
     manager._command_acks = {"start": 0, "resume": 0, "next_point": 0, "stop": 0}
+    # Healthy spray controller unless a test says otherwise.
+    manager.spray_required = True
+    manager.spray_status_timeout_sec = 2.0
+    manager._spray_controller_ready = True
+    manager._spray_controller_state = "IDLE"
+    manager._spray_fault_reason = None
+    manager._spray_status_last_rx_monotonic = time.monotonic()
+    manager._spray_status_timestamp_unix_ns = None
 
     def record(name):
         def recorder(*args, **kwargs):
@@ -498,3 +506,48 @@ def test_command_ack_only_on_success_and_published_before_return():
     MissionManager._acknowledged_trigger(manager, "resume", ok)(None, Response())
     assert manager._command_acks["resume"] == 1
     assert events and events[-1][0] == "status"
+
+
+# ------------------------------------------------ spray readiness at START/RESUME
+
+
+def latch_spray_fault(manager):
+    manager._spray_controller_ready = False
+    manager._spray_controller_state = "FAULT"
+    manager._spray_fault_reason = "MARKING_HOLD_LOST_DURING_SPRAY"
+
+
+def test_start_refused_while_spray_fault_latched(sleeps):
+    manager, events = build_start_manager()
+    latch_spray_fault(manager)
+    response = MissionManager._start_service(manager, None, Response())
+    assert not response.success
+    assert "MARKING_HOLD_LOST_DURING_SPRAY" in response.message
+    assert "/spray/reset_fault" in response.message
+    assert px4_calls(events) == [] and "enable_motion" not in events
+    assert manager._state == "READY"
+
+
+def test_start_refused_when_spray_status_stale(sleeps):
+    manager, events = build_start_manager()
+    manager._spray_status_last_rx_monotonic = time.monotonic() - 10.0
+    response = MissionManager._start_service(manager, None, Response())
+    assert not response.success and "not received" in response.message
+    assert px4_calls(events) == [] and "enable_motion" not in events
+
+
+def test_start_not_gated_on_spray_when_spray_not_required(sleeps):
+    manager, _events = build_start_manager()
+    latch_spray_fault(manager)
+    manager.spray_required = False
+    response = MissionManager._start_service(manager, None, Response())
+    assert response.success, response.message
+
+
+def test_resume_refused_while_spray_fault_latched(sleeps):
+    manager, events = build_manager(state="PAUSED")
+    latch_spray_fault(manager)
+    response = MissionManager._resume_service(manager, None, Response())
+    assert not response.success
+    assert "MARKING_HOLD_LOST_DURING_SPRAY" in response.message
+    assert manager._state == "PAUSED" and "enable_motion" not in events
