@@ -783,6 +783,15 @@ class MissionManager(Node):
         self._publish_status(force=True)
 
         self.create_timer(1.0 / self.CONTROL_HZ, self._control_loop)
+        # Automatic completion STOP runs here, not in _control_loop: its PX4
+        # DISARM confirmation waits up to ~1 s (0.6-0.9 s measured 2026-09-26)
+        # and would freeze control supervision and status meanwhile. The STOP
+        # group also serializes it with an operator STOP.
+        self.create_timer(
+            1.0 / self.CONTROL_HZ,
+            self._run_auto_stop_if_pending,
+            callback_group=self._stop_service_group,
+        )
         self.create_timer(1.0 / self.SAFETY_PUBLISH_HZ, self._publish_safety)
 
         self.get_logger().warn("===== CLEAN MISSION MANAGER STARTED =====")
@@ -4570,8 +4579,9 @@ class MissionManager(Node):
         self._publish_status(force=True)
 
         # Do not disarm while _control_loop holds self._lock because MAVROS
-        # state callbacks also need the lock. The next timer tick performs the
-        # same STOP cleanup outside the control-loop lock.
+        # state callbacks also need the lock. The auto-stop timer (STOP
+        # callback group) performs the same STOP cleanup outside that lock
+        # and off the control loop.
         self._auto_stop_pending = True
 
     def _run_auto_stop_if_pending(self) -> bool:
@@ -4612,11 +4622,10 @@ class MissionManager(Node):
     # Control loop: sequencing + marking validation ONLY
     # ==============================================================
     def _control_loop(self) -> None:
-        # Automatic normal-completion STOP must run outside the long-held
-        # control-loop lock so MAVROS state callbacks can confirm DISARM.
-        if self._run_auto_stop_if_pending():
-            return
-
+        # Automatic completion STOP is NOT run here; see the auto-stop timer
+        # in __init__. While it is pending the state is COMPLETED, so this
+        # tick only publishes status (every monitor below is RUNNING/PAUSED
+        # guarded).
         with self._lock:
             self._publish_status()
 

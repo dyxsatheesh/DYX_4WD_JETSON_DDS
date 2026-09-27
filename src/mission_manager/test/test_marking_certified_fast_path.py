@@ -116,7 +116,6 @@ def build(clock: Clock, *, mode: str = "radial20", execution: str = "AUTO"):
     m._raw_gnss_gate_marking_number = None
     m._raw_gnss_gate_decision = None
 
-    m._run_auto_stop_if_pending = lambda: False
     m._publish_status = lambda force=False: None
     m._monitor_runtime_rtk = lambda: None
     m._monitor_runtime_px4_control = lambda: None
@@ -568,3 +567,40 @@ def test_patch_does_not_change_spray_stop_or_auto_constants():
         root / "rpp_controller" / "rpp_controller" / "terminal_stop_regulator.py"
     ).read_text(encoding="utf-8")
     assert "stationary_window_sec: float = 0.50" in regulator
+
+
+# ------------------------------------------- automatic STOP off the control loop
+
+
+def test_control_loop_never_runs_the_blocking_auto_stop(clock):
+    m, _events = build(clock)
+    stops = []
+    m._execute_stop_cleanup = lambda **kw: (stops.append(kw), (True, []))[1]
+    m._state = "COMPLETED"
+    m._auto_stop_pending = True
+    m._control_loop()
+    assert stops == [] and m._auto_stop_pending is True
+
+    # The STOP-group timer claims it exactly once.
+    assert MissionManager._run_auto_stop_if_pending(m) is True
+    assert stops == [{"completed": True, "source": "AUTO_COMPLETE"}]
+    assert m._auto_stop_pending is False
+    assert MissionManager._run_auto_stop_if_pending(m) is False
+    assert len(stops) == 1
+
+
+def test_auto_stop_timer_is_in_the_stop_callback_group():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "mission_manager"
+        / "mission_manager_node.py"
+    ).read_text(encoding="utf-8")
+    timer = source.index("self._run_auto_stop_if_pending,")
+    assert "callback_group=self._stop_service_group" in source[timer:timer + 120]
+    import ast
+
+    loop = next(
+        n for n in ast.walk(ast.parse(source))
+        if isinstance(n, ast.FunctionDef) and n.name == "_control_loop"
+    )
+    assert "_run_auto_stop_if_pending" not in ast.get_source_segment(source, loop)
