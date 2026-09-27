@@ -551,7 +551,7 @@ def test_patch_does_not_change_spray_stop_or_auto_constants():
     launch = (root / "rover_bringup" / "launch" / "rover.launch.py").read_text(
         encoding="utf-8"
     )
-    assert '"spray_duration_sec": 0.50' in launch
+    assert '"spray_duration_sec": 0.20' in launch
     assert '"pre_spray_stable_sec": 0.25' in launch
     assert '"radial_stop_stationary_window_sec": 0.50' in launch
     assert '"marking_hold_sec": 3.00' in launch
@@ -560,7 +560,7 @@ def test_patch_does_not_change_spray_stop_or_auto_constants():
     spray = (
         root / "spray_controller" / "spray_controller" / "spray_controller_node.py"
     ).read_text(encoding="utf-8")
-    assert 'self.declare_parameter("spray_duration_sec", 0.50)' in spray
+    assert 'self.declare_parameter("spray_duration_sec", 0.20)' in spray
     assert 'self.declare_parameter("pre_spray_stable_sec", 0.25)' in spray
     regulator = (
         root / "rpp_controller" / "rpp_controller" / "terminal_stop_regulator.py"

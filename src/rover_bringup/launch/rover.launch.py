@@ -257,10 +257,10 @@ def generate_launch_description() -> LaunchDescription:
                         # commanded value while armed, so any mismatch
                         # moves the servo on every arm and disarm.
                         "release_value": 0.090909,
-                        "spray_duration_sec": 0.50,
+                        "spray_duration_sec": 0.20,
                         # mission_manager already requires <=30 mm radial error,
                         # <=0.01 m/s rover speed, then holds the marking point
-                        # for 3.0 s total. Spray actuator ON time is only 0.5 s.
+                        # for 3.0 s total. Spray actuator ON time is only 0.2 s.
                         "pre_spray_stable_sec": 0.25,
                         "command_timeout_sec": 1.0,
                         ("release_retry_interval_sec"): 0.25,
