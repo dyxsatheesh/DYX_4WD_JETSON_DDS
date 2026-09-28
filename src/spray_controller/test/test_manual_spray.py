@@ -189,6 +189,17 @@ def build_node(tmp_path) -> SprayController:
     node.journal_path = tmp_path / "journal.json"
     node.spray_settings_path = tmp_path / "spray_settings.json"
     node.spray_duration_source = "launch"
+    node.laser_value_source = "launch"
+    node.spray_actuator_set = 1
+    node.laser_actuator_set = 2
+    node.laser_on_value = 1.0
+    node.laser_off_value = -1.0
+    node.laser_handoff_timeout_sec = 1.5
+    node.mission_marking_tool = SprayController.TOOL_SPRAY
+    node.laser_hold_run_id = None
+    node.laser_hold_point_id = None
+    node.transaction_tool = None
+    node.laser_on_since = None
     node.journal = None
     node.command_client = _CommandClient()
     node.spray_active_pub = _Publisher()

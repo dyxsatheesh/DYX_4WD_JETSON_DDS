@@ -1131,6 +1131,19 @@ value persists in `/home/flash/.ros/dyx_spray_settings.json` and overrides
 spray requires PX4 armed and no active mission; unit-tested only, not
 field-tested; frontend buttons not wired yet.
 
+### Marking tool LASER / SPRAY and default modes (2026-09-28, not field-tested)
+
+**Factory default is now MANUAL execution + LASER marking** (was AUTO +
+spray). LASER = AUX6 (`PWM_AUX_FUNC6=302`, `MAV_CMD_DO_SET_ACTUATOR`
+param2), ON at each point that passes the same RPP + raw-GNSS gates as spray,
+held with **no time limit** until the operator presses NEXT; NEXT waits for a
+PX4-acknowledged laser OFF before re-enabling motion; the final point also
+waits for NEXT. START refuses LASER + AUTO. Operator can pick SPRAY/AUTO per
+mission and save defaults (`/home/flash/.ros/dyx_mission_defaults.json`).
+Full contract, PX4 params and API: **`docs/LASER_MARKING_MODE.md`**. ⚠ PX4
+`PWM_AUX_FUNC6/MIN6/MAX6/DIS6` must be set (302 / 1000 / 2000 / 1000) before
+the laser will move — not verified on the FCU yet.
+
 ## Repo status (2026-08-31)
 
 - **`WORKING_STATUS_24_06_2026.txt`** — stale (2026-06-24), architecture it

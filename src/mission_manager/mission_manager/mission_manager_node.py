@@ -28,6 +28,7 @@ import collections
 import copy
 import json
 import math
+import os
 import threading
 import time
 import uuid
@@ -96,6 +97,11 @@ ACKNOWLEDGED_TRIGGER_COMMANDS = (
 
 class MissionManager(Node):
     """Mission/safety/marking state machine. Motion control is RPP's job."""
+
+    EXECUTION_MODES = ("MANUAL", "AUTO")
+    # SPRAY: timed spray on AUX5. LASER: laser on AUX6 held ON at each
+    # verified point until the operator presses NEXT; always MANUAL.
+    MARKING_TOOLS = ("LASER", "SPRAY")
 
     CONTROL_HZ = 20.0
     STATUS_HZ = 5.0
@@ -230,6 +236,16 @@ class MissionManager(Node):
         self.declare_parameter("spray_required", True)
         self.declare_parameter("spray_confirmation_timeout_sec", 5.0)
         self.declare_parameter("spray_status_timeout_sec", 2.0)
+        # Factory defaults for a new rover, used until an operator saves
+        # defaults (POST /api/mission/defaults -> mission_defaults_path).
+        self.declare_parameter("default_execution_mode", "MANUAL")
+        self.declare_parameter("default_marking_tool", "LASER")
+        self.declare_parameter(
+            "mission_defaults_path", "~/.ros/dyx_mission_defaults.json"
+        )
+        # NEXT in LASER mode waits for spray_controller to report the laser
+        # OFF (PX4-acknowledged) before motion is re-enabled.
+        self.declare_parameter("laser_off_confirm_timeout_sec", 3.0)
         # Gate-1 accepted after four forward/reverse field runs. The signed
         # path contract is now the production default; its runtime rollback
         # gate remains available while safely stopped.
@@ -305,6 +321,29 @@ class MissionManager(Node):
         self.spray_status_timeout_sec = float(
             self.get_parameter("spray_status_timeout_sec").value
         )
+        self.mission_defaults_path = os.path.expanduser(
+            str(self.get_parameter("mission_defaults_path").value)
+        )
+        self.laser_off_confirm_timeout_sec = float(
+            self.get_parameter("laser_off_confirm_timeout_sec").value
+        )
+        if (
+            not math.isfinite(self.laser_off_confirm_timeout_sec)
+            or self.laser_off_confirm_timeout_sec <= 0.0
+        ):
+            raise ValueError("laser_off_confirm_timeout_sec must be > 0")
+        self._default_execution_mode = self._valid_choice(
+            self.get_parameter("default_execution_mode").value,
+            self.EXECUTION_MODES,
+            "default_execution_mode",
+        )
+        self._default_marking_tool = self._valid_choice(
+            self.get_parameter("default_marking_tool").value,
+            self.MARKING_TOOLS,
+            "default_marking_tool",
+        )
+        self._defaults_source = "launch"
+        self._load_saved_defaults()
         precision_path_contract_value = self.get_parameter(
             "precision_path_contract_enabled"
         ).value
@@ -482,6 +521,14 @@ class MissionManager(Node):
         )
         self.create_subscription(
             String,
+            "/mission_manager/marking_tool",
+            self._marking_tool_callback,
+            # Volatile: a restart must come back to the saved default, not
+            # to a replayed per-mission choice.
+            command_qos,
+        )
+        self.create_subscription(
+            String,
             "/spray/status",
             self._spray_status_callback,
             retained_qos,
@@ -597,6 +644,12 @@ class MissionManager(Node):
         )
         self.create_service(
             Trigger,
+            "/mission_manager/save_defaults",
+            self._save_defaults_service,
+            callback_group=self._io_group,
+        )
+        self.create_service(
+            Trigger,
             "/mission_manager/emergency_stop",
             self._emergency_stop_service,
             callback_group=self._io_group,
@@ -641,7 +694,12 @@ class MissionManager(Node):
         # Mission runtime
         # ----------------------------------------------------------
         self._state = "EMPTY"
-        self._execution_mode = "AUTO"
+        self._execution_mode = self._default_execution_mode
+        self._marking_tool = self._default_marking_tool
+        # (mission_run_id, point_id) whose laser stays ON until NEXT/SKIP/STOP.
+        self._laser_hold: Optional[tuple[str, str]] = None
+        self._spray_laser_on = False
+        self._spray_laser_on_point_id: Optional[str] = None
         self._pause_reason: Optional[str] = None
         self._resume_available = False
         self._last_message = "No prepared mission loaded"
@@ -1495,6 +1553,106 @@ class MissionManager(Node):
             self._last_message = f"Execution mode set to {mode}"
             self._publish_status(force=True)
 
+    @staticmethod
+    def _valid_choice(value: Any, choices: tuple[str, ...], name: str) -> str:
+        choice = str(value or "").strip().upper()
+        if choice not in choices:
+            raise ValueError(f"{name} must be one of {', '.join(choices)}")
+        return choice
+
+    def _load_saved_defaults(self) -> None:
+        """Apply operator-saved defaults over the launch defaults.
+
+        A missing file keeps the launch defaults; a corrupt or invalid file is
+        logged and ignored rather than stopping mission_manager.
+        """
+        try:
+            if not os.path.exists(self.mission_defaults_path):
+                return
+            with open(self.mission_defaults_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            execution_mode = self._valid_choice(
+                payload.get("execution_mode"), self.EXECUTION_MODES, "execution_mode"
+            )
+            marking_tool = self._valid_choice(
+                payload.get("marking_tool"), self.MARKING_TOOLS, "marking_tool"
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                f"Ignoring saved mission defaults {self.mission_defaults_path}: "
+                f"{exc}; using {self._default_execution_mode}/"
+                f"{self._default_marking_tool}"
+            )
+            return
+        self._default_execution_mode = execution_mode
+        self._default_marking_tool = marking_tool
+        self._defaults_source = "saved"
+
+    def _write_saved_defaults(self, execution_mode: str, marking_tool: str) -> None:
+        payload = {
+            "version": 1,
+            "execution_mode": execution_mode,
+            "marking_tool": marking_tool,
+            "updated_unix_ns": time.time_ns(),
+        }
+        directory = os.path.dirname(self.mission_defaults_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        temporary = self.mission_defaults_path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self.mission_defaults_path)
+
+    def _marking_tool_callback(self, message: String) -> None:
+        tool = str(message.data or "").strip().upper()
+        if tool not in self.MARKING_TOOLS:
+            self.get_logger().warn(f"Ignoring invalid marking tool {tool!r}")
+            return
+        with self._lock:
+            if self._state in {
+                "RUNNING",
+                "PAUSED",
+                "WAITING_FOR_NEXT",
+            }:
+                self.get_logger().warn(
+                    "Marking tool cannot change during active mission"
+                )
+                return
+            self._marking_tool = tool
+            self._last_message = f"Marking tool set to {tool}"
+            self._publish_status(force=True)
+
+    def _save_defaults_service(
+        self, _request: Trigger.Request, response: Trigger.Response
+    ) -> Trigger.Response:
+        """Save the current execution mode and marking tool as the defaults."""
+        with self._lock:
+            execution_mode = self._execution_mode
+            marking_tool = self._marking_tool
+        if marking_tool == "LASER" and execution_mode != "MANUAL":
+            response.success = False
+            response.message = "LASER requires MANUAL execution; not saved"
+            return response
+        try:
+            self._write_saved_defaults(execution_mode, marking_tool)
+        except Exception as exc:
+            response.success = False
+            response.message = f"Unable to save mission defaults: {exc}"
+            return response
+        with self._lock:
+            self._default_execution_mode = execution_mode
+            self._default_marking_tool = marking_tool
+            self._defaults_source = "saved"
+            self._last_message = (
+                f"Defaults saved: {execution_mode} execution, {marking_tool}"
+            )
+            self._publish_status(force=True)
+        response.success = True
+        response.message = self._last_message
+        return response
+
     def _rpp_terminal_result_callback(self, message: String) -> None:
         """Receive RPP CAPTURED/MISSED for the active goal.
 
@@ -2011,6 +2169,11 @@ class MissionManager(Node):
             self._spray_controller_state = str(state) if state is not None else None
             reason = payload.get("fault_reason")
             self._spray_fault_reason = str(reason) if reason else None
+            self._spray_laser_on = bool(payload.get("laser_on", False))
+            laser_point = payload.get("laser_on_point_id")
+            self._spray_laser_on_point_id = (
+                str(laser_point) if laser_point else None
+            )
 
     def _spray_result_callback(self, message: String) -> None:
         """Monitor spray result without blocking rover path progression."""
@@ -2526,6 +2689,7 @@ class MissionManager(Node):
     def _disable_motion_preserve_estop(self) -> None:
         """Remove all motion/spray authority without changing the E-stop latch."""
         self._mission_enable = False
+        self._laser_hold = None
         self._publish_marking_active(False)
         self._publish_safety()
 
@@ -2534,6 +2698,7 @@ class MissionManager(Node):
         self._safety_generation += 1
         self._emergency_stop = True
         self._mission_enable = False
+        self._laser_hold = None
         self._publish_marking_active(False)
         self._publish_safety()
 
@@ -2839,6 +3004,14 @@ class MissionManager(Node):
                 spray_reason = self._spray_not_ready_reason()
                 if spray_reason is not None:
                     raise RuntimeError(spray_reason)
+                if (
+                    self._marking_tool == "LASER"
+                    and self._execution_mode != "MANUAL"
+                ):
+                    raise RuntimeError(
+                        "LASER marking requires MANUAL execution; select "
+                        "MANUAL (or SPRAY) before START"
+                    )
                 safety_generation = self._safety_generation
             self._require_motion_health(
                 require_ready_state=True,
@@ -3082,6 +3255,32 @@ class MissionManager(Node):
             response.message = self._last_message
             return response
 
+    def _wait_for_laser_off(self, requested_at: float) -> None:
+        """Block until spray_controller reports the laser OFF after a request.
+
+        Only a /spray/status received after the request counts, so a status
+        from before NEXT cannot satisfy it. Raises on timeout: NEXT then stays
+        blocked in WAITING_FOR_NEXT and can be pressed again.
+        """
+        deadline = requested_at + self.laser_off_confirm_timeout_sec
+        while True:
+            with self._lock:
+                rx = self._spray_status_last_rx_monotonic
+                if (
+                    rx is not None
+                    and rx > requested_at
+                    and not self._spray_laser_on
+                ):
+                    return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "laser OFF not confirmed within "
+                    f"{self.laser_off_confirm_timeout_sec:.1f}s; the laser may "
+                    "still be on. Check the spray controller and press NEXT "
+                    "again"
+                )
+            time.sleep(0.02)
+
     def _next_point_service(
         self, _request: Trigger.Request, response: Trigger.Response
     ) -> Trigger.Response:
@@ -3096,12 +3295,32 @@ class MissionManager(Node):
                     response.success = False
                     response.message = "Mission is not waiting for NEXT"
                     return response
-                if self._next_pending_marking_number(0) is None:
+                laser_mode = self._marking_tool == "LASER"
+                if laser_mode:
+                    # Laser OFF first, confirmed, and only then any motion.
+                    self._laser_hold = None
+                    laser_off_requested_at = time.monotonic()
+                    self._last_message = "NEXT: turning laser OFF"
+                    self._publish_status(force=True)
+                elif self._next_pending_marking_number(0) is None:
                     self._complete_mission()
                     response.success = True
                     response.message = "Mission completed"
                     return response
                 safety_generation = self._safety_generation
+
+            if laser_mode:
+                self._wait_for_laser_off(laser_off_requested_at)
+                with self._lock:
+                    if self._state != "WAITING_FOR_NEXT":
+                        raise RuntimeError(
+                            f"Mission state changed during NEXT (state={self._state})"
+                        )
+                    if self._next_pending_marking_number(0) is None:
+                        self._complete_mission()
+                        response.success = True
+                        response.message = "Laser OFF; mission completed"
+                        return response
 
             # NEXT can re-enable movement, so it must pass the same simple
             # prepared-path + RTK FIXED gate used by RESUME.
@@ -3560,6 +3779,7 @@ class MissionManager(Node):
         self._rpp_terminal_certificate_last_rx_monotonic = None
 
     def _reset_execution_progress(self) -> None:
+        self._laser_hold = None
         self._current_path_index = self._next_semantic_index(0)
         self._active_marking_number = self._current_or_next_marking_number()
         self._last_completed_marking_number = None
@@ -3890,6 +4110,7 @@ class MissionManager(Node):
             "outcome": str(outcome).upper(),
             "reason": reason,
             "required": self.spray_required,
+            "tool": self._marking_tool,
             "elapsed_sec": elapsed_sec,
             "timestamp_unix_ns": time.time_ns(),
         }
@@ -4235,6 +4456,19 @@ class MissionManager(Node):
             "mission_run_id": self._mission_run_id or None,
             "mission_started_unix_ns": self._mission_started_unix_ns,
             "execution_mode": self._execution_mode,
+            "marking_tool": self._marking_tool,
+            "laser_hold": (
+                {
+                    "mission_run_id": self._laser_hold[0],
+                    "point_id": self._laser_hold[1],
+                }
+                if self._laser_hold is not None
+                else None
+            ),
+            "laser_on": self._spray_laser_on,
+            "default_execution_mode": self._default_execution_mode,
+            "default_marking_tool": self._default_marking_tool,
+            "defaults_source": self._defaults_source,
             "pause_reason": self._pause_reason,
             "resume_available": self._resume_available,
             "trajectory_ready": self._pending_prepared_path.ready,
@@ -5102,12 +5336,33 @@ class MissionManager(Node):
             self._reset_arrival_state()
             self._publish_runtime_path()
 
+            # LASER: the laser is ON at this point and stays on until the
+            # operator presses NEXT, including at the final point.
+            laser_hold = (
+                self._marking_tool == "LASER"
+                and self.spray_required
+                and spray_success
+            )
+
             # If this was the final uploaded point, _complete_mission() reports
             # completion now and schedules automatic STOP/DISARM/clear.
-            if self._finish_if_done():
+            if not laser_hold and self._finish_if_done():
                 return
 
-            if self._execution_mode == "MANUAL":
+            if laser_hold:
+                self._state = "WAITING_FOR_NEXT"
+                self._disable_motion_preserve_estop()
+                self._laser_hold = (self._mission_run_id, point_id)
+                last_point = self._next_pending_marking_number(0) is None
+                self._last_message = (
+                    f"{point_id} COMPLETED at {final_text}; laser ON; "
+                    + (
+                        "press NEXT to turn it off and finish the mission"
+                        if last_point
+                        else "press NEXT to turn it off and go to the next point"
+                    )
+                )
+            elif self._execution_mode == "MANUAL":
                 self._state = "WAITING_FOR_NEXT"
                 self._disable_motion_preserve_estop()
                 self._last_message = (

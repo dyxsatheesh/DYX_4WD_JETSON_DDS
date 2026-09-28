@@ -120,6 +120,10 @@ class ExecutionModeRequest(BaseModel):
     execution_mode: str
 
 
+class MarkingToolRequest(BaseModel):
+    marking_tool: str
+
+
 class MissionIdRequest(BaseModel):
     """Optional mission identity used by restore/load/start retries."""
 
@@ -737,6 +741,51 @@ async def set_execution_mode(
     return await _run_ros_operation(
         "set-execution-mode",
         lambda: ros_bridge.set_execution_mode(mode),
+    )
+
+
+@mission_router.post("/marking-tool")
+async def set_marking_tool(
+    request: MarkingToolRequest,
+    _session: AuthenticatedSession = Depends(require_auth),
+    _mutation: None = Depends(_serialize_mission_mutation),
+) -> dict[str, Any]:
+    """Select LASER (AUX6, held until NEXT) or SPRAY (AUX5) marking.
+
+    LASER needs MANUAL execution: START refuses LASER with AUTO.
+    """
+
+    tool = str(request.marking_tool).strip().upper()
+
+    if tool not in {
+        "LASER",
+        "SPRAY",
+    }:
+        raise HTTPException(
+            status_code=422,
+            detail=("marking_tool must be LASER or SPRAY"),
+        )
+
+    return await _run_ros_operation(
+        "set-marking-tool",
+        lambda: ros_bridge.set_marking_tool(tool),
+    )
+
+
+@mission_router.post("/defaults")
+async def save_mission_defaults(
+    _session: AuthenticatedSession = Depends(require_auth),
+    _mutation: None = Depends(_serialize_mission_mutation),
+) -> dict[str, Any]:
+    """Save the current execution mode and marking tool as the defaults.
+
+    They are restored on every mission_manager start; factory default is
+    MANUAL + LASER.
+    """
+
+    return await _run_ros_operation(
+        "save-mission-defaults",
+        ros_bridge.save_mission_defaults,
     )
 
 

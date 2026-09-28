@@ -350,7 +350,10 @@ class RoverState:
                 "extension_mode": None,
                 "dummy_point_distance_m": None,
                 "row_transition_threshold_m": None,
-                "execution_mode": "AUTO",
+                # Placeholders until mission_manager's status arrives; it owns
+                # the real values (factory default MANUAL + LASER).
+                "execution_mode": "MANUAL",
+                "marking_tool": "LASER",
                 "state": "EMPTY",
                 "ready": False,
                 # True only after trajectory_generator has committed the
@@ -544,7 +547,7 @@ class RoverState:
             str(
                 mission.get(
                     "execution_mode",
-                    "AUTO",
+                    "MANUAL",
                 )
             )
             .strip()
@@ -552,7 +555,7 @@ class RoverState:
         )
 
         if execution_mode not in MISSION_EXECUTION_MODES:
-            execution_mode = "AUTO"
+            execution_mode = "MANUAL"
 
         mission["execution_mode"] = execution_mode
 
@@ -1150,14 +1153,10 @@ class RoverState:
                 "extension_mode": None,
                 "dummy_point_distance_m": None,
                 "row_transition_threshold_m": None,
-                "execution_mode": (
-                    mission.get(
-                        "execution_mode",
-                        "AUTO",
-                    )
-                    if retain_loaded_file
-                    else "AUTO"
-                ),
+                # Execution mode and marking tool are mission_manager's, not
+                # the loaded file's: keep them across a clear.
+                "execution_mode": mission.get("execution_mode", "MANUAL"),
+                "marking_tool": mission.get("marking_tool", "LASER"),
                 "state": ("LOADED" if retain_loaded_file else "EMPTY"),
                 "ready": False,
                 "loaded": bool(retain_loaded_file),

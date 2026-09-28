@@ -86,6 +86,7 @@ class FakeSprayBridge:
         self.manual_error: RuntimeError | None = None
         self.enabled_error: RuntimeError | None = None
         self.duration_error: RuntimeError | None = None
+        self.laser_error: RuntimeError | None = None
         self.config: dict[str, Any] = {
             "available": True,
             "press_pwm_us": 2000,
@@ -106,6 +107,13 @@ class FakeSprayBridge:
             press_pwm_us=int(press_pwm_us),
             release_pwm_us=int(release_pwm_us),
         )
+        return dict(self.config)
+
+    def set_laser_config(self, *, on_pwm_us: float, off_pwm_us: float) -> dict[str, Any]:
+        self.calls.append(("laser", (on_pwm_us, off_pwm_us)))
+        if self.laser_error is not None:
+            raise self.laser_error
+        self.config.update(laser_on_pwm_us=on_pwm_us, laser_off_pwm_us=off_pwm_us)
         return dict(self.config)
 
     def set_spray_duration(self, *, spray_duration_sec: float) -> dict[str, Any]:
@@ -166,6 +174,7 @@ def test_all_spray_routes_require_auth() -> None:
             ("get", "/api/spray/config", None),
             ("post", "/api/spray/config", {"press_pwm_us": 2000, "release_pwm_us": 900}),
             ("post", "/api/spray/duration", {"spray_duration_sec": 0.3}),
+            ("post", "/api/spray/laser-config", {"on_pwm_us": 2000, "off_pwm_us": 1000}),
             ("post", "/api/spray/on", None),
             ("post", "/api/spray/off", None),
             ("post", "/api/spray/test", {"on": True}),
@@ -413,6 +422,7 @@ def test_bridge_status_mapping_is_additive() -> None:
     )
     method_names = {
         "_spray_actuator_value_to_pwm",
+        "_actuator_value_to_pwm",
         "get_spray_config",
     }
     class_body = [
@@ -446,6 +456,8 @@ def test_bridge_status_mapping_is_additive() -> None:
     node_class = namespace["ExtractedSprayNode"]
     node_class.SPRAY_PWM_MIN_US = 900.0
     node_class.SPRAY_PWM_MAX_US = 2000.0
+    node_class.LASER_PWM_MIN_US = 1000.0
+    node_class.LASER_PWM_MAX_US = 2000.0
     node_class._monotonic_age = staticmethod(
         lambda timestamp: time.monotonic() - timestamp
     )
@@ -467,6 +479,12 @@ def test_bridge_status_mapping_is_additive() -> None:
         "mavros_connected": True,
         "px4_armed": True,
         "px4_mode": "MANUAL",
+        "marking_tool": "LASER",
+        "laser_on": True,
+        "laser_on_point_id": "P0002",
+        "laser_on_value": 1.0,
+        "laser_off_value": -1.0,
+        "laser_value_source": "saved",
     }
 
     config = node_class.get_spray_config(node)
@@ -483,6 +501,12 @@ def test_bridge_status_mapping_is_additive() -> None:
     assert config["px4_connected"] is True
     assert config["px4_armed"] is True
     assert config["px4_mode"] == "MANUAL"
+    assert config["marking_tool"] == "LASER"
+    assert config["laser_on"] is True
+    assert config["laser_on_point_id"] == "P0002"
+    assert config["laser_on_pwm_us"] == 2000
+    assert config["laser_off_pwm_us"] == 1000
+    assert config["laser_value_source"] == "saved"
 
 
 def test_bridge_enable_service_timeout_is_declared_idempotent() -> None:
@@ -550,3 +574,100 @@ def test_duration_controller_rejection_is_reported(spray_api) -> None:
 
     assert response.status_code == 409
     assert "SPRAY_CONTROLLER_NOT_IDLE" in response.json()["detail"]["message"]
+
+
+def test_laser_config_is_saved_through_the_bridge(spray_api) -> None:
+    client, bridge, _ = spray_api
+
+    response = client.post(
+        "/api/spray/laser-config", json={"on_pwm_us": 1900, "off_pwm_us": 1100}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["config"]["laser_on_pwm_us"] == 1900
+    assert bridge.calls == [("laser", (1900.0, 1100.0))]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"on_pwm_us": 2100, "off_pwm_us": 1000},
+        {"on_pwm_us": 2000, "off_pwm_us": 900},
+        {"on_pwm_us": 1500, "off_pwm_us": 1500},
+    ],
+)
+def test_laser_config_validates_range_and_difference(spray_api, body) -> None:
+    client, bridge, _ = spray_api
+
+    response = client.post("/api/spray/laser-config", json=body)
+
+    assert response.status_code == 422
+    assert bridge.calls == []
+
+
+def test_laser_config_controller_rejection_is_reported(spray_api) -> None:
+    client, bridge, _ = spray_api
+    bridge.laser_error = RuntimeError(
+        "Spray configuration rejected: SPRAY_CONTROLLER_NOT_IDLE"
+    )
+
+    response = client.post(
+        "/api/spray/laser-config", json={"on_pwm_us": 2000, "off_pwm_us": 1000}
+    )
+
+    assert response.status_code == 409
+
+
+def _extract_node_methods(*names: str) -> type:
+    source = PACKAGE_DIR / "ros_bridge.py"
+    tree = ast.parse(source.read_text())
+    source_class = next(
+        item
+        for item in tree.body
+        if isinstance(item, ast.ClassDef) and item.name == "RoverBackendRosNode"
+    )
+    body = [
+        item
+        for item in source_class.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and item.name in names
+    ]
+    module = ast.Module(
+        body=[
+            ast.ClassDef(
+                name="Extracted",
+                bases=[],
+                keywords=[],
+                body=body,
+                decorator_list=[],
+            )
+        ],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+    return module
+
+
+def test_bridge_laser_pwm_maps_to_aux6_actuator_values() -> None:
+    module = _extract_node_methods(
+        "_laser_pwm_to_actuator_value", "_actuator_value_to_pwm"
+    )
+    namespace = {
+        "Any": Any,
+        "_finite_float": lambda value: (
+            float(value)
+            if value is not None and math.isfinite(float(value))
+            else None
+        ),
+    }
+    exec(compile(module, "ros_bridge.py", "exec"), namespace)  # noqa: S102
+    node_class = namespace["Extracted"]
+    node_class.LASER_PWM_MIN_US = 1000.0
+    node_class.LASER_PWM_MAX_US = 2000.0
+
+    assert node_class._laser_pwm_to_actuator_value(2000) == pytest.approx(1.0)
+    assert node_class._laser_pwm_to_actuator_value(1000) == pytest.approx(-1.0)
+    assert node_class._laser_pwm_to_actuator_value(1500) == pytest.approx(0.0)
+    assert node_class._actuator_value_to_pwm(1.0, 1000.0, 2000.0) == 2000
+    with pytest.raises(RuntimeError):
+        node_class._laser_pwm_to_actuator_value(900)

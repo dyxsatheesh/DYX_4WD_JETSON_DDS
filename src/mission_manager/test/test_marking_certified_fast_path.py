@@ -54,6 +54,14 @@ def clock(monkeypatch):
 
 def build(clock: Clock, *, mode: str = "radial20", execution: str = "AUTO"):
     m = object.__new__(MissionManager)
+    m._marking_tool = "SPRAY"
+    m._laser_hold = None
+    m._spray_laser_on = False
+    m._spray_laser_on_point_id = None
+    m._default_execution_mode = "MANUAL"
+    m._default_marking_tool = "LASER"
+    m._defaults_source = "launch"
+    m.laser_off_confirm_timeout_sec = 3.0
     events: list = []
 
     m._lock = threading.RLock()

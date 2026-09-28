@@ -284,6 +284,17 @@ def generate_launch_description() -> LaunchDescription:
                         "spray_settings_path": (
                             "/home/flash/.ros/" "dyx_spray_settings.json"
                         ),
+                        # LASER marking tool on AUX6: PX4 PWM_AUX_FUNC6=302
+                        # (Peripheral via Actuator Set 2), PWM_AUX_MIN6/MAX6 =
+                        # 1000/2000, PWM_AUX_DIS6 = 1000 (laser OFF when
+                        # disarmed). +1.0 = 2000 us ON, -1.0 = 1000 us OFF.
+                        # POST /api/spray/laser-config saves overrides in
+                        # spray_settings_path.
+                        "spray_actuator_set": 1,
+                        "laser_actuator_set": 2,
+                        "laser_on_value": 1.0,
+                        "laser_off_value": -1.0,
+                        "laser_handoff_timeout_sec": 1.5,
                     }
                 ],
             ),
@@ -323,6 +334,16 @@ def generate_launch_description() -> LaunchDescription:
                         # monitoring and does not gate mission progression.
                         "spray_required": True,
                         "spray_confirmation_timeout_sec": 7.0,
+                        # Factory defaults for every start: MANUAL execution
+                        # + LASER marking. POST /api/mission/defaults saves
+                        # the operator's choice in mission_defaults_path,
+                        # which then overrides these two.
+                        "default_execution_mode": "MANUAL",
+                        "default_marking_tool": "LASER",
+                        "mission_defaults_path": (
+                            "/home/flash/.ros/dyx_mission_defaults.json"
+                        ),
+                        "laser_off_confirm_timeout_sec": 3.0,
                         "spray_status_timeout_sec": 2.0,
                         "waypoint_match_tolerance_m": 0.002,
                         "odom_timeout_sec": 0.50,

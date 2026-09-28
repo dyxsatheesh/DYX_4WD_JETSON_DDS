@@ -103,6 +103,14 @@ def build_manager(
     execution_mode: str = "AUTO",
 ) -> tuple[MissionManager, list]:
     manager = object.__new__(MissionManager)
+    manager._marking_tool = "SPRAY"
+    manager._laser_hold = None
+    manager._spray_laser_on = False
+    manager._spray_laser_on_point_id = None
+    manager._default_execution_mode = "MANUAL"
+    manager._default_marking_tool = "LASER"
+    manager._defaults_source = "launch"
+    manager.laser_off_confirm_timeout_sec = 3.0
     events: list = []
 
     manager._lock = threading.RLock()
@@ -578,6 +586,14 @@ def test_resume_refused_while_spray_fault_latched(sleeps):
 
 def mode_request_manager(*, success: bool, result: int = 0):
     manager = object.__new__(MissionManager)
+    manager._marking_tool = "SPRAY"
+    manager._laser_hold = None
+    manager._spray_laser_on = False
+    manager._spray_laser_on_point_id = None
+    manager._default_execution_mode = "MANUAL"
+    manager._default_marking_tool = "LASER"
+    manager._defaults_source = "launch"
+    manager.laser_off_confirm_timeout_sec = 3.0
     manager._command_client = object()
     calls: list = []
 
@@ -649,6 +665,14 @@ def stream_manager(monkeypatch):
     clock = StreamClock()
     monkeypatch.setattr(node_module.time, "monotonic", clock.monotonic)
     manager = object.__new__(MissionManager)
+    manager._marking_tool = "SPRAY"
+    manager._laser_hold = None
+    manager._spray_laser_on = False
+    manager._spray_laser_on_point_id = None
+    manager._default_execution_mode = "MANUAL"
+    manager._default_marking_tool = "LASER"
+    manager._defaults_source = "launch"
+    manager.laser_off_confirm_timeout_sec = 3.0
     manager._setpoint_stream_cond = threading.Condition()
     manager._last_setpoint_rx_monotonic = None
     manager._zero_setpoint_stream_since = None

@@ -80,6 +80,14 @@ class SprayController(Node):
 
     TRANSACTION_MISSION = "MISSION"
     TRANSACTION_MANUAL = "MANUAL"
+
+    # Marking tool, chosen per mission by mission_manager (status
+    # "marking_tool"). SPRAY: timed PRESS/RELEASE on AUX5. LASER: ON at the
+    # verified point and held until mission_manager clears "laser_hold"
+    # (operator NEXT/SKIP/STOP), then OFF, on AUX6.
+    TOOL_SPRAY = "SPRAY"
+    TOOL_LASER = "LASER"
+    STATE_LASER_ON = "LASER_ON"
     ACTIVE_MISSION_STATES = frozenset({"RUNNING", "PAUSED", "WAITING_FOR_NEXT"})
 
     JOURNAL_PRESS_COMMAND_SENT = "PRESS_COMMAND_SENT"
@@ -129,6 +137,21 @@ class SprayController(Node):
         self.declare_parameter("hard_press_timeout_sec", 5.0)
         self.declare_parameter("manual_override_timeout_sec", 3.0)
 
+        # MAV_CMD_DO_SET_ACTUATOR param index = PX4 "Peripheral via Actuator
+        # Set N" (PWM_AUX_FUNCx = 300 + N). Spray AUX5 = set 1 (301), laser
+        # AUX6 = set 2 (302).
+        self.declare_parameter("spray_actuator_set", 1)
+        self.declare_parameter("laser_actuator_set", 2)
+        # PWM_AUX_MIN6/MAX6 = 1000/2000 -> 2000 us = +1.0 (ON), 1000 us =
+        # -1.0 (OFF). PWM_AUX_DIS6 must equal the OFF PWM so PX4 turns the
+        # laser off whenever it disarms.
+        self.declare_parameter("laser_on_value", 1.0)
+        self.declare_parameter("laser_off_value", -1.0)
+        # After the laser point reports SUCCESS, mission_manager needs a
+        # moment to publish laser_hold for it; the laser stays on through
+        # this handoff only while that point is still the active one.
+        self.declare_parameter("laser_handoff_timeout_sec", 1.5)
+
         self.declare_parameter("mavros_state_timeout_sec", 2.5)
         self.declare_parameter("mission_status_timeout_sec", 1.0)
         self.declare_parameter("marking_active_timeout_sec", 0.50)
@@ -170,6 +193,17 @@ class SprayController(Node):
         self.manual_override_timeout_sec = float(
             self.get_parameter("manual_override_timeout_sec").value
         )
+        self.spray_actuator_set = int(
+            self.get_parameter("spray_actuator_set").value
+        )
+        self.laser_actuator_set = int(
+            self.get_parameter("laser_actuator_set").value
+        )
+        self.laser_on_value = float(self.get_parameter("laser_on_value").value)
+        self.laser_off_value = float(self.get_parameter("laser_off_value").value)
+        self.laser_handoff_timeout_sec = float(
+            self.get_parameter("laser_handoff_timeout_sec").value
+        )
 
         self.mavros_state_timeout_sec = float(
             self.get_parameter("mavros_state_timeout_sec").value
@@ -206,6 +240,7 @@ class SprayController(Node):
             os.path.expanduser(str(self.get_parameter("spray_settings_path").value))
         )
         self.spray_duration_source = "launch"
+        self.laser_value_source = "launch"
         self._apply_saved_settings()
 
         # ==========================================================
@@ -279,6 +314,13 @@ class SprayController(Node):
             "/spray/config",
             self._spray_config_callback,
             retained_qos,
+        )
+        self.create_subscription(
+            String,
+            "/spray/laser_config",
+            self._laser_config_callback,
+            # Volatile, like /spray/duration_config: persisted in the file.
+            command_qos,
         )
         self.create_subscription(
             String,
@@ -356,6 +398,9 @@ class SprayController(Node):
         self.current_point_state: Optional[str] = None
         self.status_marking_active = False
         self.raw_gnss_spray_gate: Optional[dict[str, Any]] = None
+        self.mission_marking_tool = self.TOOL_SPRAY
+        self.laser_hold_run_id: Optional[str] = None
+        self.laser_hold_point_id: Optional[str] = None
 
         self.last_marking_active_rx: Optional[float] = None
         self.last_mission_status_rx: Optional[float] = None
@@ -377,6 +422,10 @@ class SprayController(Node):
         self.transaction_point_id: Optional[str] = None
         self.transaction_point_index: Optional[int] = None
         self.transaction_kind: Optional[str] = None
+        self.transaction_tool: Optional[str] = None
+        # Set when a LASER transaction has reported SUCCESS (laser confirmed
+        # ON); from then on, turning it off is the normal end, not a fault.
+        self.laser_on_since: Optional[float] = None
 
         self.manual_requested = False
         self.manual_deadline_at: Optional[float] = None
@@ -421,6 +470,12 @@ class SprayController(Node):
                     if journal_kind
                     in {self.TRANSACTION_MISSION, self.TRANSACTION_MANUAL}
                     else self.TRANSACTION_MISSION
+                )
+                journal_tool = self._journal_str("transaction_tool")
+                self.transaction_tool = (
+                    self.TOOL_LASER
+                    if journal_tool == self.TOOL_LASER
+                    else self.TOOL_SPRAY
                 )
                 self.press_may_be_active = True
                 self.failure_after_release = "NODE_RESTART_DURING_UNCERTAIN_SPRAY"
@@ -467,6 +522,11 @@ class SprayController(Node):
             f"Spray settings: {self.spray_settings_path} "
             f"(duration source={self.spray_duration_source})"
         )
+        self.get_logger().warn(
+            f"Laser: AUX via Actuator Set {self.laser_actuator_set} "
+            f"on={self.laser_on_value:+.3f} off={self.laser_off_value:+.3f} "
+            f"(source={self.laser_value_source})"
+        )
 
     # ==============================================================
     # Parameter / utility helpers
@@ -476,6 +536,8 @@ class SprayController(Node):
         for name, value in (
             ("press_value", self.press_value),
             ("release_value", self.release_value),
+            ("laser_on_value", self.laser_on_value),
+            ("laser_off_value", self.laser_off_value),
         ):
             if not math.isfinite(value) or not -1.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be finite and in [-1.0, +1.0]")
@@ -491,6 +553,7 @@ class SprayController(Node):
             "mission_status_timeout_sec": self.mission_status_timeout_sec,
             "marking_active_timeout_sec": self.marking_active_timeout_sec,
             "raw_gnss_max_radial_mm": self.raw_gnss_max_radial_mm,
+            "laser_handoff_timeout_sec": self.laser_handoff_timeout_sec,
         }
 
         for name, value in positive.items():
@@ -507,6 +570,19 @@ class SprayController(Node):
                 "manual_override_timeout_sec must be strictly less than "
                 "hard_press_timeout_sec"
             )
+
+        for name, value in (
+            ("spray_actuator_set", self.spray_actuator_set),
+            ("laser_actuator_set", self.laser_actuator_set),
+        ):
+            if not 1 <= value <= 6:
+                raise ValueError(f"{name} must be in 1..6")
+
+        if self.spray_actuator_set == self.laser_actuator_set:
+            raise ValueError("spray and laser must use different actuator sets")
+
+        if self.laser_on_value == self.laser_off_value:
+            raise ValueError("laser_on_value must differ from laser_off_value")
 
     @staticmethod
     def _age(last_rx: Optional[float], now: float) -> float:
@@ -572,6 +648,7 @@ class SprayController(Node):
             "point_id": self.transaction_point_id,
             "point_index": self.transaction_point_index,
             "transaction_kind": self.transaction_kind,
+            "transaction_tool": self.transaction_tool,
             "press_value": self.press_value,
             "release_value": self.release_value,
             "spray_duration_sec": self.spray_duration_sec,
@@ -660,6 +737,7 @@ class SprayController(Node):
         if self.emergency_stop and self.state in {
             self.STATE_WAIT_PRESS_ACK,
             self.STATE_SPRAYING,
+            self.STATE_LASER_ON,
         }:
             self._abort_to_release("EMERGENCY_STOP_DURING_SPRAY")
 
@@ -699,6 +777,26 @@ class SprayController(Node):
 
         self.status_marking_active = bool(payload.get("marking_active", False))
 
+        tool = str(payload.get("marking_tool") or self.TOOL_SPRAY).strip().upper()
+        self.mission_marking_tool = (
+            self.TOOL_LASER if tool == self.TOOL_LASER else self.TOOL_SPRAY
+        )
+        hold = payload.get("laser_hold")
+        if isinstance(hold, dict):
+            hold_run = hold.get("mission_run_id")
+            hold_point = hold.get("point_id")
+            self.laser_hold_run_id = (
+                str(hold_run) if isinstance(hold_run, str) and hold_run else None
+            )
+            self.laser_hold_point_id = (
+                str(hold_point)
+                if isinstance(hold_point, str) and hold_point
+                else None
+            )
+        else:
+            self.laser_hold_run_id = None
+            self.laser_hold_point_id = None
+
         raw_gate = payload.get("raw_gnss_spray_gate")
         self.raw_gnss_spray_gate = raw_gate if isinstance(raw_gate, dict) else None
         if (
@@ -719,6 +817,7 @@ class SprayController(Node):
         if self.state in {
             self.STATE_WAIT_PRESS_ACK,
             self.STATE_SPRAYING,
+            self.STATE_LASER_ON,
         } and not self._transaction_px4_gate_ok(time.monotonic()):
             self._abort_to_release("PX4_STATE_BECAME_UNSAFE_DURING_SPRAY")
 
@@ -857,43 +956,83 @@ class SprayController(Node):
             and value < self.hard_press_timeout_sec
         )
 
-    def _apply_saved_settings(self) -> None:
-        """Apply an operator-saved spray hold time over the launch value.
+    def _laser_value_in_range(self, value: float) -> bool:
+        return math.isfinite(value) and -1.0 <= value <= 1.0
 
-        A missing file keeps the launch value. A corrupt or out-of-range file
-        is logged and ignored rather than stopping the controller.
+    def _read_saved_settings(self) -> dict[str, Any]:
+        if not self.spray_settings_path.exists():
+            return {}
+        payload = json.loads(self.spray_settings_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("settings file is not a JSON object")
+        return payload
+
+    def _apply_saved_settings(self) -> None:
+        """Apply operator-saved values over the launch values.
+
+        Each saved key is applied on its own. A missing file keeps the launch
+        values. A corrupt file, or an out-of-range value, is logged and
+        ignored rather than stopping the controller.
         """
 
         try:
-            if not self.spray_settings_path.exists():
-                return
-
-            payload = json.loads(self.spray_settings_path.read_text(encoding="utf-8"))
-            value = float(payload["spray_duration_sec"])
+            payload = self._read_saved_settings()
         except Exception as exc:
             self.get_logger().error(
                 f"Ignoring unreadable spray settings {self.spray_settings_path}: "
-                f"{exc}; using launch spray_duration_sec="
-                f"{self.spray_duration_sec:.3f}"
+                f"{exc}; using launch values"
             )
             return
 
-        if not self._spray_duration_in_range(value):
-            self.get_logger().error(
-                f"Ignoring saved spray_duration_sec={value!r} (out of range); "
-                f"using launch value {self.spray_duration_sec:.3f}"
-            )
-            return
+        if "spray_duration_sec" in payload:
+            try:
+                value = float(payload["spray_duration_sec"])
+            except (TypeError, ValueError):
+                value = math.nan
+            if self._spray_duration_in_range(value):
+                self.spray_duration_sec = value
+                self.spray_duration_source = "saved"
+            else:
+                self.get_logger().error(
+                    f"Ignoring saved spray_duration_sec="
+                    f"{payload['spray_duration_sec']!r} (out of range); using "
+                    f"launch value {self.spray_duration_sec:.3f}"
+                )
 
-        self.spray_duration_sec = value
-        self.spray_duration_source = "saved"
+        if "laser_on_value" in payload or "laser_off_value" in payload:
+            try:
+                on_value = float(payload["laser_on_value"])
+                off_value = float(payload["laser_off_value"])
+            except (KeyError, TypeError, ValueError):
+                on_value = off_value = math.nan
+            if (
+                self._laser_value_in_range(on_value)
+                and self._laser_value_in_range(off_value)
+                and on_value != off_value
+            ):
+                self.laser_on_value = on_value
+                self.laser_off_value = off_value
+                self.laser_value_source = "saved"
+            else:
+                self.get_logger().error(
+                    "Ignoring saved laser values (invalid); using launch "
+                    f"on={self.laser_on_value:+.3f} off={self.laser_off_value:+.3f}"
+                )
 
-    def _write_saved_settings(self, spray_duration_sec: float) -> None:
-        payload = {
-            "version": 1,
-            "spray_duration_sec": spray_duration_sec,
-            "updated_unix_ns": time.time_ns(),
-        }
+    def _write_saved_settings(self, **updates: float) -> None:
+        """Merge updates into the settings file, atomically.
+
+        Only keys the operator has explicitly saved are stored, so a later
+        change to a launch value still applies to every other setting.
+        """
+        try:
+            payload = self._read_saved_settings()
+        except Exception:
+            payload = {}
+
+        payload.update(updates)
+        payload["version"] = 1
+        payload["updated_unix_ns"] = time.time_ns()
 
         self.spray_settings_path.parent.mkdir(
             parents=True,
@@ -913,6 +1052,86 @@ class SprayController(Node):
             temporary,
             self.spray_settings_path,
         )
+
+    def _laser_config_callback(
+        self,
+        msg: String,
+    ) -> None:
+        """Safely update and save the laser ON/OFF actuator values."""
+
+        try:
+            payload = json.loads(msg.data)
+        except Exception:
+            self.get_logger().error("Rejected laser configuration: invalid JSON")
+            return
+
+        if not isinstance(payload, dict):
+            self.get_logger().error(
+                "Rejected laser configuration: payload is not an object"
+            )
+            return
+
+        request_id = str(payload.get("request_id") or "").strip()
+
+        if self._reject_config_if_busy(request_id):
+            return
+
+        try:
+            on_value = float(payload["laser_on_value"])
+            off_value = float(payload["laser_off_value"])
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            self._last_config_request_id = request_id
+            self._last_config_result = "REJECTED"
+            self._last_config_reason = "INVALID_VALUE"
+
+            self._publish_status()
+            return
+
+        if (
+            not self._laser_value_in_range(on_value)
+            or not self._laser_value_in_range(off_value)
+            or on_value == off_value
+        ):
+            self._last_config_request_id = request_id
+            self._last_config_result = "REJECTED"
+            self._last_config_reason = "LASER_VALUE_OUT_OF_RANGE"
+
+            self._publish_status()
+            return
+
+        try:
+            self._write_saved_settings(
+                laser_on_value=on_value,
+                laser_off_value=off_value,
+            )
+        except Exception as exc:
+            self.get_logger().error(f"Unable to save laser values: {exc}")
+
+            self._last_config_request_id = request_id
+            self._last_config_result = "REJECTED"
+            self._last_config_reason = "SPRAY_SETTINGS_SAVE_FAILED"
+
+            self._publish_status()
+            return
+
+        self.laser_on_value = on_value
+        self.laser_off_value = off_value
+        self.laser_value_source = "saved"
+
+        self._last_config_request_id = request_id
+        self._last_config_result = "ACCEPTED"
+        self._last_config_reason = None
+
+        self.get_logger().warn(
+            "Laser configuration updated: "
+            f"on={self.laser_on_value:+.3f}, off={self.laser_off_value:+.3f}"
+        )
+
+        self._publish_status()
 
     def _spray_duration_config_callback(
         self,
@@ -970,7 +1189,7 @@ class SprayController(Node):
         # cannot be written, reject instead of applying a value that would
         # silently revert to the launch default on the next start.
         try:
-            self._write_saved_settings(spray_duration_sec)
+            self._write_saved_settings(spray_duration_sec=spray_duration_sec)
         except Exception as exc:
             self.get_logger().error(f"Unable to save spray hold time: {exc}")
 
@@ -1094,6 +1313,44 @@ class SprayController(Node):
             and self.command_client.service_is_ready()
         )
 
+    def _laser_hold_failure(self, now: float) -> Optional[str]:
+        """Why a laser held ON must now be switched OFF, or None to keep it.
+
+        OFF is the normal end once mission_manager clears laser_hold for
+        this point (NEXT, SKIP, STOP, completion). It is also forced by any
+        safety loss. There is deliberately no time limit on a valid hold.
+        """
+        if not self.enabled:
+            return "LASER_CONTROLLER_DISABLED"
+        if self.emergency_stop:
+            return "EMERGENCY_STOP_DURING_SPRAY"
+        if self.mission_marking_tool != self.TOOL_LASER:
+            return "LASER_TOOL_DESELECTED"
+        if self._age(self.last_mission_status_rx, now) > self.mission_status_timeout_sec:
+            return "MISSION_STATUS_STALE_DURING_LASER"
+        if not self._px4_gate_ok(now):
+            return "PX4_STATE_BECAME_UNSAFE_DURING_SPRAY"
+
+        if (
+            self.laser_hold_run_id == self.transaction_run_id
+            and self.laser_hold_point_id == self.transaction_point_id
+            and self.transaction_point_id is not None
+        ):
+            return None
+
+        # Handoff: the SUCCESS result is out but mission_manager has not yet
+        # published the hold. Tolerate that only while this point is still
+        # the running mission's active point.
+        if (
+            self.laser_on_since is not None
+            and now - self.laser_on_since < self.laser_handoff_timeout_sec
+            and self.mission_state == "RUNNING"
+            and self._transaction_matches_current()
+        ):
+            return None
+
+        return "LASER_HOLD_RELEASED"
+
     def _raw_gnss_gate_ok(self) -> bool:
         """Raw RTK-FIXED GNSS radial error <= raw_gnss_max_radial_mm, re-checked.
 
@@ -1141,23 +1398,53 @@ class SprayController(Node):
     def _make_actuator_request(
         self,
         value: float,
+        actuator_set: Optional[int] = None,
+        extra: Optional[dict[int, float]] = None,
     ) -> CommandLong.Request:
         req = CommandLong.Request()
         req.broadcast = False
         req.command = self.MAV_CMD_DO_SET_ACTUATOR
         req.confirmation = 0
 
-        # Actuator Set 1 -> param1. NaN explicitly leaves sets 2..6 alone.
-        req.param1 = float(value)
-        req.param2 = math.nan
-        req.param3 = math.nan
-        req.param4 = math.nan
-        req.param5 = math.nan
-        req.param6 = math.nan
+        # Actuator Set N -> paramN. NaN explicitly leaves the other sets
+        # alone, so a laser command never moves the spray servo and back.
+        values = {
+            index: math.nan
+            for index in range(1, 7)
+        }
+        values[actuator_set or self.spray_actuator_set] = float(value)
+        for index, extra_value in (extra or {}).items():
+            values[index] = float(extra_value)
+        req.param1 = values[1]
+        req.param2 = values[2]
+        req.param3 = values[3]
+        req.param4 = values[4]
+        req.param5 = values[5]
+        req.param6 = values[6]
 
         # Index 0 selects actuators 1..6. This is the first set.
         req.param7 = 0.0
         return req
+
+    def _transaction_is_laser(self) -> bool:
+        return self.transaction_tool == self.TOOL_LASER
+
+    def _transaction_actuator_set(self) -> int:
+        return (
+            self.laser_actuator_set
+            if self._transaction_is_laser()
+            else self.spray_actuator_set
+        )
+
+    def _transaction_press_value(self) -> float:
+        return self.laser_on_value if self._transaction_is_laser() else self.press_value
+
+    def _transaction_release_value(self) -> float:
+        return (
+            self.laser_off_value
+            if self._transaction_is_laser()
+            else self.release_value
+        )
 
     def _send_command(
         self,
@@ -1169,7 +1456,7 @@ class SprayController(Node):
             return False
 
         self.command_future = self.command_client.call_async(
-            self._make_actuator_request(value)
+            self._make_actuator_request(value, self._transaction_actuator_set())
         )
 
         self.command_kind = kind
@@ -1198,6 +1485,7 @@ class SprayController(Node):
 
     def _begin_transaction_from_current_point(self) -> None:
         self.transaction_kind = self.TRANSACTION_MISSION
+        self.transaction_tool = self.mission_marking_tool
         self.transaction_run_id = self.mission_run_id
         self.transaction_point_id = self.current_point_id
         self.transaction_point_index = self.current_point_index
@@ -1373,6 +1661,24 @@ class SprayController(Node):
             "spray_duration_sec": self.spray_duration_sec,
             "manual_override_timeout_sec": self.manual_override_timeout_sec,
             "spray_duration_source": self.spray_duration_source,
+            "marking_tool": self.mission_marking_tool,
+            "transaction_tool": self.transaction_tool,
+            "laser_on": (
+                self.transaction_tool == self.TOOL_LASER
+                and self.press_may_be_active
+            ),
+            "laser_on_point_id": (
+                self.transaction_point_id
+                if self.transaction_tool == self.TOOL_LASER
+                and self.press_may_be_active
+                else None
+            ),
+            "laser_hold_point_id": self.laser_hold_point_id,
+            "laser_on_value": self.laser_on_value,
+            "laser_off_value": self.laser_off_value,
+            "laser_value_source": self.laser_value_source,
+            "spray_actuator_set": self.spray_actuator_set,
+            "laser_actuator_set": self.laser_actuator_set,
             "spray_elapsed_sec": (
                 round(spray_elapsed_sec, 3)
                 if spray_elapsed_sec is not None
@@ -1423,7 +1729,7 @@ class SprayController(Node):
 
         if self._send_command(
             kind="RELEASE",
-            value=self.release_value,
+            value=self._transaction_release_value(),
         ):
             # First RELEASE only; retries do not move the timestamp.
             self.transaction_timing.setdefault("release_sent", now)
@@ -1450,6 +1756,27 @@ class SprayController(Node):
             self.get_logger().warn(
                 "Servo RELEASE confirmed; existing spray fault remains latched"
             )
+            return
+
+        if self._transaction_is_laser() and (
+            self.laser_on_since is not None
+            or self.failure_after_release == "NODE_RESTART_DURING_UNCERTAIN_SPRAY"
+        ):
+            # The laser point already reported SUCCESS (or a restart found
+            # the laser possibly on). Laser OFF confirmed is the normal end:
+            # never a fault, never a second result.
+            point_id = self.transaction_point_id
+            try:
+                if self.laser_on_since is not None:
+                    self._write_journal(state=self.JOURNAL_COMPLETED)
+                else:
+                    self._clear_journal()
+            except Exception as exc:
+                self.get_logger().error(
+                    f"Unable to update journal after LASER OFF: {exc}"
+                )
+            self._reset_transaction_to_idle()
+            self.get_logger().warn(f"LASER OFF confirmed | {point_id}")
             return
 
         if self.transaction_kind == self.TRANSACTION_MANUAL:
@@ -1650,6 +1977,8 @@ class SprayController(Node):
         self.transaction_point_id = None
         self.transaction_point_index = None
         self.transaction_kind = None
+        self.transaction_tool = None
+        self.laser_on_since = None
 
         self.manual_requested = False
         self.manual_deadline_at = None
@@ -1724,6 +2053,7 @@ class SprayController(Node):
                 # Even from IDLE, send an idempotent RELEASE so status can
                 # distinguish an accepted request from physical confirmation.
                 self.transaction_kind = self.TRANSACTION_MANUAL
+                self.transaction_tool = self.TOOL_SPRAY
                 self.failure_after_release = None
                 self.release_confirmed = False
                 self.transaction_timing = {}
@@ -1757,6 +2087,7 @@ class SprayController(Node):
             return response
 
         self.transaction_kind = self.TRANSACTION_MANUAL
+        self.transaction_tool = self.TOOL_SPRAY
         self.transaction_run_id = None
         self.transaction_point_id = None
         self.transaction_point_index = None
@@ -1952,7 +2283,7 @@ class SprayController(Node):
             # uncertain we RELEASE and fail instead of blindly pressing again.
             if not self._send_command(
                 kind="PRESS",
-                value=self.press_value,
+                value=self._transaction_press_value(),
             ):
                 self._set_fault_without_press(
                     "MAVROS_COMMAND_SERVICE_UNAVAILABLE_BEFORE_PRESS"
@@ -2039,6 +2370,19 @@ class SprayController(Node):
                 self._begin_or_retry_release()
                 return
 
+            if self._transaction_is_laser():
+                # Laser confirmed ON: the point is marked. Report it now so
+                # mission_manager completes the point and holds for NEXT; the
+                # laser then stays on in LASER_ON until the hold is cleared.
+                self.laser_on_since = now
+                self.state = self.STATE_LASER_ON
+                self._publish_result(result="SUCCESS", reason=None)
+                self.get_logger().warn(
+                    f"LASER ON | {self.transaction_point_id} | "
+                    f"value={self.laser_on_value:+.3f} | waiting for NEXT"
+                )
+                return
+
             self.state = self.STATE_SPRAYING
             return
 
@@ -2085,6 +2429,15 @@ class SprayController(Node):
             ):
                 self.failure_after_release = None
                 self._begin_or_retry_release()
+            return
+
+        # ----------------------------------------------------------
+        # Laser held ON at a completed point until the operator moves on.
+        # ----------------------------------------------------------
+        if self.state == self.STATE_LASER_ON:
+            reason = self._laser_hold_failure(now)
+            if reason is not None:
+                self._abort_to_release(reason)
             return
 
         # ----------------------------------------------------------
@@ -2171,8 +2524,13 @@ class SprayController(Node):
             if not self.command_client.service_is_ready():
                 return
 
+            # One command: spray RELEASE and laser OFF together.
             future = self.command_client.call_async(
-                self._make_actuator_request(self.release_value)
+                self._make_actuator_request(
+                    self.release_value,
+                    self.spray_actuator_set,
+                    extra={self.laser_actuator_set: self.laser_off_value},
+                )
             )
 
             rclpy.spin_until_future_complete(

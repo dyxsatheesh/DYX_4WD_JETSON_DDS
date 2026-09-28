@@ -438,6 +438,10 @@ class RoverBackendRosNode(Node):
     # Must match PWM_AUX_MIN5/MAX5 on the FCU.
     SPRAY_PWM_MIN_US = 900.0
     SPRAY_PWM_MAX_US = 2000.0
+    # Laser on AUX6 (PWM_AUX_FUNC6=302). Must match PWM_AUX_MIN6/MAX6.
+    LASER_PWM_MIN_US = 1000.0
+    LASER_PWM_MAX_US = 2000.0
+    MARKING_TOOLS = ("LASER", "SPRAY")
 
     def __init__(self) -> None:
         super().__init__("rover_backend")
@@ -509,7 +513,10 @@ class RoverBackendRosNode(Node):
         self._mission_manager_state = "EMPTY"
         self._mission_manager_ready = False
         self._mission_manager_error: str | None = None
-        self._mission_execution_mode = "AUTO"
+        # Placeholders until mission_manager's status arrives; it owns the
+        # real values (factory default MANUAL + LASER, or the saved defaults).
+        self._mission_execution_mode = "MANUAL"
+        self._mission_marking_tool = "LASER"
         # True from /trajectory_generator/prepare acceptance until the complete
         # multipart trajectory has been accepted by mission_manager. While this
         # is true, an intermediate mission_manager EMPTY snapshot must not make
@@ -576,6 +583,19 @@ class RoverBackendRosNode(Node):
             String,
             "/spray/config",
             retained_qos,
+        )
+        # Not retained: mission_manager must come back to its saved default
+        # after a restart, not to a replayed per-mission choice.
+        self._marking_tool_pub = self.create_publisher(
+            String,
+            "/mission_manager/marking_tool",
+            command_qos,
+        )
+        # Not retained: spray_controller saves the values to its own file.
+        self._laser_config_pub = self.create_publisher(
+            String,
+            "/spray/laser_config",
+            command_qos,
         )
         # Not retained: spray_controller saves the value to its own file.
         self._spray_duration_config_pub = self.create_publisher(
@@ -837,6 +857,10 @@ class RoverBackendRosNode(Node):
         self._spray_enabled_client = self.create_client(
             SetBool,
             "/spray/set_enabled",
+        )
+        self._save_mission_defaults_client = self.create_client(
+            Trigger,
+            "/mission_manager/save_defaults",
         )
 
         # ======================================================
@@ -1791,7 +1815,82 @@ class RoverBackendRosNode(Node):
             "config_reason": status.get("config_reason"),
             "pwm_min_us": int(self.SPRAY_PWM_MIN_US),
             "pwm_max_us": int(self.SPRAY_PWM_MAX_US),
+            "marking_tool": status.get("marking_tool"),
+            "laser_on": bool(status.get("laser_on", False)),
+            "laser_on_point_id": status.get("laser_on_point_id"),
+            "laser_on_pwm_us": self._actuator_value_to_pwm(
+                status.get("laser_on_value"),
+                self.LASER_PWM_MIN_US,
+                self.LASER_PWM_MAX_US,
+            ),
+            "laser_off_pwm_us": self._actuator_value_to_pwm(
+                status.get("laser_off_value"),
+                self.LASER_PWM_MIN_US,
+                self.LASER_PWM_MAX_US,
+            ),
+            "laser_on_value": _finite_float(status.get("laser_on_value")),
+            "laser_off_value": _finite_float(status.get("laser_off_value")),
+            "laser_value_source": status.get("laser_value_source"),
+            "laser_pwm_min_us": int(self.LASER_PWM_MIN_US),
+            "laser_pwm_max_us": int(self.LASER_PWM_MAX_US),
         }
+
+    @staticmethod
+    def _actuator_value_to_pwm(
+        value: Any,
+        pwm_min_us: float,
+        pwm_max_us: float,
+    ) -> int | None:
+        actuator_value = _finite_float(value)
+        if actuator_value is None or not -1.0 <= actuator_value <= 1.0:
+            return None
+        span = pwm_max_us - pwm_min_us
+        return int(round(pwm_min_us + ((actuator_value + 1.0) / 2.0) * span))
+
+    @classmethod
+    def _laser_pwm_to_actuator_value(
+        cls,
+        pwm_us: float,
+    ) -> float:
+        pwm = _finite_float(pwm_us)
+        if pwm is None:
+            raise RuntimeError("Laser PWM must be a finite number")
+        if pwm < cls.LASER_PWM_MIN_US or pwm > cls.LASER_PWM_MAX_US:
+            raise RuntimeError(
+                "Laser PWM must be between "
+                f"{int(cls.LASER_PWM_MIN_US)} and "
+                f"{int(cls.LASER_PWM_MAX_US)} microseconds"
+            )
+        span = cls.LASER_PWM_MAX_US - cls.LASER_PWM_MIN_US
+        return 2.0 * ((pwm - cls.LASER_PWM_MIN_US) / span) - 1.0
+
+    def set_laser_config(
+        self,
+        *,
+        on_pwm_us: float,
+        off_pwm_us: float,
+    ) -> dict[str, Any]:
+        """Publish laser ON/OFF PWM (saved by spray_controller) and wait for ACK."""
+
+        on_value = self._laser_pwm_to_actuator_value(on_pwm_us)
+        off_value = self._laser_pwm_to_actuator_value(off_pwm_us)
+        if on_value == off_value:
+            raise RuntimeError("Laser ON and OFF PWM must differ")
+
+        request_id = uuid.uuid4().hex
+        message = String()
+        message.data = json.dumps(
+            {
+                "request_id": request_id,
+                "laser_on_value": on_value,
+                "laser_off_value": off_value,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self._laser_config_pub.publish(message)
+
+        return self._wait_for_spray_config_ack(request_id)
 
     def set_spray_config(
         self,
@@ -2707,6 +2806,15 @@ class RoverBackendRosNode(Node):
         if execution_mode not in {"AUTO", "MANUAL"}:
             execution_mode = self._mission_execution_mode
 
+        marking_tool = (
+            str(payload.get("marking_tool", self._mission_marking_tool))
+            .strip()
+            .upper()
+        )
+        if marking_tool not in self.MARKING_TOOLS:
+            marking_tool = self._mission_marking_tool
+        laser_hold = payload.get("laser_hold")
+
         manager_ready = bool(payload.get("path_ready", False)) and bool(
             payload.get(
                 "trajectory_ready",
@@ -2717,6 +2825,7 @@ class RoverBackendRosNode(Node):
         with self._runtime_lock:
             self._mission_manager_state = state_name
             self._mission_execution_mode = execution_mode
+            self._mission_marking_tool = marking_tool
 
             self._mission_manager_ready = state_name == "READY" and manager_ready
 
@@ -2816,6 +2925,14 @@ class RoverBackendRosNode(Node):
         mission_updates: dict[str, Any] = {
             "state": effective_state_name,
             "execution_mode": execution_mode,
+            "marking_tool": marking_tool,
+            "laser_hold_point_id": (
+                laser_hold.get("point_id") if isinstance(laser_hold, dict) else None
+            ),
+            "laser_on": bool(payload.get("laser_on", False)),
+            "default_execution_mode": payload.get("default_execution_mode"),
+            "default_marking_tool": payload.get("default_marking_tool"),
+            "defaults_source": payload.get("defaults_source"),
             "ready": bool(effective_state_name == "READY" and manager_ready),
             "manager_ready": bool(self._mission_manager_ready),
             "total_points": total,
@@ -4080,6 +4197,67 @@ class RoverBackendRosNode(Node):
 
         return rover_state.section("mission")
 
+    def set_marking_tool(
+        self,
+        marking_tool: str,
+    ) -> dict[str, Any]:
+        tool = str(marking_tool).strip().upper()
+
+        if tool not in self.MARKING_TOOLS:
+            raise RuntimeError("marking_tool must be LASER or SPRAY")
+
+        with self._runtime_lock:
+            manager_state = self._mission_manager_state
+
+        if manager_state in {
+            "RUNNING",
+            "PAUSED",
+            "WAITING_FOR_NEXT",
+        }:
+            raise RuntimeError(
+                "Cannot change marking tool while mission is " f"{manager_state}"
+            )
+
+        message = String()
+        message.data = tool
+        self._marking_tool_pub.publish(message)
+
+        deadline = time.monotonic() + self.EXECUTION_MODE_ACK_TIMEOUT_SEC
+        while True:
+            with self._runtime_lock:
+                observed = self._mission_marking_tool
+            if observed == tool:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Timed out waiting for mission_manager to accept "
+                    f"marking tool {tool}"
+                )
+            time.sleep(0.02)
+
+        rover_state.update(
+            "mission",
+            marking_tool=tool,
+            message=f"Marking tool set to {tool}",
+            error=None,
+        )
+
+        return rover_state.section("mission")
+
+    def save_mission_defaults(self) -> dict[str, Any]:
+        """Save the current execution mode + marking tool as the defaults."""
+
+        accepted, service_message = self._call_trigger(
+            client=self._save_mission_defaults_client,
+            service_name="/mission_manager/save_defaults",
+        )
+
+        if not accepted:
+            raise RuntimeError(service_message)
+
+        rover_state.update("mission", message=service_message, error=None)
+        return rover_state.section("mission")
+
     def _proxy_manager_operation(
         self,
         command: str,
@@ -4399,6 +4577,29 @@ class RosBridgeRuntime:
     ) -> dict[str, Any]:
         with self._operation_lock:
             return self.node.set_execution_mode(execution_mode)
+
+    def set_marking_tool(
+        self,
+        marking_tool: str,
+    ) -> dict[str, Any]:
+        with self._operation_lock:
+            return self.node.set_marking_tool(marking_tool)
+
+    def save_mission_defaults(self) -> dict[str, Any]:
+        with self._operation_lock:
+            return self.node.save_mission_defaults()
+
+    def set_laser_config(
+        self,
+        *,
+        on_pwm_us: float,
+        off_pwm_us: float,
+    ) -> dict[str, Any]:
+        with self._operation_lock:
+            return self.node.set_laser_config(
+                on_pwm_us=on_pwm_us,
+                off_pwm_us=off_pwm_us,
+            )
 
     def start_mission(self) -> dict[str, Any]:
         with self._operation_lock:

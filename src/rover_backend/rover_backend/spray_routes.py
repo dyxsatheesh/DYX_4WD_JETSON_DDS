@@ -56,6 +56,13 @@ class SprayConfigRequest(BaseModel):
     release_pwm_us: float
 
 
+class LaserConfigRequest(BaseModel):
+    """Laser (AUX6) ON/OFF PWM configuration."""
+
+    on_pwm_us: float
+    off_pwm_us: float
+
+
 class SprayDurationRequest(BaseModel):
     """Mission spray hold time (servo ON interval) configuration."""
 
@@ -335,6 +342,61 @@ async def set_spray_config(
     return {
         "success": True,
         "message": ("Spray PWM configuration updated successfully."),
+        "config": config,
+    }
+
+
+@spray_router.post("/laser-config")
+async def set_laser_config(
+    request: LaserConfigRequest,
+    _session: AuthenticatedSession = Depends(require_auth),
+) -> dict[str, Any]:
+    """Set and save the laser ON/OFF PWM (1000-2000 us, AUX6)."""
+
+    _require_ros_bridge()
+
+    for name, value in (
+        ("on_pwm_us", request.on_pwm_us),
+        ("off_pwm_us", request.off_pwm_us),
+    ):
+        if not math.isfinite(value) or not 1000.0 <= value <= 2000.0:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "success": False,
+                    "message": f"{name} must be between 1000 and 2000 microseconds.",
+                },
+            )
+
+    if request.on_pwm_us == request.off_pwm_us:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "success": False,
+                "message": "on_pwm_us and off_pwm_us must differ.",
+            },
+        )
+
+    try:
+        config = await run_in_threadpool(
+            lambda: ros_bridge.set_laser_config(
+                on_pwm_us=request.on_pwm_us,
+                off_pwm_us=request.off_pwm_us,
+            )
+        )
+
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "message": str(error),
+            },
+        ) from error
+
+    return {
+        "success": True,
+        "message": "Laser PWM configuration saved.",
         "config": config,
     }
 
