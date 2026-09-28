@@ -79,8 +79,10 @@ a stack restart or another connection to the FCU serial device.
 
 | Item | Value | Source |
 |---|---|---|
-| Jetson IP | `192.168.3.101` (user `flash`) | `src/rover_backend/config/backend.env` |
-| GCS UDP target | `192.168.3.105:14550` | `src/rover_bringup/launch/rover.launch.py:50` |
+| Jetson IP | `192.168.3.101` (user `flash`) — since 2026-09-28 this is the Jetson's **own Wi-Fi hotspot** `DYX-4WD` (no router); a cable in `enP8p1s0` adds a DHCP address (`192.168.1.37` on the bench) | `src/rover_backend/config/backend.env`, `docs/JETSON_HOTSPOT_NETWORK.md` |
+| Wi-Fi | built-in **RTL8822CE**, vendor driver `rtl88x2ce`, AP on 2.4 GHz ch 6, txpower 15 dBm | `docs/JETSON_HOTSPOT_NETWORK.md` |
+| Internet uplink | USB 4G dongle (`usb3`, `192.168.8.x`) — carries NTRIP; shared to hotspot clients, capped | `docs/JETSON_HOTSPOT_NETWORK.md` |
+| GCS UDP target | `192.168.3.105:14550` — ⚠ nothing holds `.105` on the hotspot (ARP INCOMPLETE); reserve it for the QGC laptop if QGC is used | `src/rover_bringup/launch/rover.launch.py:102` |
 | OS | ROS2 Humble (EOL May 2027) | `REFACTOR_TO_CPP_AUDIT.md` |
 | FCU | **Holybro Pixhawk 6X** — NOT a CubeOrangePlus | `src/spray_controller/spray_controller/spray_controller_node.py:6`, `rover.launch.py:174` |
 | FCU connection | `/dev/ttyACM0` @ 921600, `tgt_system=1 tgt_component=1 fcu_protocol=v2.0` | `rover.launch.py:47-59` |
@@ -1095,6 +1097,40 @@ Production B-side (this rover's active profile): NTRIP → Jetson → direct Mos
   PATCH builder only sends changed fields, so editing other profile fields does not clobber the
   persisted direct-USB settings. Not a blocker for the current production profile.
 
+## 2026-09-28 — Jetson hotspot network and spray manual-control API
+
+**Network: the router is gone.** The Jetson runs its own WPA2 access point
+`DYX-4WD` (NetworkManager `DYX-4WD-hotspot`, shared mode, autoconnect) and
+keeps `192.168.3.101`, so the frontend and `backend.env` are unchanged.
+Tablets get `192.168.3.x` by DHCP and share the Jetson's USB 4G internet
+(they need it for Mapbox tiles). Runbook for provisioning a new rover:
+**`docs/JETSON_HOTSPOT_NETWORK.md`** (`scripts/setup_jetson_hotspot.sh`,
+`scripts/install_hotspot_qos.sh`, both run by the operator with sudo —
+`flash` has no passwordless sudo).
+
+- ⚠ **Client internet is capped on purpose** (200 KiB/s down / 64 KiB/s up,
+  all clients together, `mangle/DYX_HOTSPOT_QOS` via an NM dispatcher). Before
+  the cap, forwarded client downloads (494 KiB/s) filled the Wi-Fi queue and
+  the app stalled: Mac->Jetson ping worst 1459 ms, Jetson->tablet 785 ms. After:
+  worst 90 ms under a download, tablet 6.8 ms avg. DDS multicast was measured
+  and ruled out (3.5 KB/s). Do not remove the cap to "speed up" the map —
+  use Mapbox offline packs instead.
+- ⚠ **The Jetson kernel (`5.15.185-tegra`) has no HTB/fq_codel/cake/TBF/prio
+  qdisc and no DSCP/TOS/CLASSIFY target.** Don't propose `tc` shaping or DSCP
+  marking without building modules; `xt_hashlimit` is what exists.
+- Setting regdomain `IN` did **not** raise txpower above 15 dBm at runtime
+  (vendor driver). Range is the open field risk; external antennas are the fix.
+
+**Spray: manual control + saved hold time.** `POST /api/spray/{on,off,test,
+enable,disable,duration}` — full contract in
+**`docs/SPRAY_MANUAL_CONTROL_API.md`**. Operator workflow: tune with
+`/test {duration_s}`, save with `/duration {spray_duration_sec}`. The saved
+value persists in `/home/flash/.ros/dyx_spray_settings.json` and overrides
+`spray_duration_sec` in `rover.launch.py` on every start
+(`spray_duration_source` in `/api/spray/config` says which applies). Manual
+spray requires PX4 armed and no active mission; unit-tested only, not
+field-tested; frontend buttons not wired yet.
+
 ## Repo status (2026-08-31)
 
 - **`WORKING_STATUS_24_06_2026.txt`** — stale (2026-06-24), architecture it
@@ -1199,6 +1235,8 @@ ros2 topic echo /mavros/state --once
 ros2 topic echo /mavros/local_position/odom
 ros2 topic echo /rpp/accuracy --once
 journalctl -u bag-autorecord.service -f      # the only systemd unit on this Jetson
+iw dev wlP1p1s0 station dump | grep -E "^Station|signal:"   # hotspot clients
+sudo iptables -t mangle -L DYX_HOTSPOT_QOS -n -v            # client-internet cap counters
 ```
 
 - Bag bundles: `bags_jet/<mission.csv_timestamp>/` (sometimes nested under
