@@ -30,8 +30,11 @@ Safety properties
 * Never reports SUCCESS until PRESS was accepted and RELEASE was accepted.
 * PRESS is never automatically retried after an uncertain command timeout.
 * RELEASE is idempotently retried until PX4 acknowledges it.
-* Any E-stop, mission-disable, OFFBOARD loss, disarm, stale control input, or
-  marking-hold loss during a spray causes an immediate release-recovery path.
+* Mission sprays release on E-stop, mission-disable, OFFBOARD loss, disarm,
+  stale control input, or marking-hold loss. Manual sprays bypass only the
+  mission-specific gates and still release on E-stop/PX4 safety loss.
+* Manual PRESS is bounded below the independent hard press watchdog; repeated
+  requests never extend the original deadline.
 * A persistent journal prevents a node restart from blindly re-spraying a
   point after a crash at an uncertain stage.
 * Faults latch. Reset is allowed only in a safe state using /spray/reset_fault.
@@ -57,7 +60,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from std_msgs.msg import Bool, String
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
 
 
 class SprayController(Node):
@@ -74,6 +77,10 @@ class SprayController(Node):
     STATE_RECOVERY_RELEASE = "RECOVERY_RELEASE"
     STATE_WAIT_MARKING_CLEAR = "WAIT_MARKING_CLEAR"
     STATE_FAULT = "FAULT"
+
+    TRANSACTION_MISSION = "MISSION"
+    TRANSACTION_MANUAL = "MANUAL"
+    ACTIVE_MISSION_STATES = frozenset({"RUNNING", "PAUSED", "WAITING_FOR_NEXT"})
 
     JOURNAL_PRESS_COMMAND_SENT = "PRESS_COMMAND_SENT"
     JOURNAL_PRESSED = "PRESSED"
@@ -97,6 +104,13 @@ class SprayController(Node):
             "RAW_GNSS_SPRAY_GATE_LOST_DURING_SPRAY",
         }
     )
+    OPERATOR_CANCEL_REASONS = frozenset(
+        {
+            "MANUAL_RELEASE_REQUESTED",
+            "MANUAL_OVERRIDE_TIMEOUT",
+            "CONTROLLER_DISABLED_DURING_SPRAY",
+        }
+    )
 
     def __init__(self) -> None:
         super().__init__("spray_controller")
@@ -113,6 +127,7 @@ class SprayController(Node):
         self.declare_parameter("command_timeout_sec", 1.0)
         self.declare_parameter("release_retry_interval_sec", 0.25)
         self.declare_parameter("hard_press_timeout_sec", 5.0)
+        self.declare_parameter("manual_override_timeout_sec", 3.0)
 
         self.declare_parameter("mavros_state_timeout_sec", 2.5)
         self.declare_parameter("mission_status_timeout_sec", 1.0)
@@ -145,6 +160,9 @@ class SprayController(Node):
         )
         self.hard_press_timeout_sec = float(
             self.get_parameter("hard_press_timeout_sec").value
+        )
+        self.manual_override_timeout_sec = float(
+            self.get_parameter("manual_override_timeout_sec").value
         )
 
         self.mavros_state_timeout_sec = float(
@@ -280,6 +298,16 @@ class SprayController(Node):
             "/spray/reset_fault",
             self._reset_fault_service,
         )
+        self.create_service(
+            SetBool,
+            "/spray/manual",
+            self._manual_spray_service,
+        )
+        self.create_service(
+            SetBool,
+            "/spray/set_enabled",
+            self._set_enabled_service,
+        )
 
         # ==========================================================
         # MAVROS command client
@@ -327,6 +355,10 @@ class SprayController(Node):
         self.transaction_run_id: Optional[str] = None
         self.transaction_point_id: Optional[str] = None
         self.transaction_point_index: Optional[int] = None
+        self.transaction_kind: Optional[str] = None
+
+        self.manual_requested = False
+        self.manual_deadline_at: Optional[float] = None
 
         self.command_future = None
         self.command_kind: Optional[str] = None
@@ -338,6 +370,7 @@ class SprayController(Node):
 
         self.failure_after_release: Optional[str] = None
         self.next_release_retry_at = 0.0
+        self.preserve_fault_after_release = False
 
         self.release_confirmed = False
 
@@ -361,6 +394,13 @@ class SprayController(Node):
                 self.transaction_run_id = self._journal_str("mission_run_id")
                 self.transaction_point_id = self._journal_str("point_id")
                 self.transaction_point_index = self._journal_int("point_index")
+                journal_kind = self._journal_str("transaction_kind")
+                self.transaction_kind = (
+                    journal_kind
+                    if journal_kind
+                    in {self.TRANSACTION_MISSION, self.TRANSACTION_MANUAL}
+                    else self.TRANSACTION_MISSION
+                )
                 self.press_may_be_active = True
                 self.failure_after_release = "NODE_RESTART_DURING_UNCERTAIN_SPRAY"
                 self.state = self.STATE_RECOVERY_RELEASE
@@ -373,6 +413,7 @@ class SprayController(Node):
 
             elif journal_state == self.JOURNAL_FAILED_SAFE:
                 self.fault_latched = True
+                self.release_confirmed = True
                 self.fault_reason = str(
                     self.journal.get(
                         "reason",
@@ -420,6 +461,7 @@ class SprayController(Node):
             "command_timeout_sec": self.command_timeout_sec,
             "release_retry_interval_sec": self.release_retry_interval_sec,
             "hard_press_timeout_sec": self.hard_press_timeout_sec,
+            "manual_override_timeout_sec": self.manual_override_timeout_sec,
             "mavros_state_timeout_sec": self.mavros_state_timeout_sec,
             "mission_status_timeout_sec": self.mission_status_timeout_sec,
             "marking_active_timeout_sec": self.marking_active_timeout_sec,
@@ -433,6 +475,12 @@ class SprayController(Node):
         if self.hard_press_timeout_sec <= self.spray_duration_sec:
             raise ValueError(
                 "hard_press_timeout_sec must be greater than " "spray_duration_sec"
+            )
+
+        if self.manual_override_timeout_sec >= self.hard_press_timeout_sec:
+            raise ValueError(
+                "manual_override_timeout_sec must be strictly less than "
+                "hard_press_timeout_sec"
             )
 
     @staticmethod
@@ -498,6 +546,7 @@ class SprayController(Node):
             "mission_run_id": self.transaction_run_id,
             "point_id": self.transaction_point_id,
             "point_index": self.transaction_point_index,
+            "transaction_kind": self.transaction_kind,
             "press_value": self.press_value,
             "release_value": self.release_value,
             "spray_duration_sec": self.spray_duration_sec,
@@ -553,13 +602,16 @@ class SprayController(Node):
         if not new_value and self.marking_active:
             self.marking_active_since = None
 
-            if self.state in {
+            if self.transaction_kind != self.TRANSACTION_MANUAL and self.state in {
                 self.STATE_WAIT_PRESS_ACK,
                 self.STATE_SPRAYING,
             }:
                 self._abort_to_release("MARKING_HOLD_LOST_DURING_SPRAY")
 
-            elif self.state == self.STATE_WAIT_MARKING_CLEAR:
+            elif (
+                self.transaction_kind != self.TRANSACTION_MANUAL
+                and self.state == self.STATE_WAIT_MARKING_CLEAR
+            ):
                 self._reset_transaction_to_idle()
 
         self.marking_active = new_value
@@ -567,10 +619,14 @@ class SprayController(Node):
     def _mission_enable_callback(self, msg: Bool) -> None:
         self.mission_enable = bool(msg.data)
 
-        if not self.mission_enable and self.state in {
-            self.STATE_WAIT_PRESS_ACK,
-            self.STATE_SPRAYING,
-        }:
+        if (
+            self.transaction_kind != self.TRANSACTION_MANUAL
+            and not self.mission_enable
+            and self.state in {
+                self.STATE_WAIT_PRESS_ACK,
+                self.STATE_SPRAYING,
+            }
+        ):
             self._abort_to_release("MISSION_DISABLED_DURING_SPRAY")
 
     def _emergency_stop_callback(self, msg: Bool) -> None:
@@ -621,7 +677,8 @@ class SprayController(Node):
         raw_gate = payload.get("raw_gnss_spray_gate")
         self.raw_gnss_spray_gate = raw_gate if isinstance(raw_gate, dict) else None
         if (
-            self.require_raw_gnss_spray_gate
+            self.transaction_kind != self.TRANSACTION_MANUAL
+            and self.require_raw_gnss_spray_gate
             and self.state in {self.STATE_WAIT_PRESS_ACK, self.STATE_SPRAYING}
             and not self._raw_gnss_gate_ok()
         ):
@@ -637,14 +694,14 @@ class SprayController(Node):
         if self.state in {
             self.STATE_WAIT_PRESS_ACK,
             self.STATE_SPRAYING,
-        } and not self._px4_gate_ok(time.monotonic()):
+        } and not self._transaction_px4_gate_ok(time.monotonic()):
             self._abort_to_release("PX4_STATE_BECAME_UNSAFE_DURING_SPRAY")
 
     # ==============================================================
     # Safety gates
     # ==============================================================
 
-    def _px4_gate_ok(self, now: float) -> bool:
+    def _px4_gate_ok(self, now: float, *, require_offboard: bool = True) -> bool:
         if self._age(self.last_mavros_state_rx, now) > self.mavros_state_timeout_sec:
             return False
 
@@ -654,10 +711,25 @@ class SprayController(Node):
         if self.require_px4_armed and not self.px4_armed:
             return False
 
-        if self.require_px4_offboard and self.px4_mode.upper() != "OFFBOARD":
+        if (
+            require_offboard
+            and self.require_px4_offboard
+            and self.px4_mode.upper() != "OFFBOARD"
+        ):
             return False
 
         return True
+
+    def _transaction_px4_gate_ok(self, now: float) -> bool:
+        """Apply the PX4 gate appropriate to the active transaction kind."""
+        if self.transaction_kind == self.TRANSACTION_MANUAL:
+            return (
+                self._age(self.last_mavros_state_rx, now)
+                <= self.mavros_state_timeout_sec
+                and self.mavros_connected
+                and self.px4_armed
+            )
+        return self._px4_gate_ok(now)
 
     def _spray_config_callback(
         self,
@@ -793,6 +865,57 @@ class SprayController(Node):
 
         return True
 
+    def _manual_gate_failure(self, now: float) -> Optional[str]:
+        """Return why a new manual PRESS cannot be accepted, if anything."""
+        if not self.enabled:
+            return "SPRAY_CONTROLLER_DISABLED"
+        if self.fault_latched:
+            return "SPRAY_FAULT_LATCHED"
+        if self.state != self.STATE_IDLE or self.press_may_be_active:
+            return "SPRAY_CONTROLLER_NOT_IDLE"
+        if self.emergency_stop:
+            return "EMERGENCY_STOP_ACTIVE"
+        if (
+            self._age(self.last_mission_status_rx, now)
+            > self.mission_status_timeout_sec
+        ):
+            return "MISSION_STATUS_STALE"
+        if self.mission_state in self.ACTIVE_MISSION_STATES:
+            return f"MISSION_ACTIVE:{self.mission_state}"
+        if self.mission_state is None:
+            return "MISSION_STATE_UNKNOWN"
+        if not self._transaction_px4_gate_ok_for_manual(now):
+            return "PX4_STATE_UNSAFE"
+        if not self.command_client.service_is_ready():
+            return "MAVROS_COMMAND_SERVICE_UNAVAILABLE"
+        return None
+
+    def _transaction_px4_gate_ok_for_manual(self, now: float) -> bool:
+        """Manual spray always requires fresh, connected, armed PX4 state."""
+        return (
+            self._age(self.last_mavros_state_rx, now)
+            <= self.mavros_state_timeout_sec
+            and self.mavros_connected
+            and self.px4_armed
+        )
+
+    def _active_transaction_gate_ok(self, now: float) -> bool:
+        """Re-check the safety contract for the active spray transaction."""
+        if self.transaction_kind != self.TRANSACTION_MANUAL:
+            return self._spray_gate_ok(now)
+
+        return (
+            self.enabled
+            and not self.fault_latched
+            and not self.emergency_stop
+            and self._age(self.last_mission_status_rx, now)
+            <= self.mission_status_timeout_sec
+            and self.mission_state not in self.ACTIVE_MISSION_STATES
+            and self.mission_state is not None
+            and self._transaction_px4_gate_ok_for_manual(now)
+            and self.command_client.service_is_ready()
+        )
+
     def _raw_gnss_gate_ok(self) -> bool:
         """Raw RTK-FIXED GNSS radial error <= raw_gnss_max_radial_mm, re-checked.
 
@@ -896,6 +1019,7 @@ class SprayController(Node):
     # ==============================================================
 
     def _begin_transaction_from_current_point(self) -> None:
+        self.transaction_kind = self.TRANSACTION_MISSION
         self.transaction_run_id = self.mission_run_id
         self.transaction_point_id = self.current_point_id
         self.transaction_point_index = self.current_point_index
@@ -949,7 +1073,11 @@ class SprayController(Node):
         self.spray_result_pub.publish(msg)
         self.last_result = payload
 
-        if result == "SUCCESS" and self.transaction_point_id is not None:
+        if (
+            result == "SUCCESS"
+            and self.transaction_kind == self.TRANSACTION_MISSION
+            and self.transaction_point_id is not None
+        ):
             complete = String()
             complete.data = self.transaction_point_id
             self.spray_complete_pub.publish(complete)
@@ -1004,6 +1132,17 @@ class SprayController(Node):
             "fault_reason": self.fault_reason,
             "press_may_be_active": self.press_may_be_active,
             "release_confirmed": self.release_confirmed,
+            "transaction_kind": self.transaction_kind,
+            "manual_active": (
+                self.transaction_kind == self.TRANSACTION_MANUAL
+                and self.press_may_be_active
+            ),
+            "manual_requested": self.manual_requested,
+            "manual_deadline_remaining_sec": (
+                round(max(0.0, self.manual_deadline_at - now), 3)
+                if self.manual_requested and self.manual_deadline_at is not None
+                else None
+            ),
             "mission_run_id": self.mission_run_id,
             "current_point_id": self.current_point_id,
             "transaction_run_id": self.transaction_run_id,
@@ -1054,6 +1193,7 @@ class SprayController(Node):
             "press_value": self.press_value,
             "release_value": self.release_value,
             "spray_duration_sec": self.spray_duration_sec,
+            "manual_override_timeout_sec": self.manual_override_timeout_sec,
             "spray_elapsed_sec": (
                 round(spray_elapsed_sec, 3)
                 if spray_elapsed_sec is not None
@@ -1119,6 +1259,81 @@ class SprayController(Node):
         self.press_may_be_active = False
         self.release_confirmed = True
         self._publish_active(False)
+
+        if self.preserve_fault_after_release:
+            # /spray/manual=false may issue an extra idempotent RELEASE while
+            # a non-manual fault is latched. Physical confirmation must not
+            # reclassify that transaction or erase its FAILED_SAFE journal.
+            self.preserve_fault_after_release = False
+            self.manual_requested = False
+            self.manual_deadline_at = None
+            self.state = self.STATE_FAULT
+            self.get_logger().warn(
+                "Servo RELEASE confirmed; existing spray fault remains latched"
+            )
+            return
+
+        if self.transaction_kind == self.TRANSACTION_MANUAL:
+            reason = self.failure_after_release
+            if reason is not None and reason not in self.OPERATOR_CANCEL_REASONS:
+                self.fault_latched = True
+                self.fault_reason = reason
+                self.manual_requested = False
+                self.manual_deadline_at = None
+                self.state = self.STATE_FAULT
+
+                # RELEASE is physically confirmed, so a broken journal
+                # filesystem must not throw out of the control loop and put
+                # the process into a respawn cycle. Keep the fault latched in
+                # memory and persist it on a best-effort basis.
+                try:
+                    self._write_journal(
+                        state=self.JOURNAL_FAILED_SAFE,
+                        reason=reason,
+                    )
+                except Exception as journal_exc:
+                    self.get_logger().error(
+                        "Unable to persist manual recovery fault after RELEASE: "
+                        f"{journal_exc}"
+                    )
+
+                self.get_logger().error(
+                    "Manual spray failed safely after RELEASE: " f"{reason}"
+                )
+                return
+
+            # Manual transactions never publish a point result/completion.
+            # Once RELEASE is acknowledged, no persistent replay record is
+            # needed; a crash before this clear only causes another RELEASE.
+            try:
+                self._clear_journal()
+            except Exception as exc:
+                reason = f"MANUAL_JOURNAL_CLEANUP_FAILED:{exc}"
+                self.fault_latched = True
+                self.fault_reason = reason
+                self.manual_requested = False
+                self.manual_deadline_at = None
+                self.state = self.STATE_FAULT
+
+                # Best effort only: a second filesystem failure must not
+                # escape the control loop after RELEASE has been confirmed.
+                try:
+                    self._write_journal(
+                        state=self.JOURNAL_FAILED_SAFE,
+                        reason=reason,
+                    )
+                except Exception as journal_exc:
+                    self.get_logger().error(
+                        "Unable to persist manual cleanup fault after RELEASE: "
+                        f"{journal_exc}"
+                    )
+
+                self.get_logger().error(reason)
+                return
+
+            self._reset_transaction_to_idle()
+            self.get_logger().warn("Manual spray RELEASE confirmed")
+            return
 
         if self.failure_after_release is not None:
             reason = self.failure_after_release
@@ -1191,6 +1406,8 @@ class SprayController(Node):
         marking-hold loss while the mission is still enabled and the E-stop
         clear stays a latched fault.
         """
+        if reason in self.OPERATOR_CANCEL_REASONS:
+            return True
         return reason in self.STOP_ABORT_REASONS and (
             self.emergency_stop or not self.mission_enable
         )
@@ -1224,7 +1441,12 @@ class SprayController(Node):
         self.fault_reason = reason
         self.state = self.STATE_FAULT
 
-        if (
+        if self.transaction_kind == self.TRANSACTION_MANUAL:
+            self._write_journal(
+                state=self.JOURNAL_FAILED_SAFE,
+                reason=reason,
+            )
+        elif (
             self.transaction_run_id is not None
             and self.transaction_point_id is not None
         ):
@@ -1248,6 +1470,10 @@ class SprayController(Node):
         self.transaction_run_id = None
         self.transaction_point_id = None
         self.transaction_point_index = None
+        self.transaction_kind = None
+
+        self.manual_requested = False
+        self.manual_deadline_at = None
 
         self.command_future = None
         self.command_kind = None
@@ -1259,10 +1485,172 @@ class SprayController(Node):
 
         self.failure_after_release = None
         self.next_release_retry_at = 0.0
+        self.preserve_fault_after_release = False
 
         self.marking_active_since = None
 
         self._publish_active(False)
+
+    # ==============================================================
+    # Manual/runtime-control services
+    # ==============================================================
+
+    def _manual_spray_service(
+        self,
+        request: SetBool.Request,
+        response: SetBool.Response,
+    ) -> SetBool.Response:
+        """Accept a bounded manual PRESS or an idempotent RELEASE request."""
+        if not bool(request.data):
+            self.manual_requested = False
+            self.manual_deadline_at = None
+
+            if self.fault_latched or self.state == self.STATE_FAULT:
+                # Never turn a mission/manual FAILED_SAFE record into a fresh
+                # manual transaction. An extra RELEASE is harmless, but its
+                # ACK must return to FAULT without changing the journal.
+                self.preserve_fault_after_release = True
+                self._begin_or_retry_release()
+                response.success = True
+                response.message = (
+                    "RELEASE accepted; existing spray fault remains latched"
+                )
+            elif not self.press_may_be_active and self.release_confirmed:
+                response.success = True
+                response.message = "Servo RELEASE already confirmed"
+            elif self.state in {self.STATE_WAIT_PRESS_ACK, self.STATE_SPRAYING}:
+                self._abort_to_release("MANUAL_RELEASE_REQUESTED")
+                response.success = True
+                response.message = "RELEASE accepted; confirmation pending"
+            elif self.state in {
+                self.STATE_WAIT_RELEASE_ACK,
+                self.STATE_RECOVERY_RELEASE,
+            }:
+                response.success = True
+                response.message = "RELEASE already pending"
+            elif self.press_may_be_active:
+                self.failure_after_release = "MANUAL_RELEASE_REQUESTED"
+                self._write_journal(
+                    state=self.JOURNAL_RELEASE_UNCONFIRMED,
+                    reason=self.failure_after_release,
+                )
+                self._begin_or_retry_release()
+                response.success = True
+                response.message = "RELEASE accepted; confirmation pending"
+            elif (
+                self.state == self.STATE_IDLE
+                and self.transaction_kind is None
+                and self.journal is None
+            ):
+                # Even from IDLE, send an idempotent RELEASE so status can
+                # distinguish an accepted request from physical confirmation.
+                self.transaction_kind = self.TRANSACTION_MANUAL
+                self.failure_after_release = None
+                self.release_confirmed = False
+                self.transaction_timing = {}
+                self._write_journal(state=self.JOURNAL_RELEASE_UNCONFIRMED)
+                self._begin_or_retry_release()
+                response.success = True
+                response.message = "RELEASE accepted; confirmation pending"
+            else:
+                # Preserve completed/failed mission journal semantics and any
+                # non-manual transaction that does not need another RELEASE.
+                response.success = True
+                response.message = "No active manual press; transaction preserved"
+
+            self._publish_status()
+            return response
+
+        if (
+            self.transaction_kind == self.TRANSACTION_MANUAL
+            and self.manual_requested
+            and self.state in {self.STATE_WAIT_PRESS_ACK, self.STATE_SPRAYING}
+        ):
+            response.success = True
+            response.message = "Manual PRESS already active; deadline unchanged"
+            return response
+
+        now = time.monotonic()
+        gate_failure = self._manual_gate_failure(now)
+        if gate_failure is not None:
+            response.success = False
+            response.message = gate_failure
+            return response
+
+        self.transaction_kind = self.TRANSACTION_MANUAL
+        self.transaction_run_id = None
+        self.transaction_point_id = None
+        self.transaction_point_index = None
+        self.transaction_timing = {"manual_request_accepted": now}
+        self.manual_requested = True
+        self.manual_deadline_at = None
+        self.failure_after_release = None
+
+        # Persist before PRESS transmission, exactly as mission spray does.
+        self._write_journal(state=self.JOURNAL_PRESS_COMMAND_SENT)
+        if not self._send_command(kind="PRESS", value=self.press_value):
+            self.manual_requested = False
+            self._set_fault_without_press(
+                "MAVROS_COMMAND_SERVICE_UNAVAILABLE_BEFORE_MANUAL_PRESS"
+            )
+            response.success = False
+            response.message = "MAVROS_COMMAND_SERVICE_UNAVAILABLE"
+            return response
+
+        self.press_command_sent_at = self.command_sent_at
+        self.transaction_timing["press_sent"] = self.command_sent_at
+        self.manual_deadline_at = (
+            self.press_command_sent_at + self.manual_override_timeout_sec
+        )
+        self.press_may_be_active = True
+        self.release_confirmed = False
+        self._publish_active(True)
+        self.state = self.STATE_WAIT_PRESS_ACK
+        self._publish_status()
+
+        response.success = True
+        response.message = "Manual PRESS accepted; physical confirmation pending"
+        return response
+
+    def _set_enabled_service(
+        self,
+        request: SetBool.Request,
+        response: SetBool.Response,
+    ) -> SetBool.Response:
+        """Set the runtime master gate; disabling releases any possible press."""
+        requested = bool(request.data)
+        self.enabled = requested
+
+        if not requested:
+            self.manual_requested = False
+            self.manual_deadline_at = None
+            if self.fault_latched or self.state == self.STATE_FAULT:
+                # Disabling is allowed to issue an idempotent RELEASE, but a
+                # pre-existing FAILED_SAFE transaction must remain intact
+                # through ACK timeout/rejection/retry and final confirmation.
+                self.preserve_fault_after_release = True
+                self._begin_or_retry_release()
+            elif self.state in {self.STATE_WAIT_PRESS_ACK, self.STATE_SPRAYING}:
+                self._abort_to_release("CONTROLLER_DISABLED_DURING_SPRAY")
+            elif self.press_may_be_active and self.state not in {
+                self.STATE_WAIT_RELEASE_ACK,
+                self.STATE_RECOVERY_RELEASE,
+            }:
+                self.failure_after_release = "CONTROLLER_DISABLED_DURING_SPRAY"
+                self._write_journal(
+                    state=self.JOURNAL_RELEASE_UNCONFIRMED,
+                    reason=self.failure_after_release,
+                )
+                self._begin_or_retry_release()
+
+        self._publish_status()
+        response.success = True
+        response.message = (
+            "Spray controller enabled"
+            if requested
+            else "Spray controller disabled; RELEASE initiated if required"
+        )
+        return response
 
     # ==============================================================
     # Fault reset service
@@ -1405,8 +1793,18 @@ class SprayController(Node):
         # PRESS ACK
         # ----------------------------------------------------------
         if self.state == self.STATE_WAIT_PRESS_ACK:
-            if not self._spray_gate_ok(now):
+            if not self._active_transaction_gate_ok(now):
                 self._abort_to_release("SAFETY_GATE_LOST_BEFORE_PRESS_ACK")
+                return
+
+            if (
+                self.transaction_kind == self.TRANSACTION_MANUAL
+                and self.manual_deadline_at is not None
+                and now >= self.manual_deadline_at
+            ):
+                self.manual_requested = False
+                self.manual_deadline_at = None
+                self._abort_to_release("MANUAL_OVERRIDE_TIMEOUT")
                 return
 
             if (
@@ -1454,6 +1852,14 @@ class SprayController(Node):
             # so command/transport latency is not subtracted from the configured
             # physical spray ON interval.
             self.spray_started_at = now
+
+            # A cancellation/safety callback can arrive while the PRESS RPC
+            # is in flight. Once that RPC resolves, RELEASE immediately
+            # instead of entering a timed hold.
+            if self.failure_after_release is not None:
+                self._begin_or_retry_release()
+                return
+
             self.state = self.STATE_SPRAYING
             return
 
@@ -1461,7 +1867,7 @@ class SprayController(Node):
         # Timed press.
         # ----------------------------------------------------------
         if self.state == self.STATE_SPRAYING:
-            if not self._spray_gate_ok(now):
+            if not self._active_transaction_gate_ok(now):
                 self._abort_to_release("SAFETY_GATE_LOST_DURING_PRESS")
                 return
 
@@ -1483,7 +1889,21 @@ class SprayController(Node):
 
             # Normal release is based on the confirmed physical spray-hold
             # interval, not on the PRESS command transmission time.
-            if spray_hold_elapsed >= self.spray_duration_sec:
+            if (
+                self.transaction_kind == self.TRANSACTION_MANUAL
+                and self.manual_deadline_at is not None
+                and now >= self.manual_deadline_at
+            ):
+                self.manual_requested = False
+                self.manual_deadline_at = None
+                self.failure_after_release = None
+                self._begin_or_retry_release()
+                return
+
+            if (
+                self.transaction_kind == self.TRANSACTION_MISSION
+                and spray_hold_elapsed >= self.spray_duration_sec
+            ):
                 self.failure_after_release = None
                 self._begin_or_retry_release()
             return
@@ -1504,10 +1924,13 @@ class SprayController(Node):
                 ):
                     self._clear_command_future()
 
-                    self._write_journal(
-                        state=self.JOURNAL_RELEASE_UNCONFIRMED,
-                        reason=(self.failure_after_release or "RELEASE_ACK_TIMEOUT"),
-                    )
+                    if not self.preserve_fault_after_release:
+                        self._write_journal(
+                            state=self.JOURNAL_RELEASE_UNCONFIRMED,
+                            reason=(
+                                self.failure_after_release or "RELEASE_ACK_TIMEOUT"
+                            ),
+                        )
 
                     self.state = self.STATE_RECOVERY_RELEASE
                     self.next_release_retry_at = now + self.release_retry_interval_sec
@@ -1518,12 +1941,14 @@ class SprayController(Node):
             except Exception as exc:
                 self._clear_command_future()
 
-                self._write_journal(
-                    state=self.JOURNAL_RELEASE_UNCONFIRMED,
-                    reason=(
-                        self.failure_after_release or f"RELEASE_SERVICE_EXCEPTION:{exc}"
-                    ),
-                )
+                if not self.preserve_fault_after_release:
+                    self._write_journal(
+                        state=self.JOURNAL_RELEASE_UNCONFIRMED,
+                        reason=(
+                            self.failure_after_release
+                            or f"RELEASE_SERVICE_EXCEPTION:{exc}"
+                        ),
+                    )
 
                 self.state = self.STATE_RECOVERY_RELEASE
                 self.next_release_retry_at = now + self.release_retry_interval_sec
@@ -1534,13 +1959,14 @@ class SprayController(Node):
             self._clear_command_future()
 
             if not accepted:
-                self._write_journal(
-                    state=self.JOURNAL_RELEASE_UNCONFIRMED,
-                    reason=(
-                        self.failure_after_release
-                        or f"RELEASE_REJECTED_RESULT_{result_code}"
-                    ),
-                )
+                if not self.preserve_fault_after_release:
+                    self._write_journal(
+                        state=self.JOURNAL_RELEASE_UNCONFIRMED,
+                        reason=(
+                            self.failure_after_release
+                            or f"RELEASE_REJECTED_RESULT_{result_code}"
+                        ),
+                    )
 
                 self.state = self.STATE_RECOVERY_RELEASE
                 self.next_release_retry_at = now + self.release_retry_interval_sec

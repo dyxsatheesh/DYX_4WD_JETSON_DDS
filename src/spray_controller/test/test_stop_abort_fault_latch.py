@@ -55,7 +55,7 @@ def _install_ros_stubs() -> None:
     module("std_msgs")
     module("std_msgs.msg", Bool=_Msg, String=_Msg)
     module("std_srvs")
-    module("std_srvs.srv", Trigger=_Srv)
+    module("std_srvs.srv", SetBool=_Srv, Trigger=_Srv)
 
 
 try:
@@ -94,6 +94,9 @@ def build(tmp_path, *, emergency_stop: bool, mission_enable: bool, reason: str):
     node.transaction_run_id = "run-1"
     node.transaction_point_id = "P0001"
     node.transaction_point_index = 0
+    node.transaction_kind = SprayController.TRANSACTION_MISSION
+    node.manual_requested = False
+    node.manual_deadline_at = None
     node.transaction_timing = {}
     node.result_sequence = 0
     node.last_result = None
@@ -103,6 +106,7 @@ def build(tmp_path, *, emergency_stop: bool, mission_enable: bool, reason: str):
     node.fault_reason = None
     node.state = SprayController.STATE_WAIT_RELEASE_ACK
     node.failure_after_release = reason
+    node.preserve_fault_after_release = False
     node.emergency_stop = emergency_stop
     node.mission_enable = mission_enable
     node.spray_result_pub = _Publisher()

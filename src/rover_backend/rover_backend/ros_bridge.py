@@ -57,6 +57,7 @@ from std_msgs.msg import String
 from std_msgs.msg import UInt8MultiArray
 from std_msgs.msg import UInt64
 from mission_manager_interfaces.srv import ReleaseEmergencyStop
+from std_srvs.srv import SetBool
 from std_srvs.srv import Trigger
 
 from rover_backend.config import settings
@@ -89,6 +90,12 @@ class RosServiceOutcomeUnknownError(RuntimeError):
 
     outcome = "UNKNOWN"
     retry_safe = False
+
+
+class RosIdempotentServiceOutcomeUnknownError(RosServiceOutcomeUnknownError):
+    """An idempotent request timed out and may safely be retried."""
+
+    retry_safe = True
 
 
 def _notify_authoritative_state_changed() -> None:
@@ -816,6 +823,14 @@ class RoverBackendRosNode(Node):
         self._release_emergency_stop_client = self.create_client(
             ReleaseEmergencyStop,
             "/mission_manager/release_emergency_stop",
+        )
+        self._spray_manual_client = self.create_client(
+            SetBool,
+            "/spray/manual",
+        )
+        self._spray_enabled_client = self.create_client(
+            SetBool,
+            "/spray/set_enabled",
         )
 
         # ======================================================
@@ -1731,6 +1746,31 @@ class RoverBackendRosNode(Node):
             "spray_elapsed_sec": _finite_float(status.get("spray_elapsed_sec")),
             "spray_remaining_sec": _finite_float(status.get("spray_remaining_sec")),
             "spraying": bool(status.get("spraying", False)),
+            "enabled": bool(status.get("enabled", False)),
+            "transaction_kind": status.get("transaction_kind"),
+            "manual_active": bool(status.get("manual_active", False)),
+            "manual_requested": bool(status.get("manual_requested", False)),
+            "manual_deadline_remaining_sec": _finite_float(
+                status.get("manual_deadline_remaining_sec")
+            ),
+            "press_may_be_active": bool(
+                status.get("press_may_be_active", False)
+            ),
+            "release_confirmed": bool(
+                status.get("release_confirmed", False)
+            ),
+            "mavros_connected": bool(status.get("mavros_connected", False)),
+            "px4_connected": bool(
+                status.get(
+                    "px4_connected",
+                    status.get("mavros_connected", False),
+                )
+            ),
+            "px4_armed": bool(status.get("px4_armed", False)),
+            "px4_mode": status.get("px4_mode"),
+            "mission_state": status.get("mission_state"),
+            "mission_enable": bool(status.get("mission_enable", False)),
+            "emergency_stop": bool(status.get("emergency_stop", False)),
             "marking_active": bool(status.get("marking_active", False)),
             "controller_state": status.get("controller_state"),
             "ready": bool(status.get("ready", False)),
@@ -1792,6 +1832,63 @@ class RoverBackendRosNode(Node):
         raise RuntimeError(
             "Timed out waiting for spray controller " "configuration acknowledgement"
         )
+
+    def set_manual_spray(
+        self,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        """Request a bounded manual PRESS or an idempotent RELEASE."""
+
+        request = SetBool.Request()
+        request.data = bool(enabled)
+
+        accepted, service_message = self._call_service(
+            client=self._spray_manual_client,
+            request=request,
+            service_name="/spray/manual",
+            # A timed-out PRESS must not be retried blindly because that could
+            # extend a hold. RELEASE is idempotent, so an unknown outcome is
+            # still reported honestly but can safely be retried.
+            timeout_outcome_unknown=True,
+            timeout_retry_safe=not enabled,
+        )
+
+        if not accepted:
+            raise RuntimeError(service_message)
+
+        return {
+            "accepted": True,
+            "requested": "ON" if enabled else "OFF",
+            "message": service_message,
+            "config": self.get_spray_config(),
+        }
+
+    def set_spray_enabled(
+        self,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        """Set the spray controller's runtime master gate."""
+
+        request = SetBool.Request()
+        request.data = bool(enabled)
+
+        accepted, service_message = self._call_service(
+            client=self._spray_enabled_client,
+            request=request,
+            service_name="/spray/set_enabled",
+            timeout_outcome_unknown=True,
+            timeout_retry_safe=True,
+        )
+
+        if not accepted:
+            raise RuntimeError(service_message)
+
+        return {
+            "accepted": True,
+            "enabled": bool(enabled),
+            "message": service_message,
+            "config": self.get_spray_config(),
+        }
 
     def _battery_callback(
         self,
@@ -3660,6 +3757,7 @@ class RoverBackendRosNode(Node):
         discovery_timeout_sec: float | None = None,
         response_timeout_sec: float | None = None,
         timeout_outcome_unknown: bool = False,
+        timeout_retry_safe: bool = False,
     ) -> tuple[bool, str]:
         discovery_timeout = (
             self.SERVICE_DISCOVERY_TIMEOUT_SEC
@@ -3710,6 +3808,12 @@ class RoverBackendRosNode(Node):
             except Exception:
                 pass
             if timeout_outcome_unknown:
+                if timeout_retry_safe:
+                    raise RosIdempotentServiceOutcomeUnknownError(
+                        f"Timed out waiting for {service_name} after dispatch; "
+                        "execution outcome is unknown. This request is "
+                        "idempotent and may be retried."
+                    )
                 raise RosServiceOutcomeUnknownError(
                     f"Timed out waiting for {service_name} after dispatch; "
                     "execution outcome is unknown. Do not retry blindly; "
@@ -4292,6 +4396,26 @@ class RosBridgeRuntime:
                 press_pwm_us=press_pwm_us,
                 release_pwm_us=release_pwm_us,
             )
+
+    def set_manual_spray(
+        self,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        # RELEASE is a safety action and must not queue behind an ordinary
+        # operation that may be waiting on PX4. PRESS remains serialized with
+        # other operator operations.
+        if not enabled:
+            return self.node.set_manual_spray(False)
+
+        with self._operation_lock:
+            return self.node.set_manual_spray(True)
+
+    def set_spray_enabled(
+        self,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        with self._operation_lock:
+            return self.node.set_spray_enabled(enabled)
 
     def stop_mission(self) -> dict[str, Any]:
         # Like E-stop, STOP must not queue behind an ordinary operation
