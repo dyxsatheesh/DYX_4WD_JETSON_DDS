@@ -97,6 +97,7 @@ def build(tmp_path, *, emergency_stop: bool, mission_enable: bool, reason: str):
     node.transaction_kind = SprayController.TRANSACTION_MISSION
     node.transaction_tool = SprayController.TOOL_SPRAY
     node.laser_on_since = None
+    node.laser_blink = False
     node.manual_requested = False
     node.manual_deadline_at = None
     node.transaction_timing = {}

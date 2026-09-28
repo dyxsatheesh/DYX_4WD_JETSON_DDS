@@ -1136,7 +1136,7 @@ field-tested; frontend buttons not wired yet.
 **Factory default is now MANUAL execution + LASER marking** (was AUTO +
 spray). LASER = AUX6 (`PWM_AUX_FUNC6=302`, `MAV_CMD_DO_SET_ACTUATOR`
 param2), ON at each point that passes the same RPP + raw-GNSS gates as spray,
-held with **no time limit** until the operator presses NEXT; NEXT waits for a
+held with **no time limit** until the operator presses NEXT (steady when raw GNSS ≤ 30 mm; **blinks 0.5 s ON/OFF** when raw GNSS *measured* > 30 mm; OFF when the stop could not be measured); NEXT waits for a
 PX4-acknowledged laser OFF before re-enabling motion; the final point also
 waits for NEXT. START refuses LASER + AUTO. Operator can pick SPRAY/AUTO per
 mission and save defaults (`/home/flash/.ros/dyx_mission_defaults.json`).

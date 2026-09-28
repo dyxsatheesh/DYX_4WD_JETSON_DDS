@@ -93,6 +93,7 @@ def test_laser_on_ack_reports_success_once_and_holds(tmp_path):
     node.marking_active = False
     node.laser_hold_run_id = "run-1"
     node.laser_hold_point_id = "P0001"
+    node.laser_hold_mode = SprayController.LASER_STEADY
     node.laser_on_since = time.monotonic() - 600.0  # no time limit on a hold
     requests_before = len(node.command_client.requests)
 
@@ -107,6 +108,7 @@ def test_hold_cleared_turns_laser_off_on_set_2_then_idle_without_fault(tmp_path)
     node.mission_state = "WAITING_FOR_NEXT"
     node.laser_hold_run_id = "run-1"
     node.laser_hold_point_id = "P0001"
+    node.laser_hold_mode = SprayController.LASER_STEADY
     node._control_loop()
 
     node.laser_hold_run_id = None
@@ -152,6 +154,7 @@ def test_safety_loss_turns_laser_off_without_fault(tmp_path, change):
     node.mission_state = "WAITING_FOR_NEXT"
     node.laser_hold_run_id = "run-1"
     node.laser_hold_point_id = "P0001"
+    node.laser_hold_mode = SprayController.LASER_STEADY
 
     if change == "estop":
         node.emergency_stop = True
@@ -322,3 +325,173 @@ def test_shutdown_releases_spray_and_laser_in_one_command(tmp_path, monkeypatch)
 
     assert sent[0].param1 == pytest.approx(node.release_value)
     assert sent[0].param2 == pytest.approx(node.laser_off_value)
+
+
+# ------------------------------------------------------------ BLINK
+
+
+def blink_hold_node(tmp_path) -> SprayController:
+    """WAITING_FOR_NEXT after a raw-GNSS measured miss at P0001."""
+    node = build_node(tmp_path)
+    node.mission_marking_tool = SprayController.TOOL_LASER
+    node.mission_state = "WAITING_FOR_NEXT"
+    node.mission_run_id = "run-1"
+    node.current_point_id = "P0002"
+    node.px4_mode = "OFFBOARD"
+    node.laser_hold_run_id = "run-1"
+    node.laser_hold_point_id = "P0001"
+    node.laser_hold_mode = SprayController.LASER_BLINK
+    return node
+
+
+def _values(node):
+    return [r.param2 for r in node.command_client.requests]
+
+
+def _half_period_elapses(node):
+    node.laser_blink_next_toggle_at = time.monotonic() - 0.001
+
+
+def test_blink_hold_starts_blinking_from_idle_with_laser_on(tmp_path):
+    node = blink_hold_node(tmp_path)
+
+    node._control_loop()
+
+    assert node.state == SprayController.STATE_LASER_BLINK
+    assert _values(node) == [pytest.approx(1.0)]
+    assert math.isnan(_last_request(node).param1)
+    assert node.press_may_be_active is True
+    assert json.loads(node.journal_path.read_text())["state"] == (
+        SprayController.JOURNAL_PRESS_COMMAND_SENT
+    )
+    node._publish_status()
+    status = json.loads(node.spray_status_pub.messages[-1].data)
+    assert status["laser_blinking"] is True and status["laser_on"] is True
+    # A failed point never reports a marking result.
+    assert node.spray_result_pub.messages == []
+
+
+def test_blink_toggles_every_half_period_only_after_each_ack(tmp_path):
+    node = blink_hold_node(tmp_path)
+    node._control_loop()                      # ON sent
+
+    _half_period_elapses(node)
+    node._control_loop()                      # ON not ACKed yet: no new command
+    assert _values(node) == [pytest.approx(1.0)]
+
+    _ack_last(node)
+    node._control_loop()                      # ACK: next toggle scheduled +0.5 s
+    assert node.laser_blink_is_on is True
+    assert node.laser_blink_next_toggle_at == pytest.approx(
+        node.laser_blink_sent_at + 0.5
+    )
+    assert len(_values(node)) == 1
+
+    _half_period_elapses(node)
+    node._control_loop()                      # OFF
+    _ack_last(node)
+    node._control_loop()
+    _half_period_elapses(node)
+    node._control_loop()                      # ON again
+
+    assert _values(node) == [
+        pytest.approx(1.0),
+        pytest.approx(-1.0),
+        pytest.approx(1.0),
+    ]
+    assert node.state == SprayController.STATE_LASER_BLINK
+
+
+def test_next_clears_blink_hold_laser_off_and_idle_without_fault(tmp_path):
+    node = blink_hold_node(tmp_path)
+    node._control_loop()
+    _ack_last(node)
+    node._control_loop()
+
+    node.laser_hold_run_id = node.laser_hold_point_id = node.laser_hold_mode = None
+    node._control_loop()
+
+    assert node.state == SprayController.STATE_WAIT_RELEASE_ACK
+    assert _values(node)[-1] == pytest.approx(-1.0)
+    _ack_last(node)
+    node._control_loop()
+
+    assert node.state == SprayController.STATE_IDLE
+    assert node.fault_latched is False
+    assert node.press_may_be_active is False
+    assert not node.journal_path.exists()
+    assert node.spray_result_pub.messages == []
+
+    node._control_loop()  # no hold -> does not start again
+    assert node.state == SprayController.STATE_IDLE
+
+
+def test_estop_during_inflight_toggle_waits_then_turns_off(tmp_path):
+    node = blink_hold_node(tmp_path)
+    node._control_loop()                      # ON in flight
+
+    node._emergency_stop_callback(SimpleNamespace(data=True))
+    assert len(_values(node)) == 1            # never overlaps the ON in flight
+
+    _ack_last(node)
+    node._control_loop()
+
+    assert node.state == SprayController.STATE_WAIT_RELEASE_ACK
+    assert _values(node)[-1] == pytest.approx(-1.0)
+
+
+def test_manual_off_during_blink_turns_laser_off(tmp_path):
+    node = blink_hold_node(tmp_path)
+    node._control_loop()
+    _ack_last(node)
+    node._control_loop()
+
+    response = node._manual_spray_service(SimpleNamespace(data=False), SimpleNamespace(success=False, message=""))
+
+    assert response.success is True
+    assert node.state == SprayController.STATE_WAIT_RELEASE_ACK
+    assert _values(node)[-1] == pytest.approx(-1.0)
+
+
+def test_rejected_toggle_turns_laser_off(tmp_path):
+    node = blink_hold_node(tmp_path)
+    node._control_loop()
+    node.command_client.futures[-1]._done = True
+    node.command_client.futures[-1]._result = SimpleNamespace(success=True, result=4)
+
+    node._control_loop()
+
+    assert node.state == SprayController.STATE_WAIT_RELEASE_ACK
+    assert _values(node)[-1] == pytest.approx(-1.0)
+
+
+@pytest.mark.parametrize("change", ["run", "tool", "estop", "disarmed", "steady"])
+def test_blink_does_not_start_when_not_requested_or_unsafe(tmp_path, change):
+    node = blink_hold_node(tmp_path)
+    if change == "run":
+        node.laser_hold_run_id = "old-run"
+    elif change == "tool":
+        node.mission_marking_tool = SprayController.TOOL_SPRAY
+    elif change == "estop":
+        node.emergency_stop = True
+    elif change == "disarmed":
+        node.px4_armed = False
+    elif change == "steady":
+        node.laser_hold_mode = SprayController.LASER_STEADY
+
+    node._control_loop()
+
+    assert node.state == SprayController.STATE_IDLE
+    assert node.command_client.requests == []
+
+
+def test_hold_switching_to_steady_ends_a_blink(tmp_path):
+    node = blink_hold_node(tmp_path)
+    node._control_loop()
+    _ack_last(node)
+    node._control_loop()
+
+    node.laser_hold_mode = SprayController.LASER_STEADY
+    node._control_loop()
+
+    assert node.state == SprayController.STATE_WAIT_RELEASE_ACK

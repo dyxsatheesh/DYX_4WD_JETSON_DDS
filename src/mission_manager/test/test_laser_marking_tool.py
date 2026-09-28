@@ -50,7 +50,7 @@ def test_laser_point_completes_and_holds_laser_until_next(clock):
 
     assert m._point_status[0] == "COMPLETED"
     assert m._state == "WAITING_FOR_NEXT"
-    assert m._laser_hold == (RUN_ID, "P0001")
+    assert m._laser_hold == (RUN_ID, "P0001", "STEADY")
     assert "laser ON" in m._last_message
     # The hold is set after motion/marking authority was removed.
     assert "disable_motion" in events
@@ -72,7 +72,7 @@ def test_laser_final_point_waits_for_next_instead_of_completing(clock):
     assert m._point_status[2] == "COMPLETED"
     assert "mission_complete" not in events
     assert m._state == "WAITING_FOR_NEXT"
-    assert m._laser_hold == (RUN_ID, "P0003")
+    assert m._laser_hold == (RUN_ID, "P0003", "STEADY")
     assert "finish the mission" in m._last_message
 
 
@@ -115,7 +115,7 @@ def test_spray_tool_manual_completion_is_unchanged(clock):
 def laser_waiting_manager():
     manager, events = build_manager(state="WAITING_FOR_NEXT", execution_mode="MANUAL")
     manager._marking_tool = "LASER"
-    manager._laser_hold = ("run-1", "P0001")
+    manager._laser_hold = ("run-1", "P0001", "STEADY")
     manager._spray_laser_on = True
     manager._spray_status_last_rx_monotonic = time.monotonic() - 0.5
     manager._complete_mission = lambda: events.append("complete_mission")
@@ -292,3 +292,77 @@ def test_factory_defaults_are_manual_and_laser():
     )
     assert 'declare_parameter("default_execution_mode", "MANUAL")' in source
     assert 'declare_parameter("default_marking_tool", "LASER")' in source
+
+
+# ------------------------------------------------------------ BLINK on a measured miss
+
+import test_raw_gnss_spray_gate as gated  # noqa: E402
+
+
+def laser_gated(clock, *, point=0):
+    m, events, _ = gated.build_gated(clock, execution="MANUAL")
+    m._resolve_accuracy_failure = m._real_resolve
+    m._store_point_result = lambda **kw: dict(kw)
+    m._marking_tool = "LASER"
+    if point:
+        from test_marking_certified_fast_path import GOALS
+
+        m._point_status = ["FAILED"] * point + ["PENDING"] * (len(GOALS) - point)
+        m._current_path_index = point
+        m._x, m._y = GOALS[point]
+    deliver(m, result=result_payload(m), certificate=certificate_payload(m))
+    m._control_loop()
+    return m, events
+
+
+def test_measured_miss_blinks_the_laser_until_next(clock):
+    m, events = laser_gated(clock)
+
+    gated.feed(m, clock, 1.1, north_m=0.045)
+
+    assert m._point_status[0] == "FAILED"
+    assert m._state == "WAITING_FOR_NEXT"
+    assert m._laser_hold == (RUN_ID, "P0001", "BLINK")
+    assert "laser BLINKING" in m._last_message
+    assert not ("marking_active", True) in events
+
+
+def test_unmeasurable_stop_keeps_the_laser_off(clock):
+    m, events = laser_gated(clock)
+
+    gated.feed(m, clock, 3.2, fix_type=5)  # RTK FLOAT: no trustworthy measurement
+
+    assert m._point_status[0] == "FAILED"
+    assert m._laser_hold is None
+    assert m._state == "WAITING_FOR_NEXT"
+
+
+def test_measured_miss_at_final_point_blinks_and_waits_for_next(clock):
+    m, events = laser_gated(clock, point=2)
+    target = gated.TARGETS[2]
+
+    # gated.feed() keeps delivering certificates for the active point; after
+    # the LAST point is decided there is none, so stop feeding right there.
+    for i in range(40):
+        clock.t += 0.05
+        if i % 2 == 0:
+            m._gnss_history.append(gated.fix(clock.t, target, 0.0, 0.050))
+        deliver(m, certificate=certificate_payload(m))
+        m._control_loop()
+        if m._point_status[2] not in {"PENDING", "ACTIVE"}:
+            break
+
+    assert m._point_status[2] == "FAILED"
+    assert "mission_complete" not in events
+    assert m._laser_hold == (RUN_ID, "P0003", "BLINK")
+    assert "finish the mission" in m._last_message
+
+
+def test_spray_tool_measured_miss_is_unchanged(clock):
+    m, events = laser_gated(clock)
+    m._marking_tool = "SPRAY"
+
+    gated.feed(m, clock, 1.1, north_m=0.045)
+
+    assert m._laser_hold is None
+    assert m._last_message.endswith("waiting for NEXT")

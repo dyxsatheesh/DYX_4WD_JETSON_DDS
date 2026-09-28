@@ -102,6 +102,12 @@ class MissionManager(Node):
     # SPRAY: timed spray on AUX5. LASER: laser on AUX6 held ON at each
     # verified point until the operator presses NEXT; always MANUAL.
     MARKING_TOOLS = ("LASER", "SPRAY")
+    # laser_hold modes: STEADY = point inside tolerance (mark here); BLINK =
+    # raw GNSS measured the stop OUTSIDE tolerance (rover is here, do not
+    # mark). BLINK is never used when the stop could not be measured.
+    LASER_STEADY = "STEADY"
+    LASER_BLINK = "BLINK"
+    RAW_GNSS_MEASURED_MISS_REASON = "RAW_GNSS_RADIAL_EXCEEDS_TOLERANCE"
 
     CONTROL_HZ = 20.0
     STATUS_HZ = 5.0
@@ -696,8 +702,9 @@ class MissionManager(Node):
         self._state = "EMPTY"
         self._execution_mode = self._default_execution_mode
         self._marking_tool = self._default_marking_tool
-        # (mission_run_id, point_id) whose laser stays ON until NEXT/SKIP/STOP.
-        self._laser_hold: Optional[tuple[str, str]] = None
+        # (mission_run_id, point_id, STEADY|BLINK) whose laser stays on (or
+        # blinks) until NEXT/SKIP/STOP.
+        self._laser_hold: Optional[tuple[str, str, str]] = None
         self._spray_laser_on = False
         self._spray_laser_on_point_id: Optional[str] = None
         self._pause_reason: Optional[str] = None
@@ -4461,6 +4468,7 @@ class MissionManager(Node):
                 {
                     "mission_run_id": self._laser_hold[0],
                     "point_id": self._laser_hold[1],
+                    "mode": self._laser_hold[2],
                 }
                 if self._laser_hold is not None
                 else None
@@ -4756,10 +4764,23 @@ class MissionManager(Node):
         self._reset_arrival_state()
         self._publish_runtime_path()
 
-        if self._finish_if_done():
+        # LASER: a stop that raw GNSS actually MEASURED outside tolerance
+        # blinks the laser until NEXT (rover is here, do not mark). An
+        # unmeasurable stop or an unsettled RPP miss keeps the laser OFF.
+        laser_blink = (
+            self._marking_tool == "LASER"
+            and failure_source == "RAW_GNSS"
+            and str(failure_reason).startswith(self.RAW_GNSS_MEASURED_MISS_REASON)
+        )
+
+        if not laser_blink and self._finish_if_done():
             return
 
-        action = after_fail_mode_action(self._execution_mode)
+        action = (
+            "WAITING_FOR_NEXT"
+            if laser_blink
+            else after_fail_mode_action(self._execution_mode)
+        )
 
         if action == "WAITING_FOR_NEXT":
             self._state = "WAITING_FOR_NEXT"
@@ -4768,10 +4789,24 @@ class MissionManager(Node):
 
             self._disable_motion_preserve_estop()
 
-            self._last_message = (
-                f"{point_id} FAILED from {source_text} "
-                f"(rpp_overall={overall_text}); waiting for NEXT"
-            )
+            if laser_blink:
+                self._laser_hold = (
+                    self._mission_run_id,
+                    point_id,
+                    self.LASER_BLINK,
+                )
+                last_point = self._next_pending_marking_number(0) is None
+                self._last_message = (
+                    f"{point_id} FAILED from {source_text} "
+                    f"(rpp_overall={overall_text}); laser BLINKING (outside "
+                    "tolerance, do not mark); press NEXT to turn it off and "
+                    + ("finish the mission" if last_point else "go to the next point")
+                )
+            else:
+                self._last_message = (
+                    f"{point_id} FAILED from {source_text} "
+                    f"(rpp_overall={overall_text}); waiting for NEXT"
+                )
 
         else:
             self._state = "RUNNING"
@@ -5352,7 +5387,11 @@ class MissionManager(Node):
             if laser_hold:
                 self._state = "WAITING_FOR_NEXT"
                 self._disable_motion_preserve_estop()
-                self._laser_hold = (self._mission_run_id, point_id)
+                self._laser_hold = (
+                    self._mission_run_id,
+                    point_id,
+                    self.LASER_STEADY,
+                )
                 last_point = self._next_pending_marking_number(0) is None
                 self._last_message = (
                     f"{point_id} COMPLETED at {final_text}; laser ON; "

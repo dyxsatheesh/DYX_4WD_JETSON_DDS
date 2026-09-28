@@ -295,6 +295,9 @@ def generate_launch_description() -> LaunchDescription:
                         "laser_on_value": 1.0,
                         "laser_off_value": -1.0,
                         "laser_handoff_timeout_sec": 1.5,
+                        # Measured miss (> 30 mm): blink 0.5 s ON / 0.5 s OFF
+                        # until NEXT instead of a steady laser.
+                        "laser_blink_half_period_sec": 0.5,
                     }
                 ],
             ),

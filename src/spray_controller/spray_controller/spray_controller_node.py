@@ -88,6 +88,11 @@ class SprayController(Node):
     TOOL_SPRAY = "SPRAY"
     TOOL_LASER = "LASER"
     STATE_LASER_ON = "LASER_ON"
+    # Raw GNSS measured the stop OUTSIDE tolerance: blink the laser (rover is
+    # here, do not mark) until mission_manager clears laser_hold.
+    STATE_LASER_BLINK = "LASER_BLINK"
+    LASER_STEADY = "STEADY"
+    LASER_BLINK = "BLINK"
     ACTIVE_MISSION_STATES = frozenset({"RUNNING", "PAUSED", "WAITING_FOR_NEXT"})
 
     JOURNAL_PRESS_COMMAND_SENT = "PRESS_COMMAND_SENT"
@@ -151,6 +156,8 @@ class SprayController(Node):
         # moment to publish laser_hold for it; the laser stays on through
         # this handoff only while that point is still the active one.
         self.declare_parameter("laser_handoff_timeout_sec", 1.5)
+        # BLINK: ON for this long, OFF for this long, repeated until NEXT.
+        self.declare_parameter("laser_blink_half_period_sec", 0.5)
 
         self.declare_parameter("mavros_state_timeout_sec", 2.5)
         self.declare_parameter("mission_status_timeout_sec", 1.0)
@@ -203,6 +210,9 @@ class SprayController(Node):
         self.laser_off_value = float(self.get_parameter("laser_off_value").value)
         self.laser_handoff_timeout_sec = float(
             self.get_parameter("laser_handoff_timeout_sec").value
+        )
+        self.laser_blink_half_period_sec = float(
+            self.get_parameter("laser_blink_half_period_sec").value
         )
 
         self.mavros_state_timeout_sec = float(
@@ -401,6 +411,7 @@ class SprayController(Node):
         self.mission_marking_tool = self.TOOL_SPRAY
         self.laser_hold_run_id: Optional[str] = None
         self.laser_hold_point_id: Optional[str] = None
+        self.laser_hold_mode: Optional[str] = None
 
         self.last_marking_active_rx: Optional[float] = None
         self.last_mission_status_rx: Optional[float] = None
@@ -426,6 +437,13 @@ class SprayController(Node):
         # Set when a LASER transaction has reported SUCCESS (laser confirmed
         # ON); from then on, turning it off is the normal end, not a fault.
         self.laser_on_since: Optional[float] = None
+        # BLINK transaction: the ON/OFF toggle in flight and the last one PX4
+        # acknowledged. A toggle is only sent once the previous one is ACKed.
+        self.laser_blink = False
+        self.laser_blink_target: Optional[bool] = None
+        self.laser_blink_is_on = False
+        self.laser_blink_sent_at: Optional[float] = None
+        self.laser_blink_next_toggle_at = 0.0
 
         self.manual_requested = False
         self.manual_deadline_at: Optional[float] = None
@@ -554,6 +572,7 @@ class SprayController(Node):
             "marking_active_timeout_sec": self.marking_active_timeout_sec,
             "raw_gnss_max_radial_mm": self.raw_gnss_max_radial_mm,
             "laser_handoff_timeout_sec": self.laser_handoff_timeout_sec,
+            "laser_blink_half_period_sec": self.laser_blink_half_period_sec,
         }
 
         for name, value in positive.items():
@@ -738,6 +757,7 @@ class SprayController(Node):
             self.STATE_WAIT_PRESS_ACK,
             self.STATE_SPRAYING,
             self.STATE_LASER_ON,
+            self.STATE_LASER_BLINK,
         }:
             self._abort_to_release("EMERGENCY_STOP_DURING_SPRAY")
 
@@ -793,9 +813,14 @@ class SprayController(Node):
                 if isinstance(hold_point, str) and hold_point
                 else None
             )
+            mode = str(hold.get("mode") or self.LASER_STEADY).strip().upper()
+            self.laser_hold_mode = (
+                self.LASER_BLINK if mode == self.LASER_BLINK else self.LASER_STEADY
+            )
         else:
             self.laser_hold_run_id = None
             self.laser_hold_point_id = None
+            self.laser_hold_mode = None
 
         raw_gate = payload.get("raw_gnss_spray_gate")
         self.raw_gnss_spray_gate = raw_gate if isinstance(raw_gate, dict) else None
@@ -818,6 +843,7 @@ class SprayController(Node):
             self.STATE_WAIT_PRESS_ACK,
             self.STATE_SPRAYING,
             self.STATE_LASER_ON,
+            self.STATE_LASER_BLINK,
         } and not self._transaction_px4_gate_ok(time.monotonic()):
             self._abort_to_release("PX4_STATE_BECAME_UNSAFE_DURING_SPRAY")
 
@@ -1331,18 +1357,22 @@ class SprayController(Node):
         if not self._px4_gate_ok(now):
             return "PX4_STATE_BECAME_UNSAFE_DURING_SPRAY"
 
+        expected_mode = self.LASER_BLINK if self.laser_blink else self.LASER_STEADY
         if (
             self.laser_hold_run_id == self.transaction_run_id
             and self.laser_hold_point_id == self.transaction_point_id
             and self.transaction_point_id is not None
+            and self.laser_hold_mode == expected_mode
         ):
             return None
 
         # Handoff: the SUCCESS result is out but mission_manager has not yet
         # published the hold. Tolerate that only while this point is still
-        # the running mission's active point.
+        # the running mission's active point. A blink starts FROM the hold,
+        # so it has no handoff.
         if (
-            self.laser_on_since is not None
+            not self.laser_blink
+            and self.laser_on_since is not None
             and now - self.laser_on_since < self.laser_handoff_timeout_sec
             and self.mission_state == "RUNNING"
             and self._transaction_matches_current()
@@ -1350,6 +1380,97 @@ class SprayController(Node):
             return None
 
         return "LASER_HOLD_RELEASED"
+
+    def _laser_blink_requested(self, now: float) -> bool:
+        """mission_manager asks for a BLINK hold and it is safe to start one."""
+        return (
+            self.mission_marking_tool == self.TOOL_LASER
+            and self.laser_hold_mode == self.LASER_BLINK
+            and self.laser_hold_point_id is not None
+            and self.laser_hold_run_id is not None
+            and self.laser_hold_run_id == self.mission_run_id
+            and self.enabled
+            and not self.fault_latched
+            and not self.emergency_stop
+            and not self.press_may_be_active
+            and self._age(self.last_mission_status_rx, now)
+            <= self.mission_status_timeout_sec
+            and self._px4_gate_ok(now)
+            and self.command_client.service_is_ready()
+        )
+
+    def _begin_laser_blink(self, now: float) -> None:
+        self.transaction_kind = self.TRANSACTION_MISSION
+        self.transaction_tool = self.TOOL_LASER
+        self.transaction_run_id = self.laser_hold_run_id
+        self.transaction_point_id = self.laser_hold_point_id
+        self.transaction_point_index = None
+        self.transaction_timing = {"laser_blink_start": now}
+        self.failure_after_release = None
+        self.laser_blink = True
+        # From the first ON, turning the laser off is the normal end.
+        self.laser_on_since = now
+
+        # Persist before the first ON, so a restart turns the laser OFF.
+        self._write_journal(state=self.JOURNAL_PRESS_COMMAND_SENT)
+        self.press_may_be_active = True
+        self.release_confirmed = False
+        self._publish_active(True)
+        self.state = self.STATE_LASER_BLINK
+        self._send_laser_blink_toggle(True, now)
+        self.get_logger().warn(
+            f"LASER BLINK | {self.transaction_point_id} | outside tolerance, "
+            "waiting for NEXT"
+        )
+
+    def _send_laser_blink_toggle(self, turn_on: bool, now: float) -> None:
+        if not self._send_command(
+            kind="PRESS" if turn_on else "RELEASE",
+            value=self.laser_on_value if turn_on else self.laser_off_value,
+        ):
+            self._abort_to_release("LASER_BLINK_COMMAND_SERVICE_UNAVAILABLE")
+            return
+        self.laser_blink_target = turn_on
+        self.laser_blink_sent_at = now
+
+    def _laser_blink_step(self, now: float) -> None:
+        # 1. Resolve the toggle in flight; never send over an outstanding one.
+        if self.command_future is not None:
+            if not self.command_future.done():
+                if (
+                    self.command_sent_at is not None
+                    and now - self.command_sent_at > self.command_timeout_sec
+                ):
+                    self._clear_command_future()
+                    self._abort_to_release("LASER_BLINK_ACK_TIMEOUT")
+                return
+            try:
+                accepted = self._response_accepted(self.command_future.result())
+            except Exception:
+                accepted = False
+            self._clear_command_future()
+            if not accepted:
+                self._abort_to_release("LASER_BLINK_COMMAND_REJECTED")
+                return
+            self.laser_blink_is_on = bool(self.laser_blink_target)
+            self.laser_blink_next_toggle_at = (
+                (self.laser_blink_sent_at or now) + self.laser_blink_half_period_sec
+            )
+
+        # 2. A cancel (OFF/disable) that arrived while a toggle was in flight.
+        if self.failure_after_release is not None:
+            self._begin_or_retry_release()
+            return
+
+        # 3. Hold released or safety lost -> OFF.
+        reason = self._laser_hold_failure(now)
+        if reason is not None:
+            self._abort_to_release(reason)
+            return
+
+        # 4. Next half-period.
+        if now >= self.laser_blink_next_toggle_at:
+            self._send_laser_blink_toggle(not self.laser_blink_is_on, now)
 
     def _raw_gnss_gate_ok(self) -> bool:
         """Raw RTK-FIXED GNSS radial error <= raw_gnss_max_radial_mm, re-checked.
@@ -1674,6 +1795,8 @@ class SprayController(Node):
                 else None
             ),
             "laser_hold_point_id": self.laser_hold_point_id,
+            "laser_hold_mode": self.laser_hold_mode,
+            "laser_blinking": self.laser_blink and self.press_may_be_active,
             "laser_on_value": self.laser_on_value,
             "laser_off_value": self.laser_off_value,
             "laser_value_source": self.laser_value_source,
@@ -1767,7 +1890,7 @@ class SprayController(Node):
             # never a fault, never a second result.
             point_id = self.transaction_point_id
             try:
-                if self.laser_on_since is not None:
+                if self.laser_on_since is not None and not self.laser_blink:
                     self._write_journal(state=self.JOURNAL_COMPLETED)
                 else:
                     self._clear_journal()
@@ -1979,6 +2102,11 @@ class SprayController(Node):
         self.transaction_kind = None
         self.transaction_tool = None
         self.laser_on_since = None
+        self.laser_blink = False
+        self.laser_blink_target = None
+        self.laser_blink_is_on = False
+        self.laser_blink_sent_at = None
+        self.laser_blink_next_toggle_at = 0.0
 
         self.manual_requested = False
         self.manual_deadline_at = None
@@ -2232,6 +2360,10 @@ class SprayController(Node):
         # IDLE: wait for a stable REAL marking hold.
         # ----------------------------------------------------------
         if self.state == self.STATE_IDLE:
+            if self._laser_blink_requested(now):
+                self._begin_laser_blink(now)
+                return
+
             if not self._spray_gate_ok(now):
                 self.marking_active_since = now if self.marking_active else None
                 return
@@ -2438,6 +2570,10 @@ class SprayController(Node):
             reason = self._laser_hold_failure(now)
             if reason is not None:
                 self._abort_to_release(reason)
+            return
+
+        if self.state == self.STATE_LASER_BLINK:
+            self._laser_blink_step(now)
             return
 
         # ----------------------------------------------------------

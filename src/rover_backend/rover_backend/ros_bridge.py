@@ -1817,6 +1817,7 @@ class RoverBackendRosNode(Node):
             "pwm_max_us": int(self.SPRAY_PWM_MAX_US),
             "marking_tool": status.get("marking_tool"),
             "laser_on": bool(status.get("laser_on", False)),
+            "laser_blinking": bool(status.get("laser_blinking", False)),
             "laser_on_point_id": status.get("laser_on_point_id"),
             "laser_on_pwm_us": self._actuator_value_to_pwm(
                 status.get("laser_on_value"),
@@ -2928,6 +2929,11 @@ class RoverBackendRosNode(Node):
             "marking_tool": marking_tool,
             "laser_hold_point_id": (
                 laser_hold.get("point_id") if isinstance(laser_hold, dict) else None
+            ),
+            # STEADY = inside tolerance, mark here; BLINK = measured outside
+            # tolerance, do not mark.
+            "laser_hold_mode": (
+                laser_hold.get("mode") if isinstance(laser_hold, dict) else None
             ),
             "laser_on": bool(payload.get("laser_on", False)),
             "default_execution_mode": payload.get("default_execution_mode"),

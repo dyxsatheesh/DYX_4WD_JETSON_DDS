@@ -482,6 +482,7 @@ def test_bridge_status_mapping_is_additive() -> None:
         "marking_tool": "LASER",
         "laser_on": True,
         "laser_on_point_id": "P0002",
+        "laser_blinking": True,
         "laser_on_value": 1.0,
         "laser_off_value": -1.0,
         "laser_value_source": "saved",
@@ -504,6 +505,7 @@ def test_bridge_status_mapping_is_additive() -> None:
     assert config["marking_tool"] == "LASER"
     assert config["laser_on"] is True
     assert config["laser_on_point_id"] == "P0002"
+    assert config["laser_blinking"] is True
     assert config["laser_on_pwm_us"] == 2000
     assert config["laser_off_pwm_us"] == 1000
     assert config["laser_value_source"] == "saved"

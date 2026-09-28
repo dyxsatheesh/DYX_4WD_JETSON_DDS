@@ -28,11 +28,16 @@ Added 2026-09-28 on branch `latency-hardening`. It is unit-tested only and
 
 1. The rover stops at the point.
 2. It passes the **same gates as spray**: RPP certificate and the raw-GNSS
-   30 mm check.
-   - **Pass:** `spray_controller` sends laser ON on **AUX6**
-     (`MAV_CMD_DO_SET_ACTUATOR` param2; param1 NaN, so the spray servo is
-     never touched).
-   - **Fail:** the point is FAILED and the laser stays off.
+   30 mm check. The laser then shows the result:
+
+   | Raw-GNSS result at the stop | Laser until NEXT | Point |
+   |---|---|---|
+   | measured **≤ 30 mm** | **steady ON** — mark here | COMPLETED |
+   | measured **> 30 mm** (`RAW_GNSS_RADIAL_EXCEEDS_TOLERANCE`) | **blinks 0.5 s ON / 0.5 s OFF**, repeating — the rover is here, do **not** mark | FAILED |
+   | not measurable (RTK not FIXED, too few or scattered fixes) or no settled stop | OFF | FAILED |
+
+   `spray_controller` drives the laser on **AUX6** (`MAV_CMD_DO_SET_ACTUATOR`
+   param2; param1 NaN, so the spray servo is never touched).
 3. PX4 ACKs ON → `spray_controller` reports SUCCESS (once) and enters
    `LASER_ON`.
 4. `mission_manager` marks the point COMPLETED and enters `WAITING_FOR_NEXT`.
@@ -45,7 +50,19 @@ Added 2026-09-28 on branch `latency-hardening`. It is unit-tested only and
    - If OFF is not confirmed, NEXT is blocked with a message, the rover
      stays put, and NEXT can be pressed again.
 6. **Final point:** it also waits for NEXT. NEXT turns the laser OFF, then
-   completes the mission.
+   completes the mission. This applies to a blinking final point too.
+
+**Blink details:**
+- `mission_manager` publishes `laser_hold.mode = BLINK`, and
+  `spray_controller` starts a `LASER_BLINK` transaction from it (no marking
+  request exists for a failed point).
+- Each toggle is sent only after PX4 ACKs the previous one. The next toggle
+  is due 0.5 s after the previous one was sent
+  (`laser_blink_half_period_sec`).
+- A rejected or timed-out toggle turns the laser OFF.
+- No marking result is ever published for a blink.
+- NEXT waits for OFF exactly as for a steady laser, because `laser_on`
+  stays true for the whole blink.
 
 **The laser is also turned OFF on any of these, with no fault latched:**
 - SKIP;
@@ -88,11 +105,12 @@ Spray stays on AUX5 (`PWM_AUX_FUNC5=301`, param1).
 | `POST /api/spray/laser-config` | `{"on_pwm_us": 2000, "off_pwm_us": 1000}` (1000–2000 µs, must differ; saved) |
 
 **`GET /api/spray/config`** gains:
-- `marking_tool`, `laser_on`, `laser_on_point_id`;
+- `marking_tool`, `laser_on`, `laser_blinking`, `laser_on_point_id`;
 - `laser_on_pwm_us`, `laser_off_pwm_us`, `laser_value_source`.
 
 **The mission status** gains:
-- `marking_tool`, `laser_hold_point_id`, `laser_on`;
+- `marking_tool`, `laser_hold_point_id`, `laser_hold_mode`
+  (`STEADY` | `BLINK`), `laser_on`;
 - `default_execution_mode`, `default_marking_tool`, `defaults_source`.
 
 ## Where it lives

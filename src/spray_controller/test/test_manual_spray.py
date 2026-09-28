@@ -200,6 +200,13 @@ def build_node(tmp_path) -> SprayController:
     node.laser_hold_point_id = None
     node.transaction_tool = None
     node.laser_on_since = None
+    node.laser_hold_mode = None
+    node.laser_blink_half_period_sec = 0.5
+    node.laser_blink = False
+    node.laser_blink_target = None
+    node.laser_blink_is_on = False
+    node.laser_blink_sent_at = None
+    node.laser_blink_next_toggle_at = 0.0
     node.journal = None
     node.command_client = _CommandClient()
     node.spray_active_pub = _Publisher()
