@@ -268,6 +268,12 @@ class SprayController(Node):
             self._spray_config_callback,
             retained_qos,
         )
+        self.create_subscription(
+            String,
+            "/spray/duration_config",
+            self._spray_duration_config_callback,
+            retained_qos,
+        )
 
         self.spray_active_pub = self.create_publisher(
             Bool,
@@ -751,22 +757,7 @@ class SprayController(Node):
 
         request_id = str(payload.get("request_id") or "").strip()
 
-        # Configuration must NEVER change during a spray transaction.
-        if (
-            self.state != self.STATE_IDLE
-            or self.press_may_be_active
-            or self.marking_active
-            or self.mission_enable
-        ):
-            self.get_logger().warn(
-                "Rejected spray configuration because " "spray controller is not idle"
-            )
-
-            self._last_config_request_id = request_id
-            self._last_config_result = "REJECTED"
-            self._last_config_reason = "SPRAY_CONTROLLER_NOT_IDLE"
-
-            self._publish_status()
+        if self._reject_config_if_busy(request_id):
             return
 
         try:
@@ -813,6 +804,99 @@ class SprayController(Node):
             "Spray servo configuration updated: "
             f"press={self.press_value:+.3f}, "
             f"release={self.release_value:+.3f}"
+        )
+
+        self._publish_status()
+
+    def _reject_config_if_busy(self, request_id: str) -> bool:
+        """Reject a configuration change unless the controller is idle."""
+
+        # Configuration must NEVER change during a spray transaction.
+        if (
+            self.state != self.STATE_IDLE
+            or self.press_may_be_active
+            or self.marking_active
+            or self.mission_enable
+        ):
+            self.get_logger().warn(
+                "Rejected spray configuration because " "spray controller is not idle"
+            )
+
+            self._last_config_request_id = request_id
+            self._last_config_result = "REJECTED"
+            self._last_config_reason = "SPRAY_CONTROLLER_NOT_IDLE"
+
+            self._publish_status()
+            return True
+
+        return False
+
+    def _spray_duration_config_callback(
+        self,
+        msg: String,
+    ) -> None:
+        """Safely update the mission spray hold time at runtime.
+
+        The upper bound is the manual override timeout, so every accepted
+        duration can also be reproduced with the manual spray test, and it
+        stays strictly below the independent hard press watchdog.
+        """
+
+        try:
+            payload = json.loads(msg.data)
+        except Exception:
+            self.get_logger().error(
+                "Rejected spray duration configuration: invalid JSON"
+            )
+            return
+
+        if not isinstance(payload, dict):
+            self.get_logger().error(
+                "Rejected spray duration configuration: payload is not an object"
+            )
+            return
+
+        request_id = str(payload.get("request_id") or "").strip()
+
+        if self._reject_config_if_busy(request_id):
+            return
+
+        try:
+            spray_duration_sec = float(payload["spray_duration_sec"])
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            self._last_config_request_id = request_id
+            self._last_config_result = "REJECTED"
+            self._last_config_reason = "INVALID_VALUE"
+
+            self._publish_status()
+            return
+
+        if (
+            not math.isfinite(spray_duration_sec)
+            or spray_duration_sec <= 0.0
+            or spray_duration_sec > self.manual_override_timeout_sec
+            or spray_duration_sec >= self.hard_press_timeout_sec
+        ):
+            self._last_config_request_id = request_id
+            self._last_config_result = "REJECTED"
+            self._last_config_reason = "SPRAY_DURATION_OUT_OF_RANGE"
+
+            self._publish_status()
+            return
+
+        self.spray_duration_sec = spray_duration_sec
+
+        self._last_config_request_id = request_id
+        self._last_config_result = "ACCEPTED"
+        self._last_config_reason = None
+
+        self.get_logger().warn(
+            "Spray hold time updated: "
+            f"spray_duration_sec={self.spray_duration_sec:.3f}"
         )
 
         self._publish_status()

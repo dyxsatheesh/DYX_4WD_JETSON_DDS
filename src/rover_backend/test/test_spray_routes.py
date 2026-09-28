@@ -85,6 +85,7 @@ class FakeSprayBridge:
         self.calls: list[tuple[str, bool]] = []
         self.manual_error: RuntimeError | None = None
         self.enabled_error: RuntimeError | None = None
+        self.duration_error: RuntimeError | None = None
         self.config: dict[str, Any] = {
             "available": True,
             "press_pwm_us": 2000,
@@ -105,6 +106,13 @@ class FakeSprayBridge:
             press_pwm_us=int(press_pwm_us),
             release_pwm_us=int(release_pwm_us),
         )
+        return dict(self.config)
+
+    def set_spray_duration(self, *, spray_duration_sec: float) -> dict[str, Any]:
+        self.calls.append(("duration", spray_duration_sec))
+        if self.duration_error is not None:
+            raise self.duration_error
+        self.config["spray_duration_sec"] = spray_duration_sec
         return dict(self.config)
 
     def set_manual_spray(self, enabled: bool) -> dict[str, Any]:
@@ -157,6 +165,7 @@ def test_all_spray_routes_require_auth() -> None:
             ("get", "/api/spray/status", None),
             ("get", "/api/spray/config", None),
             ("post", "/api/spray/config", {"press_pwm_us": 2000, "release_pwm_us": 900}),
+            ("post", "/api/spray/duration", {"spray_duration_sec": 0.3}),
             ("post", "/api/spray/on", None),
             ("post", "/api/spray/off", None),
             ("post", "/api/spray/test", {"on": True}),
@@ -503,3 +512,41 @@ def test_bridge_enable_service_timeout_is_declared_idempotent() -> None:
     assert keywords["timeout_outcome_unknown"].value is True
     assert isinstance(keywords["timeout_retry_safe"], ast.Constant)
     assert keywords["timeout_retry_safe"].value is True
+
+
+def test_duration_is_saved_through_the_bridge(spray_api) -> None:
+    client, bridge, _ = spray_api
+
+    response = client.post("/api/spray/duration", json={"spray_duration_sec": 0.35})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["config"]["spray_duration_sec"] == pytest.approx(0.35)
+    assert bridge.calls == [("duration", 0.35)]
+
+
+@pytest.mark.parametrize("raw", ["0", "-0.1", "3.01", "NaN", "Infinity"])
+def test_duration_must_be_positive_finite_and_bounded(spray_api, raw: str) -> None:
+    client, bridge, _ = spray_api
+
+    response = client.post(
+        "/api/spray/duration",
+        content=f'{{"spray_duration_sec":{raw}}}',
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert bridge.calls == []
+
+
+def test_duration_controller_rejection_is_reported(spray_api) -> None:
+    client, bridge, _ = spray_api
+    bridge.duration_error = RuntimeError(
+        "Spray configuration rejected: SPRAY_CONTROLLER_NOT_IDLE"
+    )
+
+    response = client.post("/api/spray/duration", json={"spray_duration_sec": 0.3})
+
+    assert response.status_code == 409
+    assert "SPRAY_CONTROLLER_NOT_IDLE" in response.json()["detail"]["message"]

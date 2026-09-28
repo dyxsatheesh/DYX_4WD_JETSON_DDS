@@ -577,6 +577,11 @@ class RoverBackendRosNode(Node):
             "/spray/config",
             retained_qos,
         )
+        self._spray_duration_config_pub = self.create_publisher(
+            String,
+            "/spray/duration_config",
+            retained_qos,
+        )
 
         # ======================================================
         # MAVROS and RTK subscriptions
@@ -1743,6 +1748,9 @@ class RoverBackendRosNode(Node):
             "press_value": press_value,
             "release_value": release_value,
             "spray_duration_sec": _finite_float(status.get("spray_duration_sec")),
+            "manual_override_timeout_sec": _finite_float(
+                status.get("manual_override_timeout_sec")
+            ),
             "spray_elapsed_sec": _finite_float(status.get("spray_elapsed_sec")),
             "spray_remaining_sec": _finite_float(status.get("spray_remaining_sec")),
             "spraying": bool(status.get("spraying", False)),
@@ -1811,6 +1819,37 @@ class RoverBackendRosNode(Node):
 
         self._spray_config_pub.publish(message)
 
+        return self._wait_for_spray_config_ack(request_id)
+
+    def set_spray_duration(
+        self,
+        *,
+        spray_duration_sec: float,
+    ) -> dict[str, Any]:
+        """Publish the mission spray hold time and wait for controller ACK."""
+
+        request_id = uuid.uuid4().hex
+
+        payload = {
+            "request_id": request_id,
+            "spray_duration_sec": float(spray_duration_sec),
+        }
+
+        message = String()
+        message.data = json.dumps(
+            payload,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+        self._spray_duration_config_pub.publish(message)
+
+        return self._wait_for_spray_config_ack(request_id)
+
+    def _wait_for_spray_config_ack(
+        self,
+        request_id: str,
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + self.SPRAY_CONFIG_ACK_TIMEOUT_SEC
 
         while time.monotonic() < deadline:
@@ -4395,6 +4434,16 @@ class RosBridgeRuntime:
             return self.node.set_spray_config(
                 press_pwm_us=press_pwm_us,
                 release_pwm_us=release_pwm_us,
+            )
+
+    def set_spray_duration(
+        self,
+        *,
+        spray_duration_sec: float,
+    ) -> dict[str, Any]:
+        with self._operation_lock:
+            return self.node.set_spray_duration(
+                spray_duration_sec=spray_duration_sec,
             )
 
     def set_manual_spray(

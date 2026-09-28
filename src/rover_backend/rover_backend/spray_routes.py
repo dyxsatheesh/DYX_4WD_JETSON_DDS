@@ -56,6 +56,12 @@ class SprayConfigRequest(BaseModel):
     release_pwm_us: float
 
 
+class SprayDurationRequest(BaseModel):
+    """Mission spray hold time (servo ON interval) configuration."""
+
+    spray_duration_sec: float
+
+
 class SprayTestRequest(BaseModel):
     """Bounded manual spray test request."""
 
@@ -329,6 +335,61 @@ async def set_spray_config(
     return {
         "success": True,
         "message": ("Spray PWM configuration updated successfully."),
+        "config": config,
+    }
+
+
+@spray_router.post("/duration")
+async def set_spray_duration(
+    request: SprayDurationRequest,
+    _session: AuthenticatedSession = Depends(require_auth),
+) -> dict[str, Any]:
+    """Set the mission spray hold time used for every marking point.
+
+    Tune it first with POST /test (duration_s), then save the chosen value
+    here. The controller rejects the change while it is not idle or while a
+    mission is enabled, and bounds it by its manual override timeout.
+    """
+
+    _require_ros_bridge()
+
+    spray_duration_sec = request.spray_duration_sec
+
+    if (
+        not math.isfinite(spray_duration_sec)
+        or spray_duration_sec <= 0.0
+        or spray_duration_sec > MAX_TEST_DURATION_SEC
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "success": False,
+                "message": (
+                    "spray_duration_sec must be greater than zero and at most "
+                    f"{MAX_TEST_DURATION_SEC:g} seconds."
+                ),
+            },
+        )
+
+    try:
+        config = await run_in_threadpool(
+            lambda: ros_bridge.set_spray_duration(
+                spray_duration_sec=spray_duration_sec,
+            )
+        )
+
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "message": str(error),
+            },
+        ) from error
+
+    return {
+        "success": True,
+        "message": "Spray hold time updated successfully.",
         "config": config,
     }
 

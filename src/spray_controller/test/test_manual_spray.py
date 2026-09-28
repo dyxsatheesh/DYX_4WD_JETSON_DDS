@@ -649,3 +649,89 @@ def test_manual_timeout_must_be_strictly_below_hard_timeout(tmp_path):
 
     with pytest.raises(ValueError, match="strictly less"):
         node._validate_parameters()
+
+
+def _duration_msg(request_id: str, value) -> SimpleNamespace:
+    return SimpleNamespace(
+        data=json.dumps({"request_id": request_id, "spray_duration_sec": value})
+    )
+
+
+def test_duration_config_is_accepted_and_reported_when_idle(tmp_path):
+    node = build_node(tmp_path)
+
+    node._spray_duration_config_callback(_duration_msg("req-1", 0.35))
+
+    assert node.spray_duration_sec == pytest.approx(0.35)
+    assert node._last_config_request_id == "req-1"
+    assert node._last_config_result == "ACCEPTED"
+    payload = json.loads(node.spray_status_pub.messages[-1].data)
+    assert payload["spray_duration_sec"] == pytest.approx(0.35)
+    assert payload["config_request_id"] == "req-1"
+    assert payload["config_result"] == "ACCEPTED"
+
+
+@pytest.mark.parametrize(
+    "busy",
+    ["mission_enable", "marking_active", "press_may_be_active", "spraying"],
+)
+def test_duration_config_is_rejected_unless_idle(tmp_path, busy):
+    node = build_node(tmp_path)
+    if busy == "spraying":
+        node.state = SprayController.STATE_SPRAYING
+    else:
+        setattr(node, busy, True)
+
+    node._spray_duration_config_callback(_duration_msg("req-2", 0.35))
+
+    assert node.spray_duration_sec == pytest.approx(0.2)
+    assert node._last_config_result == "REJECTED"
+    assert node._last_config_reason == "SPRAY_CONTROLLER_NOT_IDLE"
+
+
+@pytest.mark.parametrize("value", [0.0, -0.1, 3.01, "abc", None])
+def test_duration_config_rejects_out_of_range_or_invalid(tmp_path, value):
+    node = build_node(tmp_path)
+
+    node._spray_duration_config_callback(_duration_msg("req-3", value))
+
+    assert node.spray_duration_sec == pytest.approx(0.2)
+    assert node._last_config_result == "REJECTED"
+    assert node._last_config_reason in {
+        "SPRAY_DURATION_OUT_OF_RANGE",
+        "INVALID_VALUE",
+    }
+
+
+def test_duration_config_accepts_the_manual_override_limit(tmp_path):
+    node = build_node(tmp_path)
+
+    node._spray_duration_config_callback(
+        _duration_msg("req-4", node.manual_override_timeout_sec)
+    )
+
+    assert node._last_config_result == "ACCEPTED"
+    assert node.spray_duration_sec == pytest.approx(node.manual_override_timeout_sec)
+
+
+def test_mission_hold_uses_the_configured_duration(tmp_path):
+    node = build_node(tmp_path)
+    node._spray_duration_config_callback(_duration_msg("req-5", 0.35))
+    assert node._last_config_result == "ACCEPTED"
+
+    node._spray_gate_ok = lambda _now: True
+    node.transaction_kind = SprayController.TRANSACTION_MISSION
+    node.state = SprayController.STATE_SPRAYING
+    node.press_may_be_active = True
+    started = time.monotonic()
+    node.press_command_sent_at = started - 0.30
+    node.spray_started_at = started - 0.25
+
+    node._control_loop()
+    assert node.state == SprayController.STATE_SPRAYING
+    assert node.command_client.requests == []
+
+    node.spray_started_at = started - 0.40
+    node._control_loop()
+    assert node.state == SprayController.STATE_WAIT_RELEASE_ACK
+    assert len(node.command_client.requests) == 1
