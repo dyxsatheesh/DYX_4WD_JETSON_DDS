@@ -187,6 +187,8 @@ def build_node(tmp_path) -> SprayController:
     node._last_config_reason = None
 
     node.journal_path = tmp_path / "journal.json"
+    node.spray_settings_path = tmp_path / "spray_settings.json"
+    node.spray_duration_source = "launch"
     node.journal = None
     node.command_client = _CommandClient()
     node.spray_active_pub = _Publisher()
@@ -735,3 +737,73 @@ def test_mission_hold_uses_the_configured_duration(tmp_path):
     node._control_loop()
     assert node.state == SprayController.STATE_WAIT_RELEASE_ACK
     assert len(node.command_client.requests) == 1
+
+
+def test_accepted_duration_is_saved_to_the_settings_file(tmp_path):
+    node = build_node(tmp_path)
+
+    node._spray_duration_config_callback(_duration_msg("req-6", 0.45))
+
+    saved = json.loads(node.spray_settings_path.read_text())
+    assert saved["spray_duration_sec"] == pytest.approx(0.45)
+    assert node.spray_duration_source == "saved"
+    payload = json.loads(node.spray_status_pub.messages[-1].data)
+    assert payload["spray_duration_source"] == "saved"
+
+
+def test_rejected_duration_is_not_saved(tmp_path):
+    node = build_node(tmp_path)
+    node.mission_enable = True
+
+    node._spray_duration_config_callback(_duration_msg("req-7", 0.45))
+
+    assert not node.spray_settings_path.exists()
+    assert node.spray_duration_source == "launch"
+
+
+def test_saved_duration_is_applied_on_restart(tmp_path):
+    first = build_node(tmp_path)
+    first._spray_duration_config_callback(_duration_msg("req-8", 0.45))
+
+    restarted = build_node(tmp_path)
+    assert restarted.spray_duration_sec == pytest.approx(0.2)
+    restarted._apply_saved_settings()
+
+    assert restarted.spray_duration_sec == pytest.approx(0.45)
+    assert restarted.spray_duration_source == "saved"
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["not json", "{}", '{"spray_duration_sec": 0}', '{"spray_duration_sec": 9.0}'],
+)
+def test_bad_settings_file_keeps_launch_value(tmp_path, content):
+    node = build_node(tmp_path)
+    node.spray_settings_path.write_text(content)
+
+    node._apply_saved_settings()
+
+    assert node.spray_duration_sec == pytest.approx(0.2)
+    assert node.spray_duration_source == "launch"
+
+
+def test_missing_settings_file_keeps_launch_value(tmp_path):
+    node = build_node(tmp_path)
+
+    node._apply_saved_settings()
+
+    assert node.spray_duration_sec == pytest.approx(0.2)
+    assert node.spray_duration_source == "launch"
+
+
+def test_duration_is_rejected_and_not_applied_when_save_fails(tmp_path):
+    node = build_node(tmp_path)
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("")
+    node.spray_settings_path = blocker / "spray_settings.json"
+
+    node._spray_duration_config_callback(_duration_msg("req-9", 0.45))
+
+    assert node.spray_duration_sec == pytest.approx(0.2)
+    assert node._last_config_result == "REJECTED"
+    assert node._last_config_reason == "SPRAY_SETTINGS_SAVE_FAILED"

@@ -278,6 +278,12 @@ def generate_launch_description() -> LaunchDescription:
                         "journal_path": (
                             "/home/flash/.ros/" "dyx_spray_controller_journal.json"
                         ),
+                        # Written by POST /api/spray/duration. A valid saved
+                        # value overrides spray_duration_sec above on start;
+                        # delete the file to fall back to the launch value.
+                        "spray_settings_path": (
+                            "/home/flash/.ros/" "dyx_spray_settings.json"
+                        ),
                     }
                 ],
             ),

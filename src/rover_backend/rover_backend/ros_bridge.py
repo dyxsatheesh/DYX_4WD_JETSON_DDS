@@ -577,10 +577,11 @@ class RoverBackendRosNode(Node):
             "/spray/config",
             retained_qos,
         )
+        # Not retained: spray_controller saves the value to its own file.
         self._spray_duration_config_pub = self.create_publisher(
             String,
             "/spray/duration_config",
-            retained_qos,
+            command_qos,
         )
 
         # ======================================================
@@ -1751,6 +1752,7 @@ class RoverBackendRosNode(Node):
             "manual_override_timeout_sec": _finite_float(
                 status.get("manual_override_timeout_sec")
             ),
+            "spray_duration_source": status.get("spray_duration_source"),
             "spray_elapsed_sec": _finite_float(status.get("spray_elapsed_sec")),
             "spray_remaining_sec": _finite_float(status.get("spray_remaining_sec")),
             "spraying": bool(status.get("spraying", False)),

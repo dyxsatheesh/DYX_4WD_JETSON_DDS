@@ -143,6 +143,12 @@ class SprayController(Node):
             "journal_path",
             "~/.ros/dyx_spray_controller_journal.json",
         )
+        # Operator-saved settings (POST /api/spray/duration). A valid saved
+        # spray_duration_sec overrides the launch value on every start.
+        self.declare_parameter(
+            "spray_settings_path",
+            "~/.ros/dyx_spray_settings.json",
+        )
 
         self.enabled = bool(self.get_parameter("enabled").value)
         self.press_value = float(self.get_parameter("press_value").value)
@@ -195,6 +201,12 @@ class SprayController(Node):
         self._last_config_reason: Optional[str] = None
 
         self._validate_parameters()
+
+        self.spray_settings_path = Path(
+            os.path.expanduser(str(self.get_parameter("spray_settings_path").value))
+        )
+        self.spray_duration_source = "launch"
+        self._apply_saved_settings()
 
         # ==========================================================
         # QoS
@@ -272,7 +284,10 @@ class SprayController(Node):
             String,
             "/spray/duration_config",
             self._spray_duration_config_callback,
-            retained_qos,
+            # Volatile on purpose: the settings file is the persistence. A
+            # retained request that was rejected (controller busy) must not
+            # be replayed and silently applied on a later restart.
+            command_qos,
         )
 
         self.spray_active_pub = self.create_publisher(
@@ -448,6 +463,10 @@ class SprayController(Node):
             f"release={self.release_value:+.3f}"
         )
         self.get_logger().warn(f"Journal: {self.journal_path}")
+        self.get_logger().warn(
+            f"Spray settings: {self.spray_settings_path} "
+            f"(duration source={self.spray_duration_source})"
+        )
 
     # ==============================================================
     # Parameter / utility helpers
@@ -831,6 +850,70 @@ class SprayController(Node):
 
         return False
 
+    def _spray_duration_in_range(self, value: float) -> bool:
+        return (
+            math.isfinite(value)
+            and 0.0 < value <= self.manual_override_timeout_sec
+            and value < self.hard_press_timeout_sec
+        )
+
+    def _apply_saved_settings(self) -> None:
+        """Apply an operator-saved spray hold time over the launch value.
+
+        A missing file keeps the launch value. A corrupt or out-of-range file
+        is logged and ignored rather than stopping the controller.
+        """
+
+        try:
+            if not self.spray_settings_path.exists():
+                return
+
+            payload = json.loads(self.spray_settings_path.read_text(encoding="utf-8"))
+            value = float(payload["spray_duration_sec"])
+        except Exception as exc:
+            self.get_logger().error(
+                f"Ignoring unreadable spray settings {self.spray_settings_path}: "
+                f"{exc}; using launch spray_duration_sec="
+                f"{self.spray_duration_sec:.3f}"
+            )
+            return
+
+        if not self._spray_duration_in_range(value):
+            self.get_logger().error(
+                f"Ignoring saved spray_duration_sec={value!r} (out of range); "
+                f"using launch value {self.spray_duration_sec:.3f}"
+            )
+            return
+
+        self.spray_duration_sec = value
+        self.spray_duration_source = "saved"
+
+    def _write_saved_settings(self, spray_duration_sec: float) -> None:
+        payload = {
+            "version": 1,
+            "spray_duration_sec": spray_duration_sec,
+            "updated_unix_ns": time.time_ns(),
+        }
+
+        self.spray_settings_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        temporary = self.spray_settings_path.with_suffix(
+            self.spray_settings_path.suffix + ".tmp"
+        )
+
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(
+            temporary,
+            self.spray_settings_path,
+        )
+
     def _spray_duration_config_callback(
         self,
         msg: String,
@@ -875,12 +958,7 @@ class SprayController(Node):
             self._publish_status()
             return
 
-        if (
-            not math.isfinite(spray_duration_sec)
-            or spray_duration_sec <= 0.0
-            or spray_duration_sec > self.manual_override_timeout_sec
-            or spray_duration_sec >= self.hard_press_timeout_sec
-        ):
+        if not self._spray_duration_in_range(spray_duration_sec):
             self._last_config_request_id = request_id
             self._last_config_result = "REJECTED"
             self._last_config_reason = "SPRAY_DURATION_OUT_OF_RANGE"
@@ -888,7 +966,23 @@ class SprayController(Node):
             self._publish_status()
             return
 
+        # Save first: an accepted value must survive a restart. If the file
+        # cannot be written, reject instead of applying a value that would
+        # silently revert to the launch default on the next start.
+        try:
+            self._write_saved_settings(spray_duration_sec)
+        except Exception as exc:
+            self.get_logger().error(f"Unable to save spray hold time: {exc}")
+
+            self._last_config_request_id = request_id
+            self._last_config_result = "REJECTED"
+            self._last_config_reason = "SPRAY_SETTINGS_SAVE_FAILED"
+
+            self._publish_status()
+            return
+
         self.spray_duration_sec = spray_duration_sec
+        self.spray_duration_source = "saved"
 
         self._last_config_request_id = request_id
         self._last_config_result = "ACCEPTED"
@@ -1278,6 +1372,7 @@ class SprayController(Node):
             "release_value": self.release_value,
             "spray_duration_sec": self.spray_duration_sec,
             "manual_override_timeout_sec": self.manual_override_timeout_sec,
+            "spray_duration_source": self.spray_duration_source,
             "spray_elapsed_sec": (
                 round(spray_elapsed_sec, 3)
                 if spray_elapsed_sec is not None
