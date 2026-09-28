@@ -1,0 +1,60 @@
+#!/bin/bash
+# NetworkManager dispatcher: keep the DYX-4WD hotspot responsive for the
+# rover app while hotspot clients share the Jetson's 4G internet.
+#
+# Installed to /etc/NetworkManager/dispatcher.d/ by
+# scripts/install_hotspot_qos.sh; re-applied whenever any interface comes up
+# (the hotspot, or a 4G dongle / phone tether plugged in later).
+#
+# Why policing and not shaping: the Jetson 5.15-tegra kernel has no HTB,
+# fq_codel, cake, TBF or prio qdisc and no DSCP/TOS/CLASSIFY target. What it
+# has is xt_hashlimit. Dropping client internet traffic above a fixed rate
+# makes TCP back off, so a tablet or laptop download can no longer fill the
+# Wi-Fi transmit queue in front of the rover app, and cannot crowd NTRIP
+# (RTK corrections) off the 4G link.
+#
+# Measured 2026-09-28: uncapped client downloads pushed 494 KiB/s through the
+# hotspot and Mac->Jetson ping to 1459 ms worst case.
+
+WIFI_IF="${DYX_HOTSPOT_IFACE:-wlP1p1s0}"
+# Total for all hotspot clients together, in hashlimit byte units (kb = KiB).
+DOWNLOAD_LIMIT="${DYX_HOTSPOT_DOWNLOAD_LIMIT:-200kb/s}"
+DOWNLOAD_BURST="${DYX_HOTSPOT_DOWNLOAD_BURST:-400kb}"
+UPLOAD_LIMIT="${DYX_HOTSPOT_UPLOAD_LIMIT:-64kb/s}"
+UPLOAD_BURST="${DYX_HOTSPOT_UPLOAD_BURST:-128kb}"
+# pfifo_fast queue length on the hotspot; bounds latency behind a burst.
+WIFI_TXQUEUELEN="${DYX_HOTSPOT_TXQUEUELEN:-100}"
+REGDOMAIN="${DYX_HOTSPOT_REGDOMAIN:-IN}"
+CHAIN="DYX_HOTSPOT_QOS"
+
+ACTION="${2:-up}"
+case "$ACTION" in
+    up|dhcp4-change|connectivity-change) ;;
+    *) exit 0 ;;
+esac
+
+[[ -d "/sys/class/net/$WIFI_IF" ]] || exit 0
+
+iw reg set "$REGDOMAIN" 2>/dev/null || true
+ip link set dev "$WIFI_IF" txqueuelen "$WIFI_TXQUEUELEN" 2>/dev/null || true
+
+# mangle FORWARD runs before NetworkManager's own shared-mode rules in the
+# filter table, so NM re-adding its rules can never bypass these limits.
+iptables -t mangle -N "$CHAIN" 2>/dev/null || true
+iptables -t mangle -F "$CHAIN"
+iptables -t mangle -C FORWARD -j "$CHAIN" 2>/dev/null \
+    || iptables -t mangle -I FORWARD 1 -j "$CHAIN"
+
+# Internet -> hotspot clients (downloads, map tiles).
+iptables -t mangle -A "$CHAIN" ! -i "$WIFI_IF" -o "$WIFI_IF" \
+    -m hashlimit --hashlimit-name dyx_dl \
+    --hashlimit-above "$DOWNLOAD_LIMIT" --hashlimit-burst "$DOWNLOAD_BURST" \
+    -j DROP
+# Hotspot clients -> internet (uploads, sync).
+iptables -t mangle -A "$CHAIN" -i "$WIFI_IF" ! -o "$WIFI_IF" \
+    -m hashlimit --hashlimit-name dyx_ul \
+    --hashlimit-above "$UPLOAD_LIMIT" --hashlimit-burst "$UPLOAD_BURST" \
+    -j DROP
+
+logger -t dyx-hotspot-qos \
+    "applied on $1/$ACTION: download<=$DOWNLOAD_LIMIT upload<=$UPLOAD_LIMIT txqueuelen=$WIFI_TXQUEUELEN reg=$REGDOMAIN"
