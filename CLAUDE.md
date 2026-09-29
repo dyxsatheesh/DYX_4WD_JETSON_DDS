@@ -45,8 +45,13 @@ a stack restart or another connection to the FCU serial device.
   subsequent `nsh>`; send shell `\x03` to stop a listener, then an empty
   SERIAL_CONTROL message with flags 0 when closing the shell.
 - NSH `ver all` confirmed PX4 1.16.2 at
-  `54f0455ffcd755534539a7cf33a09a20bf71d29d`. Use that exact commit for
-  receiver/mixer inspection, not a newer checkout's working-tree files.
+  `54f0455ffcd755534539a7cf33a09a20bf71d29d` on 2026-09-07. ⚠ **Since a
+  2026-09-25 reflash the FCU runs a custom build**: git
+  `1fe17890895d4682db1f2ec5f3203c789c731831`, built Sep 25 2026, variant
+  `differential`, still reporting 1.16.2 (NSH `ver all`, 2026-09-29). Use
+  **that** commit for receiver/mixer/driver inspection. For routine reads,
+  `scripts/nsh_bridge.py "<cmd>" ...` on the Jetson wraps this transport
+  (refuses to run while armed unless `--allow-armed`).
 - For the **authorized ground test only**, temporarily set/save
   `COM_RC_IN_MODE=1` while **disarmed**, then start
   `/mavros/manual_control/send` (`mavros_msgs/msg/ManualControl`) at 50 Hz
@@ -86,8 +91,9 @@ a stack restart or another connection to the FCU serial device.
 | OS | ROS2 Humble (EOL May 2027) | `REFACTOR_TO_CPP_AUDIT.md` |
 | FCU | **Holybro Pixhawk 6X** — NOT a CubeOrangePlus | `src/spray_controller/spray_controller/spray_controller_node.py:6`, `rover.launch.py:174` |
 | FCU connection | `/dev/ttyACM0` @ 921600, `tgt_system=1 tgt_component=1 fcu_protocol=v2.0` | `rover.launch.py:47-59` |
-| Drive | 4-wheel, **dual Sabertooth 2X32** motor controllers via PX4 PWM main outputs (`PWM_MAIN_FUNC1..4`), `MAV_TYPE=10` (ground rover) | `px4-params/*.params` (untracked local exports) |
-| RoboClaw | Present in firmware, **disabled** (`RBCLW_SER_CFG=0`) — this rover does NOT drive RoboClaw despite `WORKING_STATUS_24_06_2026.txt` (stale, 2026-06-24) claiming "PX4 OFFBOARD → RoboClaw → wheels" | `px4-params/*.params` |
+| Drive | 4-wheel skid-steer **through a RoboClaw** (operator-confirmed 2026-09-29). PX4 `roboclaw` driver on TELEM3 = `/dev/ttyS1`: `RBCLW_SER_CFG=103`, `RBCLW_BAUD=115200`, `RBCLW_ADDRESS=128`, `RBCLW_FUNC1/2=101/102` (Motor 1/2), `RBCLW_VEL_CTRL=1` (encoder closed-loop), `RBCLW_COUNTS_REV=160000`, `RBCLW_QPPS_MAX=171000`, `RBCLW_ENC_HZ=20`. Airframe `SYS_AUTOSTART=50000` (generic differential rover). ⚠ `PWM_MAIN_FUNC1..4` are **still 101/102/101/102**, so the old Sabertooth PWM path is also driven with the same motor commands — harmless only if nothing is wired there; not yet cleared. | NSH `param show`, 2026-09-29 |
+| Drive (history) | Until some point before 2026-09-29 this rover drove **dual Sabertooth 2X32** via `PWM_MAIN_FUNC1..4` with RoboClaw disabled (`RBCLW_SER_CFG=0`). Every speed/throttle/pivot number measured on the Sabertooth drivetrain (e.g. §2026-09-01 `RO_SPEED_*` droop, throttle->speed slope, breakaway) **may not hold on RoboClaw** — re-measure before relying on it. The switch date is not recorded. | `px4-params/*.params` (stale) |
+| Battery | **8S LiFePO4, 30 Ah** (operator, 2026-09-29). `BAT1_N_CELLS=8`, `BAT1_V_CHARGED=3.45`, `BAT1_V_EMPTY=3.00`, `BAT1_CAPACITY=30000`, set via NSH 2026-09-29. Before that `N_CELLS=3`/`V_CHARGED=4.70` made a 26 V pack read 8.66 V/cell -> "Battery 1: over voltage" blocked arming. The INA228 current channel reads ~0.1 A and does **not** measure traction current, so PX4 SoC is voltage-only (LFP curve is flat — treat % as rough). | NSH, `commander check` OK after |
 | GNSS receiver | **Septentrio mosaic-H**, dual-antenna, SBF protocol, 10 Hz PVT, dedicated PX4 driver `src/drivers/gnss/septentrio/` — **not** a u-blox F9P; audit the Septentrio path, not UBX | `docs/2026-09-04_EKF_GNSS_Hardware_Audit.md` §8 |
 | Wheel track | `RD_WHEEL_TRACK = 0.63 m` | `px4-params/*.params` |
 | | Full NTRIP client (`rtk_correction_bridge`), managed as a supervised child process by `rover_backend`, confirmed FIXED and live 2026-08-31 evening | see RTK section below |
@@ -99,7 +105,7 @@ rpp_controller  →  /rpp/velocity_ned (Vector3Stamped, m/s, North/East)
                 →  cmd_vel_bridge (jetson_4wd_control pkg)
                 →  /mavros/setpoint_raw/local (PositionTarget, FRAME_LOCAL_NED, velocity-only mask)
                 →  PX4 OFFBOARD
-                →  Sabertooth 2x32 (via PX4 PWM main outputs)
+                →  RoboClaw (PX4 roboclaw driver, TELEM3) — was Sabertooth 2x32 via PWM before
 ```
 (`cmd_vel_bridge.py:127-132, 158-162`)
 
@@ -174,10 +180,14 @@ or `spray_controller`. Git history shows it was only ever touched in the
 initial commit and never updated as the architecture moved on.
 
 **The authoritative way to bring the stack up is
-`src/rover_bringup/launch/rover.launch.py`**, not `start_rover.sh`. If asked
-to restart the rover stack, point at that launch file (or ask the operator
-how they actually run it at the rover — this file doesn't yet document a
-verified one-liner for launching it end to end).
+`src/rover_bringup/launch/rover.launch.py`**, not `start_rover.sh`.
+**Since 2026-09-29 it can run as the boot service `dyx-rover.service`**
+(`scripts/rover_launch.sh`, installed by the operator with
+`sudo ./scripts/install_rover_service.sh --now`; runbook
+`docs/ROVER_BOOT_SERVICE.md`). When it is installed, "restart the stack" is
+`sudo systemctl restart dyx-rover`, and nobody should also launch by hand.
+Until the service is installed and boot-verified, a manual launch is
+`ros2 launch rover_bringup rover.launch.py` with ROS and the overlay sourced.
 
 `scripts/stop_rover.sh`'s disarm sequence is still broadly sound
 (disable mission → e-stop → zero velocity → disarm → MANUAL) even though it
@@ -1137,8 +1147,10 @@ field-tested; frontend buttons not wired yet.
 spray). LASER = AUX6 (`PWM_AUX_FUNC6=302`, `MAV_CMD_DO_SET_ACTUATOR`
 param2), ON at each point that passes the same RPP + raw-GNSS gates as spray,
 held with **no time limit** until the operator presses NEXT (steady when raw GNSS ≤ 30 mm; **blinks 0.5 s ON/OFF** when raw GNSS *measured* > 30 mm; OFF when the stop could not be measured); NEXT waits for a
-PX4-acknowledged laser OFF before re-enabling motion; the final point also
-waits for NEXT. START refuses LASER + AUTO. Operator can pick SPRAY/AUTO per
+PX4-acknowledged laser OFF before re-enabling motion. **Since 2026-09-29 the
+final point does NOT wait for NEXT** (operator request): the mission
+completes at once in every mode, and the completion E-stop turns the laser
+OFF, so the final point's laser shows only momentarily. START refuses LASER + AUTO. Operator can pick SPRAY/AUTO per
 mission and save defaults (`/home/flash/.ros/dyx_mission_defaults.json`).
 Full contract, PX4 params and API: **`docs/LASER_MARKING_MODE.md`**. ⚠ PX4
 `PWM_AUX_FUNC6/MIN6/MAX6/DIS6` must be set (302 / 1000 / 2000 / 1000) before
@@ -1288,7 +1300,8 @@ this rover IP, and this workspace backend as the verified 4WD stack.
 ros2 topic echo /mavros/state --once
 ros2 topic echo /mavros/local_position/odom
 ros2 topic echo /rpp/accuracy --once
-journalctl -u bag-autorecord.service -f      # the only systemd unit on this Jetson
+journalctl -u bag-autorecord.service -f      # bag recorder unit
+journalctl -u dyx-rover -f                    # rover stack unit (once installed)
 iw dev wlP1p1s0 station dump | grep -E "^Station|signal:"   # hotspot clients
 sudo iptables -t mangle -L DYX_HOTSPOT_QOS -n -v            # client-internet cap counters
 ```

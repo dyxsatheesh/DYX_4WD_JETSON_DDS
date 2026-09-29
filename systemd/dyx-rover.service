@@ -1,0 +1,39 @@
+[Unit]
+Description=DYX 4WD rover stack (rover_bringup rover.launch.py)
+Documentation=file:/home/flash/rover_ws/docs/ROVER_BOOT_SERVICE.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=flash
+Group=flash
+WorkingDirectory=/home/flash/rover_ws
+# Sources ROS + overlay, refuses to start beside a manual launch, waits for
+# the Pixhawk USB device, then execs `ros2 launch` (so it is the main PID).
+ExecStart=/home/flash/rover_ws/scripts/rover_launch.sh
+Restart=on-failure
+RestartSec=5
+# 3 = another rover.launch.py is already running: do not retry into it.
+RestartPreventExitStatus=3
+
+Environment=ROS_DOMAIN_ID=0
+Environment=ROS_LOCALHOST_ONLY=0
+Environment=HOME=/home/flash
+Environment=PYTHONUNBUFFERED=1
+LimitNOFILE=65536
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dyx-rover
+
+# SIGINT to ros2 launch only; it shuts its nodes down (mission_manager asserts
+# the E-stop on exit). Anything still alive after the timeout is SIGKILLed.
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
