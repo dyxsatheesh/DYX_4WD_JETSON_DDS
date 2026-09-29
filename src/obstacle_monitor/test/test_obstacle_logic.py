@@ -216,3 +216,98 @@ def test_bags_record_the_obstacle_topics():
     for topic in ("/obstacle/status", "/obstacle/range", "/obstacle/config"):
         assert f'"{topic}"' in source
     assert '"/obstacle_monitor"' in source          # node params saved with each bag
+
+
+# ------------------------------------------------------------ silent-port watchdog
+
+
+class _FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def monotonic(self):
+        return self.t
+
+
+def _reader_under_test(node, reads_per_open, clock, max_opens, monkeypatch):
+    """A node object with only what _read_loop needs, and a fake serial port."""
+    import threading
+
+    opened = []
+
+    class FakeSerial:
+        def __init__(self, port, baud, timeout):
+            opened.append(port)
+            self._reads = list(reads_per_open[min(len(opened), len(reads_per_open)) - 1])
+            if len(opened) >= max_opens:
+                reader._stop.set()
+
+        def read(self, size):
+            clock.t += 0.1  # each read blocks for the 0.1 s serial timeout
+            return self._reads.pop(0) if self._reads else b""
+
+        def close(self):
+            pass
+
+    logs = []
+
+    class Logger:
+        def warn(self, text):
+            logs.append(("warn", text))
+
+        def error(self, text):
+            logs.append(("error", text))
+
+    reader = node.ObstacleMonitorNode.__new__(node.ObstacleMonitorNode)
+    reader._lock = threading.Lock()
+    reader._settings = node.ObstacleSettings(port="/dev/fake", baud=115200)
+    reader._stop = threading.Event()
+    reader._reopen = threading.Event()
+    reader._serial_error = None
+    reader._port_open = False
+    received = []
+    reader._on_bytes = received.append
+    reader.get_logger = lambda: Logger()
+    monkeypatch.setitem(sys.modules, "serial", types.SimpleNamespace(Serial=FakeSerial))
+    return reader, opened, received, logs
+
+
+def test_silent_port_is_reopened_and_reported_once(monkeypatch):
+    node = _node_module()
+    clock = _FakeClock()
+    monkeypatch.setattr(node.time, "monotonic", clock.monotonic)
+    # First open streams one frame and then goes silent (the USB stall);
+    # every later open stays silent.
+    reader, opened, received, logs = _reader_under_test(
+        node, [[frame(1000)], []], clock, max_opens=4, monkeypatch=monkeypatch
+    )
+
+    reader._read_loop()
+
+    assert len(opened) == 4                      # reopened after each silence
+    assert received == [frame(1000)]
+    errors = [text for level, text in logs if level == "error"]
+    assert len(errors) == 1                      # one log line, not one per retry
+    assert errors[0].startswith("Obstacle sensor: no data from /dev/fake")
+    assert reader._serial_error.startswith(node.SILENCE_ERROR_PREFIX)
+
+
+def test_data_after_reopen_clears_the_silence_error(monkeypatch):
+    node = _node_module()
+    clock = _FakeClock()
+    monkeypatch.setattr(node.time, "monotonic", clock.monotonic)
+    reader, opened, received, logs = _reader_under_test(
+        node, [[], [frame(800)]], clock, max_opens=3, monkeypatch=monkeypatch
+    )
+
+    reader._read_loop()
+
+    assert frame(800) in received
+    assert any("data resumed" in text for level, text in logs if level == "warn")
+
+
+def test_silence_threshold():
+    node = _node_module()
+    limit = node.ObstacleMonitorNode.SILENCE_REOPEN_SEC
+    assert not node.silence_exceeded(10.0, 10.0 + limit, limit)
+    assert node.silence_exceeded(10.0, 10.0 + limit + 0.1, limit)

@@ -12,6 +12,11 @@ motion. Consumers:
 A sensor failure is reported (``healthy: false``, zone ``unknown``) but is a
 *warning only*: nobody pauses on it (operator decision 2026-09-29).
 
+An open port that delivers no bytes for ``SILENCE_REOPEN_SEC`` (the A21
+streams continuously) is closed and reopened, retrying until data returns,
+and reported as ``serial_error`` "no data from ...". This recovers the USB
+stall seen 2026-09-29 that previously left the node waiting forever.
+
 Publishes ``/obstacle/status`` (std_msgs/String JSON, ``dyx4wd/obstacle@1``)
 at 10 Hz and immediately on a zone change: this is the contract the safety
 consumers use. Also publishes every sensor reading as a standard
@@ -76,6 +81,14 @@ class ObstacleSettings:
         return replace(base, danger_mm=self.danger_mm, warning_mm=self.warning_mm)
 
 
+SILENCE_ERROR_PREFIX = "no data from"
+
+
+def silence_exceeded(last_data_at: float, now: float, limit_sec: float) -> bool:
+    """True when an open port has delivered no bytes for longer than limit_sec."""
+    return now - last_data_at > limit_sec
+
+
 def load_settings(path: Path, defaults: ObstacleSettings) -> ObstacleSettings:
     """Saved settings over the launch defaults; bad files fall back."""
     try:
@@ -136,6 +149,11 @@ def apply_config_request(
 class ObstacleMonitorNode(Node):
     PUBLISH_HZ = 10.0
     REOPEN_INTERVAL_SEC = 2.0
+    # The A21 streams continuously (no-echo frames included), so an open port
+    # that delivers nothing for this long is dead, not quiet. Seen 2026-09-29:
+    # a USB stall ("ftdi_sio ... urb stopped: -32") left the port open with
+    # no data and no error, and the node waited forever.
+    SILENCE_REOPEN_SEC = 2.0
 
     def __init__(self) -> None:
         super().__init__("obstacle_monitor")
@@ -217,13 +235,28 @@ class ObstacleMonitorNode(Node):
                 self._set_serial_error(f"cannot open {port}: {exc}")
                 self._stop.wait(self.REOPEN_INTERVAL_SEC)
                 continue
-            self._set_serial_error(None, port_open=True)
+            # Keep a silence error until data actually arrives, so a port that
+            # reopens but stays dead is reported (and logged) once, not cleared.
+            self._set_serial_error(self._silence_error_or_none(), port_open=True)
             self._reopen.clear()
+            last_data_at = time.monotonic()
             try:
                 while not self._stop.is_set() and not self._reopen.is_set():
                     data = handle.read(64)
+                    now = time.monotonic()
                     if data:
+                        last_data_at = now
+                        if self._serial_error is not None:
+                            self._set_serial_error(None, port_open=True)
+                            self.get_logger().warn(f"Obstacle sensor: data resumed on {port}")
                         self._on_bytes(data)
+                    elif silence_exceeded(last_data_at, now, self.SILENCE_REOPEN_SEC):
+                        self._set_serial_error(
+                            f"{SILENCE_ERROR_PREFIX} {port} for "
+                            f">{self.SILENCE_REOPEN_SEC:.0f} s; reopening",
+                            port_open=True,
+                        )
+                        break
             except Exception as exc:
                 self._set_serial_error(f"read error on {port}: {exc}")
                 self._stop.wait(self.REOPEN_INTERVAL_SEC)
@@ -234,6 +267,11 @@ class ObstacleMonitorNode(Node):
                     pass
                 with self._lock:
                     self._port_open = False
+
+    def _silence_error_or_none(self) -> Optional[str]:
+        with self._lock:
+            error = self._serial_error
+        return error if error and error.startswith(SILENCE_ERROR_PREFIX) else None
 
     def _set_serial_error(self, error: Optional[str], *, port_open: bool = False) -> None:
         with self._lock:

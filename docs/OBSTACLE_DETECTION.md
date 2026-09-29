@@ -162,6 +162,15 @@ onto `/api/obstacle/config` (NRP_ROS `danger_max_mm` / `warning_max_mm` →
 - **Zone settings actually apply.** NRP_ROS stored the UI zones but used
   hard-coded 2000 / 4000 mm.
 - **A dead sensor is reported.** NRP_ROS silently gave no protection.
+- **A silent port is reopened.** On 2026-09-29, in the first mission with
+  detection on, the FT232 read path stalled in the kernel
+  (`ftdi_sio ... urb stopped: -32`) about 80 s after the rover started
+  driving. The port stayed open with no data and no error, so the sensor
+  was lost for the rest of the run. `obstacle_monitor` now closes and
+  reopens a port that delivers nothing for 2 s (`SILENCE_REOPEN_SEC`),
+  retrying until data returns, with `serial_error` = "no data from ...". The
+  likely root cause is motor EMI or power on the USB hub: keep the adapter on
+  a direct Jetson port or a powered hub, away from the motor-controller wiring.
 - **Detection keeps running while paused,** so Resume is offered only once the
   path is clear.
 - **Independent second layer** in `cmd_vel_bridge`.
