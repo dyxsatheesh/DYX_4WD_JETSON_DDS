@@ -47,6 +47,24 @@ def state():
 # --------------------------------------------------------------------- A
 
 
+def test_telemetry_carries_fresh_obstacle_status(routes, state):
+    state.update(
+        "obstacle", available=True, enabled=True, healthy=True,
+        zone="danger", distance_mm=795, danger_mm=1500, warning_mm=3000,
+    )
+    obstacle = routes.build_telemetry_payload()["obstacle"]
+    assert obstacle["healthy"] is True
+    assert obstacle["zone"] == "danger"
+    assert obstacle["distance_mm"] == 795
+    assert obstacle["age_sec"] is not None and obstacle["age_sec"] < 1.0
+
+
+def test_telemetry_marks_stale_obstacle_status_unhealthy(routes, state, monkeypatch):
+    state.update("obstacle", available=True, enabled=True, healthy=True, zone="clear")
+    monkeypatch.setattr(routes, "OBSTACLE_TELEMETRY_STALE_SEC", -1.0)
+    assert routes.build_telemetry_payload()["obstacle"]["healthy"] is False
+
+
 def test_telemetry_size_is_independent_of_mission_history(routes, state):
     sizes = {}
     for points in (1, 100, 1000):

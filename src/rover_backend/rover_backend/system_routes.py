@@ -437,6 +437,11 @@ def build_mission_status_payload() -> dict[str, Any]:
     }
 
 
+# mission_manager treats /obstacle/status older than 1.0 s as stale;
+# obstacle_monitor publishes at 10 Hz, so 1.5 s leaves margin for jitter.
+OBSTACLE_TELEMETRY_STALE_SEC = 1.5
+
+
 def build_telemetry_payload(
     mission_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -460,6 +465,14 @@ def build_telemetry_payload(
     battery = snapshot["battery"]
     accuracy = snapshot["accuracy"]
     safety = snapshot["safety"]
+    # Forward ultrasonic, as mission_manager judges it: a reading older than
+    # OBSTACLE_TELEMETRY_STALE_SEC is not healthy, so a dead obstacle_monitor
+    # never leaves a stale "clear" on the tablet.
+    obstacle = dict(snapshot.get("obstacle", {}))
+    obstacle_age = _iso_age_seconds(obstacle.get("updated_at"))
+    obstacle["age_sec"] = obstacle_age
+    if obstacle_age is None or obstacle_age > OBSTACLE_TELEMETRY_STALE_SEC:
+        obstacle["healthy"] = False
     mission = telemetry_mission_projection(
         mission_status
         if mission_status is not None
@@ -496,6 +509,7 @@ def build_telemetry_payload(
         "battery": battery,
         "accuracy": accuracy,
         "safety": safety,
+        "obstacle": obstacle,
         "mission": mission,
         "pos_e": local_x,
         "pos_n": local_y,
