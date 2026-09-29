@@ -28,8 +28,11 @@ if [[ $EUID -eq 0 ]]; then
 fi
 
 echo "== 1/4 Build obstacle_monitor (new package) and rover_bringup"
+# ROS setup scripts read unset variables; relax nounset only while sourcing.
+set +u
 # shellcheck disable=SC1091
 source /opt/ros/humble/setup.bash
+set -u
 ( cd "$WS" && colcon build --symlink-install --packages-select obstacle_monitor rover_bringup ) || {
     echo "Build FAILED" >&2
     exit 1
