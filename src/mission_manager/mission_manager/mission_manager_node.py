@@ -4866,6 +4866,12 @@ class MissionManager(Node):
         self._reset_arrival_state()
         self._publish_runtime_path()
 
+        # The final uploaded point completes the mission at once, in every
+        # mode: no NEXT is needed after the last point (operator decision
+        # 2026-09-29). Completion asserts the E-stop, which turns any laser OFF.
+        if self._finish_if_done():
+            return
+
         # LASER: a stop that raw GNSS actually MEASURED outside tolerance
         # blinks the laser until NEXT (rover is here, do not mark). An
         # unmeasurable stop or an unsettled RPP miss keeps the laser OFF.
@@ -4874,9 +4880,6 @@ class MissionManager(Node):
             and failure_source == "RAW_GNSS"
             and str(failure_reason).startswith(self.RAW_GNSS_MEASURED_MISS_REASON)
         )
-
-        if not laser_blink and self._finish_if_done():
-            return
 
         action = (
             "WAITING_FOR_NEXT"
@@ -4897,12 +4900,11 @@ class MissionManager(Node):
                     point_id,
                     self.LASER_BLINK,
                 )
-                last_point = self._next_pending_marking_number(0) is None
                 self._last_message = (
                     f"{point_id} FAILED from {source_text} "
                     f"(rpp_overall={overall_text}); laser BLINKING (outside "
                     "tolerance, do not mark); press NEXT to turn it off and "
-                    + ("finish the mission" if last_point else "go to the next point")
+                    "go to the next point"
                 )
             else:
                 self._last_message = (
@@ -5474,18 +5476,21 @@ class MissionManager(Node):
             self._reset_arrival_state()
             self._publish_runtime_path()
 
+            # If this was the final uploaded point, _complete_mission() reports
+            # completion now and schedules automatic STOP/DISARM/clear. This
+            # holds in every mode, LASER included: no NEXT after the last
+            # point (operator decision 2026-09-29); the E-stop that completion
+            # asserts turns the laser OFF.
+            if self._finish_if_done():
+                return
+
             # LASER: the laser is ON at this point and stays on until the
-            # operator presses NEXT, including at the final point.
+            # operator presses NEXT.
             laser_hold = (
                 self._marking_tool == "LASER"
                 and self.spray_required
                 and spray_success
             )
-
-            # If this was the final uploaded point, _complete_mission() reports
-            # completion now and schedules automatic STOP/DISARM/clear.
-            if not laser_hold and self._finish_if_done():
-                return
 
             if laser_hold:
                 self._state = "WAITING_FOR_NEXT"
@@ -5495,14 +5500,9 @@ class MissionManager(Node):
                     point_id,
                     self.LASER_STEADY,
                 )
-                last_point = self._next_pending_marking_number(0) is None
                 self._last_message = (
                     f"{point_id} COMPLETED at {final_text}; laser ON; "
-                    + (
-                        "press NEXT to turn it off and finish the mission"
-                        if last_point
-                        else "press NEXT to turn it off and go to the next point"
-                    )
+                    "press NEXT to turn it off and go to the next point"
                 )
             elif self._execution_mode == "MANUAL":
                 self._state = "WAITING_FOR_NEXT"

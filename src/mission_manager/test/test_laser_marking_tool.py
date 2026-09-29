@@ -56,7 +56,7 @@ def test_laser_point_completes_and_holds_laser_until_next(clock):
     assert "disable_motion" in events
 
 
-def test_laser_final_point_waits_for_next_instead_of_completing(clock):
+def test_laser_final_point_completes_mission_without_next(clock):
     m, events = build(clock, execution="MANUAL")
     m._marking_tool = "LASER"
     m._point_status = ["COMPLETED", "COMPLETED", "PENDING"]
@@ -70,10 +70,11 @@ def test_laser_final_point_waits_for_next_instead_of_completing(clock):
     m._control_loop()
 
     assert m._point_status[2] == "COMPLETED"
-    assert "mission_complete" not in events
-    assert m._state == "WAITING_FOR_NEXT"
-    assert m._laser_hold == (RUN_ID, "P0003", "STEADY")
-    assert "finish the mission" in m._last_message
+    # The harness stubs _complete_mission(); the real one asserts the E-stop,
+    # which clears any hold and turns the laser OFF.
+    assert "mission_complete" in events
+    assert m._state != "WAITING_FOR_NEXT"
+    assert m._laser_hold is None
 
 
 def test_laser_failure_does_not_hold(clock):
@@ -337,7 +338,7 @@ def test_unmeasurable_stop_keeps_the_laser_off(clock):
     assert m._state == "WAITING_FOR_NEXT"
 
 
-def test_measured_miss_at_final_point_blinks_and_waits_for_next(clock):
+def test_measured_miss_at_final_point_completes_mission_without_next(clock):
     m, events = laser_gated(clock, point=2)
     target = gated.TARGETS[2]
 
@@ -353,9 +354,9 @@ def test_measured_miss_at_final_point_blinks_and_waits_for_next(clock):
             break
 
     assert m._point_status[2] == "FAILED"
-    assert "mission_complete" not in events
-    assert m._laser_hold == (RUN_ID, "P0003", "BLINK")
-    assert "finish the mission" in m._last_message
+    assert "mission_complete" in events
+    assert m._state != "WAITING_FOR_NEXT"
+    assert m._laser_hold is None
 
 
 def test_spray_tool_measured_miss_is_unchanged(clock):

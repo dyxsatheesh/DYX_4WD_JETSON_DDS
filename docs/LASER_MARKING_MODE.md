@@ -49,8 +49,10 @@ Added 2026-09-28 on branch `latency-hardening`. It is unit-tested only and
    - Only then does it re-enable motion.
    - If OFF is not confirmed, NEXT is blocked with a message, the rover
      stays put, and NEXT can be pressed again.
-6. **Final point:** it also waits for NEXT. NEXT turns the laser OFF, then
-   completes the mission. This applies to a blinking final point too.
+6. **Final point (changed 2026-09-29):** it does **not** wait for NEXT. The
+   mission completes as soon as the final point is decided (COMPLETED or
+   FAILED, steady or blink). Completion asserts the E-stop, which clears
+   `laser_hold` and turns the laser OFF, so the final laser is momentary.
 
 **Blink details:**
 - `mission_manager` publishes `laser_hold.mode = BLINK`, and
