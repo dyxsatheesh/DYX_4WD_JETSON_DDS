@@ -1144,6 +1144,24 @@ Full contract, PX4 params and API: **`docs/LASER_MARKING_MODE.md`**. ⚠ PX4
 `PWM_AUX_FUNC6/MIN6/MAX6/DIS6` must be set (302 / 1000 / 2000 / 1000) before
 the laser will move — not verified on the FCU yet.
 
+### Voice announcements on a USB speaker (2026-09-29, not run on the rover yet)
+
+`rover_backend` speaks important events in English / Tamil / Hindi
+(`voice.py`, `voice_events.py`, `voice_phrases.py`, `voice_routes.py`;
+hooks in five `ros_bridge` callbacks). This includes "Heading to target N",
+"Target N done", and LASER "mark here" / "do not mark". The contract, engines
+and setup are in **`docs/VOICE_ANNOUNCEMENTS.md`**.
+
+Operational facts:
+- Engines: Piper CLI (en, hi, offline), then edge-tts (Tamil, cloud), then an
+  English fallback.
+- Playback is ALSA direct (`aplay -D`), with no PulseAudio.
+- Settings: `~/.ros/dyx_voice_settings.json`. Cache:
+  `~/.ros/dyx_voice_cache`.
+- One-time setup: `scripts/setup_voice.sh`.
+- Speech is best-effort and must never block or raise into ROS callbacks.
+  Keep it that way.
+
 ## Repo status (2026-08-31)
 
 - **`WORKING_STATUS_24_06_2026.txt`** — stale (2026-06-24), architecture it

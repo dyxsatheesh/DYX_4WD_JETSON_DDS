@@ -61,6 +61,7 @@ from std_srvs.srv import SetBool
 from std_srvs.srv import Trigger
 
 from rover_backend.config import settings
+from rover_backend.voice import voice_announcer
 from rover_backend.realtime_contract import build_point_result_event
 from rover_backend.manager_status_sync import ManagerStatusSync
 from rover_backend.mission_report import MissionReportError
@@ -1010,6 +1011,7 @@ class RoverBackendRosNode(Node):
         self._fcu_connected = bool(message.connected)
         self._armed = bool(message.armed)
         self._mode = str(message.mode or "UNKNOWN").strip().upper()
+        voice_announcer.on_vehicle_connected(self._fcu_connected)
 
         rover_state.update(
             "vehicle",
@@ -1239,6 +1241,7 @@ class RoverBackendRosNode(Node):
         self._mark_ros_message()
 
         self._gps_fix_type = int(message.fix_type)
+        voice_announcer.on_gps_fix_type(self._gps_fix_type)
 
         fix_name = GPS_FIX_NAMES.get(
             self._gps_fix_type,
@@ -2045,6 +2048,8 @@ class RoverBackendRosNode(Node):
             elif percentage < 0.0:
                 percentage = None
 
+        voice_announcer.on_battery_percent(percentage)
+
         remaining_status = "UNKNOWN"
         if percentage is not None:
             if percentage <= 10.0:
@@ -2791,6 +2796,8 @@ class RoverBackendRosNode(Node):
         if payload is None:
             return
 
+        voice_announcer.on_mission_status(payload)
+
         state_name = str(payload.get("state", "EMPTY")).strip().upper()
 
         execution_mode = (
@@ -3217,6 +3224,8 @@ class RoverBackendRosNode(Node):
             return
 
         payload["received_at"] = utc_now_iso()
+
+        voice_announcer.on_point_event(payload)
 
         event_name = str(payload.get("event") or "").strip().upper()
 

@@ -56,6 +56,9 @@ from rover_backend.rtk_routes import rtk_router
 from rover_backend.spray_routes import spray_router
 from rover_backend.state import rover_state
 from rover_backend.system_routes import system_router
+from rover_backend.voice import start_voice
+from rover_backend.voice import voice_service
+from rover_backend.voice_routes import voice_router
 
 LOGGER = logging.getLogger(__name__)
 
@@ -224,6 +227,8 @@ fastapi_app.include_router(mission_router)
 
 fastapi_app.include_router(spray_router)
 
+fastapi_app.include_router(voice_router)
+
 
 @fastapi_app.get(
     "/",
@@ -382,6 +387,13 @@ async def startup_backend() -> None:
 
         await asyncio.to_thread(mission_report_store.restore_state)
 
+        # Voice is best-effort: a missing speaker or TTS engine must never
+        # stop the backend from starting.
+        try:
+            start_voice()
+        except Exception:
+            LOGGER.exception("Voice service failed to start")
+
         await asyncio.to_thread(ros_bridge.start)
 
         ros_started = True
@@ -489,6 +501,11 @@ async def shutdown_backend() -> None:
     await _best_effort_stop_rtk_backend()
 
     await _best_effort_stop_ros_bridge()
+
+    try:
+        voice_service.stop()
+    except Exception:
+        LOGGER.exception("Voice shutdown failed")
 
     rover_state.force_safe_runtime_state("BACKEND_STOPPED")
 

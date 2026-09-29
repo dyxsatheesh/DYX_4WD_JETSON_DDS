@@ -350,6 +350,8 @@ def test_ros_point_event_callback_publishes_exactly_the_stored_result(state):
         "_notify_authoritative_state_changed": lambda: None,
         "_publish_point_result_event": published.append,
         "build_point_result_event": rc.build_point_result_event,
+        # Voice announcements are best-effort and not under test here.
+        "voice_announcer": SimpleNamespace(on_point_event=lambda _payload: None),
     }
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "ros_bridge.py", "exec"), namespace)
     node = SimpleNamespace(_mark_ros_message=lambda: None,
