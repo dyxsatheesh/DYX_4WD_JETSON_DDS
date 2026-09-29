@@ -73,6 +73,36 @@ saved:
 **Both use the same contract:** only a **fresh (≤ 1 s), healthy, enabled
 danger** reading stops the rover.
 
+## Hardware path (decided 2026-09-29)
+
+**Now: the current UART A21, through a USB hub.** The Holybro Pixhawk Jetson
+baseboard has no 40-pin header and all 4 USB ports are in use (LoRa, GNSS,
+USB speaker, 4G modem).
+- Move **LoRa** and a **CP2102 / FTDI USB-UART adapter** onto a small USB 2.0
+  hub. Keep the 4G modem and GNSS on direct ports.
+- Don't use a CH340 adapter: the RTK worker's CH340 has no serial number, so
+  two of them get the same by-id name.
+- The setup script saves the adapter's `/dev/serial/by-id/...` path.
+
+**Future: the A21 I2C version** on the Jetson I2C connector. The A21 family
+has **no SPI version**. Its outputs are UART auto / controlled, PWM, switch,
+RS485 (Modbus), I2C and CAN, fixed per model at purchase.
+- **Addressing:** 20 selectable I2C addresses (default 0xE8 = 7-bit 0x74; set
+  one sensor at a time through register 0x05).
+- **Triggered readings:** the host triggers each reading (register 0x10 ←
+  0xB0 for 5 m range, then read register 0x02), so several sensors can fire in
+  turn without cross-talk. That suits the avoidance feature.
+- **Electrical:** logic level = supply, so power at 3.3 V. 3–10 kΩ pull-ups;
+  10–100 kbit/s; keep the wiring short and away from the motor-controller
+  cables.
+- **Code:** `obstacle_monitor` needs an I2C reader; the zones, pause, bridge
+  and API stay the same.
+- **Long cable runs:** if I2C proves noisy, the RS485 / Modbus version on one
+  USB-RS485 adapter is the robust fallback.
+
+**Deliberately not used:** the PX4 / Pixhawk route. PX4 has no A21 driver,
+and the A21 CAN version uses DYP's own protocol, not DroneCAN.
+
 ## Setup (per rover)
 
 **Wiring:** sensor VCC → 5 V, GND → GND, **sensor TX → Jetson UART RX**. On

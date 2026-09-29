@@ -7,10 +7,15 @@
 # Run as the rover user (flash), no sudo. Safe while the stack is running,
 # but restart the stack afterwards so the new node starts.
 #
-# Wiring (same sensor as the 3WD NRP_ROS rover): sensor VCC -> 5 V, GND ->
-# GND, sensor TX -> Jetson UART RX. On the Orin Nano 40-pin header that is
-# pin 10 (RX) = /dev/ttyTHS1 (pin 8 = TX, not needed). Check the A21 TX logic
-# level against the Jetson's 3.3 V input.
+# Wiring (same sensor as the 3WD NRP_ROS rover):
+#  - Holybro Pixhawk Jetson baseboard (no 40-pin header): A21 -> USB-UART
+#    adapter (CP2102/FTDI, NOT another CH340) -> USB hub. Sensor TX ->
+#    adapter RXD, VCC/GND from the adapter; set the adapter logic level to
+#    match the sensor supply. The port is saved as its /dev/serial/by-id path.
+#  - Jetson dev kit: sensor TX -> 40-pin header pin 10 (UART RX) =
+#    /dev/ttyTHS1; power the sensor at 3.3 V (the Jetson UART is 3.3 V only).
+# Future: the A21 I2C version on the Jetson I2C connector (needs an I2C
+# reader in obstacle_monitor; see docs/OBSTACLE_DETECTION.md).
 #
 # Behaviour once enabled: danger (default <= 1.5 m) pauses a RUNNING mission,
 # manual resume only; warning (<= 3.0 m) is announced; a dead sensor is a
@@ -47,17 +52,32 @@ python3 -c "import serial" 2>/dev/null && echo "  pyserial OK" \
 
 echo
 echo "== 3/4 Find the sensor (3 s per port, both A21 baud rates)"
+# Candidates: the Jetson UARTs, plus USB-serial adapters by their STABLE
+# /dev/serial/by-id name (ttyUSBn numbering can change between boots when a
+# USB hub is used). Never probe the flight controller or the GNSS receiver.
+candidates=()
+for port in /dev/ttyTHS1 /dev/ttyTHS2 /dev/ttyTHS0; do
+    [[ -e "$port" ]] && candidates+=("$port")
+done
+for link in /dev/serial/by-id/*; do
+    [[ -e "$link" ]] || continue
+    case "$link" in
+        *PX4*|*Auterion*|*Septentrio*|*ArduPilot*) continue ;;
+    esac
+    candidates+=("$link")
+done
+
 FOUND_PORT=""
 FOUND_BAUD=""
-for port in /dev/ttyTHS1 /dev/ttyTHS2 /dev/ttyTHS0 /dev/ttyUSB*; do
-    [[ -e "$port" ]] || continue
-    if users=$(fuser "$port" 2>/dev/null) && [[ -n "$users" ]]; then
+for port in "${candidates[@]}"; do
+    real="$(readlink -f "$port")"
+    if users=$(fuser "$real" 2>/dev/null) && [[ -n "$users" ]]; then
         owner=$(ps -o cmd= -p ${users%% *} 2>/dev/null | cut -c1-60)
         echo "  $port in use ($owner) - skipped"
         continue
     fi
     for baud in 115200 9600; do
-        result=$(python3 - "$port" "$baud" <<'PY'
+        result=$(python3 - "$real" "$baud" <<'PY'
 import sys, time, serial
 port, baud = sys.argv[1], int(sys.argv[2])
 try:
@@ -83,6 +103,11 @@ PY
         fi
     done
 done
+
+if [[ "$FOUND_PORT" == *1a86_USB_Serial* ]]; then
+    echo "  WARNING: this is a CH340 adapter without a serial number; its by-id name can"
+    echo "  collide with the RTK/LoRa CH340. Prefer a CP2102 or FTDI adapter."
+fi
 
 echo
 echo "== 4/4 Save settings -> $SETTINGS"
