@@ -133,6 +133,7 @@ PARAM_NODES = [
     "/cmd_vel_bridge",
     "/spray_controller",
     "/ntrip_to_px4_node",
+    "/obstacle_monitor",
 ]
 
 WATCH_SERVICES = ["bag-autorecord"]
@@ -210,6 +211,10 @@ TOPICS = [
     "/mavros/global_position/gp_origin",
     "/rtk_correction_bridge/healthy",
     "/rtk_correction_bridge/correction_age_sec",
+    # Forward obstacle stop-and-wait: zone/health contract + raw readings.
+    "/obstacle/status",
+    "/obstacle/range",
+    "/obstacle/config",
 ]
 
 _DEFAULT_QOS_OVERRIDES = os.path.join(

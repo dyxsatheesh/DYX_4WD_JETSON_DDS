@@ -122,6 +122,24 @@ The script:
 
 Restart the stack afterwards.
 
+## Topics and verification
+
+| Topic | Type | Use |
+|---|---|---|
+| `/obstacle/status` | `std_msgs/String` JSON (`dyx4wd/obstacle@1`), 10 Hz + on zone change | **Safety contract** read by mission_manager, cmd_vel_bridge and the backend |
+| `/obstacle/range` | `sensor_msgs/Range` (ULTRASOUND, frame `obstacle_front`, 0.03–5 m, 70° FOV), every reading | Standard ROS view for RViz / plotting / future avoidance. REP 117: `+inf` = nothing in range, `-inf` = blind zone |
+| `/obstacle/config` | `std_msgs/String` JSON with `request_id` | Settings changes (the backend sends these) |
+
+All three are recorded in the mission bags (`scripts/bag_autorecord.py`). The
+node's parameters are saved with each bag.
+
+**End-to-end check, safe while the stack runs:**
+`python3 scripts/test_obstacle_pipeline.py` (with ROS sourced).
+- It starts a separate test node on a virtual serial port.
+- It feeds real A21 frames through clear → warning → danger → silent →
+  recover.
+- It checks the zone, health, distance, the Range values and the status rate.
+
 ## API (login required)
 
 | Endpoint | Body |

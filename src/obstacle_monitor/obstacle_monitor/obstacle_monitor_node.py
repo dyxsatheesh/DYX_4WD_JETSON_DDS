@@ -13,7 +13,11 @@ A sensor failure is reported (``healthy: false``, zone ``unknown``) but is a
 *warning only*: nobody pauses on it (operator decision 2026-09-29).
 
 Publishes ``/obstacle/status`` (std_msgs/String JSON, ``dyx4wd/obstacle@1``)
-at 10 Hz and immediately on a zone change. Settings (enabled, zones, port,
+at 10 Hz and immediately on a zone change: this is the contract the safety
+consumers use. Also publishes every sensor reading as a standard
+``/obstacle/range`` (sensor_msgs/Range, ULTRASOUND, frame ``obstacle_front``)
+for RViz, plotting and future avoidance; REP 117: +inf = nothing within
+range, -inf = inside the blind zone. Interference frames are not published. Settings (enabled, zones, port,
 baud) persist in ``settings_path`` and change through ``/obstacle/config``
 (JSON with request_id; the result is echoed in the status).
 """
@@ -32,12 +36,32 @@ from typing import Any, Optional
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import Range
 from std_msgs.msg import String
 
-from obstacle_monitor.a21_protocol import FrameParser
+from obstacle_monitor.a21_protocol import (
+    KIND_BLIND_ZONE,
+    KIND_NO_ECHO,
+    FrameParser,
+    Reading,
+)
 from obstacle_monitor.zones import ZoneConfig, ZoneTracker
 
 SCHEMA = "dyx4wd/obstacle@1"
+
+# DYP A21 (datasheet): 3-500 cm; beam about 70 deg at the default angle level 4.
+A21_MIN_RANGE_M = 0.03
+A21_MAX_RANGE_M = 5.0
+A21_FIELD_OF_VIEW_RAD = math.radians(70.0)
+
+
+def range_value_m(reading: Reading) -> float:
+    """REP 117 value for a usable reading."""
+    if reading.kind == KIND_NO_ECHO:
+        return math.inf
+    if reading.kind == KIND_BLIND_ZONE:
+        return -math.inf
+    return (reading.distance_mm or 0) / 1000.0
 
 
 @dataclass(frozen=True)
@@ -125,6 +149,7 @@ class ObstacleMonitorNode(Node):
         self.declare_parameter("hysteresis_mm", 200)
         self.declare_parameter("health_timeout_sec", 0.5)
         self.declare_parameter("settings_path", "~/.ros/dyx_obstacle_settings.json")
+        self.declare_parameter("frame_id", "obstacle_front")
 
         launch_defaults = ObstacleSettings(
             enabled=bool(self.get_parameter("enabled").value),
@@ -163,6 +188,8 @@ class ObstacleMonitorNode(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
         self._status_pub = self.create_publisher(String, "/obstacle/status", status_qos)
+        self._range_pub = self.create_publisher(Range, "/obstacle/range", 10)
+        self._frame_id = str(self.get_parameter("frame_id").value)
         self.create_subscription(String, "/obstacle/config", self._config_callback, status_qos)
         self.create_timer(1.0 / self.PUBLISH_HZ, self._publish_status)
 
@@ -220,10 +247,25 @@ class ObstacleMonitorNode(Node):
         now = time.monotonic()
         zone_changed = False
         with self._lock:
-            for reading in self._parser.feed(data):
+            readings = self._parser.feed(data)
+            for reading in readings:
                 zone_changed |= self._tracker.update(reading, now)
+        for reading in readings:
+            if reading.usable:
+                self._publish_range(reading)
         if zone_changed:
             self._publish_status()
+
+    def _publish_range(self, reading: Reading) -> None:
+        message = Range()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = self._frame_id
+        message.radiation_type = Range.ULTRASOUND
+        message.field_of_view = A21_FIELD_OF_VIEW_RAD
+        message.min_range = A21_MIN_RANGE_M
+        message.max_range = A21_MAX_RANGE_M
+        message.range = range_value_m(reading)
+        self._range_pub.publish(message)
 
     # ------------------------------------------------------------ config
 

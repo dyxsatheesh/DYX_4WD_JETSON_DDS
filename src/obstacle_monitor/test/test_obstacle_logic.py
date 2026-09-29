@@ -160,6 +160,8 @@ def _node_module():
                           "QoSProfile": _Any, "ReliabilityPolicy": _Any()},
             "std_msgs": {},
             "std_msgs.msg": {"String": _Any},
+            "sensor_msgs": {},
+            "sensor_msgs.msg": {"Range": _Any},
         }.items():
             module = types.ModuleType(name)
             module.__dict__.update(attrs)
@@ -198,3 +200,19 @@ def test_config_request_validation():
     ):
         with pytest.raises(ValueError):
             node.apply_config_request(current, bad)
+
+
+def test_range_values_follow_rep_117():
+    import math
+
+    node = _node_module()
+    assert node.range_value_m(classify(1234)) == pytest.approx(1.234)
+    assert node.range_value_m(classify(0xFFFD)) == math.inf     # nothing in range
+    assert node.range_value_m(classify(0)) == -math.inf         # blind zone: too close
+
+
+def test_bags_record_the_obstacle_topics():
+    source = (PACKAGE_ROOT.parents[1] / "scripts" / "bag_autorecord.py").read_text()
+    for topic in ("/obstacle/status", "/obstacle/range", "/obstacle/config"):
+        assert f'"{topic}"' in source
+    assert '"/obstacle_monitor"' in source          # node params saved with each bag
