@@ -1161,6 +1161,13 @@ Operational facts:
 - One-time setup: `scripts/setup_voice.sh`.
 - Speech is best-effort and must never block or raise into ROS callbacks.
   Keep it that way.
+- ⚠ **Never `pip install --user` anything that pulls NumPy 2** (piper-tts,
+  onnxruntime, …) on the Jetson. User-site NumPy 2 shadows ROS Humble's
+  system NumPy 1.21, and `rpp_controller` crash-loops at import through
+  `tf_transformations` → `transforms3d`. `colcon build` does not fix it.
+  Voice tools live in the venv `~/.local/share/dyx-voice/venv`. If ROS
+  nodes suddenly die at import, check
+  `python3 -c "import numpy; print(numpy.__file__)"` first.
 
 ## Repo status (2026-08-31)
 

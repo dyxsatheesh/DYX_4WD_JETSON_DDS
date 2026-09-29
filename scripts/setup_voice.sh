@@ -9,7 +9,13 @@
 #
 # Installs:
 #   - alsa-utils (aplay, amixer) and ffmpeg            (apt)
-#   - piper-tts (offline English/Hindi) and edge-tts   (pip --user)
+#   - piper-tts (offline English/Hindi) and edge-tts   in an ISOLATED venv
+#     (~/.local/share/dyx-voice/venv), linked as ~/.local/bin/{piper,edge-tts}
+#
+#     Never `pip install --user` these: piper-tts pulls NumPy 2 + onnxruntime,
+#     and a user-site NumPy 2 shadows the system NumPy 1.21 that ROS 2 Humble
+#     needs (tf_transformations -> transforms3d dies, rpp_controller crash-
+#     loops). Happened on 2026-09-29. This script also removes such a leak.
 #   - Piper voices en_US-ryan-medium, hi_IN-rohan-medium
 #     -> ~/.local/share/piper/models   (DYX_VOICE_PIPER_MODEL_DIR)
 # Configures:
@@ -38,14 +44,26 @@ export PATH="$HOME/.local/bin:$PATH"
 step() { echo; echo "== $*"; }
 fail=0
 
-step "1/6 System packages (alsa-utils, ffmpeg)"
-sudo apt-get update -qq && sudo apt-get install -y -qq alsa-utils ffmpeg || fail=1
+step "1/6 System packages (alsa-utils, ffmpeg, python3-venv)"
+sudo apt-get update -qq && sudo apt-get install -y -qq alsa-utils ffmpeg python3-venv || fail=1
 
-step "2/6 Speech engines (piper-tts, edge-tts)"
-python3 -m pip install --user --upgrade --quiet piper-tts edge-tts || fail=1
+step "2/6 Speech engines (piper-tts, edge-tts) in an isolated venv"
+VENV="$HOME/.local/share/dyx-voice/venv"
+# Undo any earlier --user install that would shadow ROS's NumPy.
+python3 -m pip uninstall -y -q piper-tts edge-tts onnxruntime 2>/dev/null || true
+if python3 -c "import numpy, sys; sys.exit(0 if numpy.__version__.startswith('2') and '.local' in numpy.__file__ else 1)" 2>/dev/null; then
+    python3 -m pip uninstall -y -q numpy && echo "  removed user-site NumPy 2 (it breaks ROS)"
+fi
+python3 -m venv "$VENV" || fail=1
+"$VENV/bin/pip" install --quiet --upgrade pip >/dev/null 2>&1 || true
+"$VENV/bin/pip" install --quiet --upgrade piper-tts edge-tts || fail=1
+mkdir -p "$HOME/.local/bin"
+ln -sf "$VENV/bin/piper" "$HOME/.local/bin/piper"
+ln -sf "$VENV/bin/edge-tts" "$HOME/.local/bin/edge-tts"
 for tool in piper edge-tts; do
     printf "  %-9s %s\n" "$tool" "$(command -v $tool || echo MISSING)"
 done
+python3 -c "import numpy; print('  ROS python numpy:', numpy.__version__)"
 
 step "3/6 Piper voices -> $MODEL_DIR"
 mkdir -p "$MODEL_DIR"

@@ -88,7 +88,22 @@ ssh -t flash@192.168.3.101 "cd ~/rover_ws && ./scripts/setup_voice.sh"
 ```
 
 Plug the USB speaker in first. The script asks for sudo only for apt and the
-audio group. It:
+audio group.
+
+> ⚠ **The speech engines live in an isolated venv**
+> (`~/.local/share/dyx-voice/venv`, linked as `~/.local/bin/piper` and
+> `~/.local/bin/edge-tts`). **Never `pip install --user piper-tts`.**
+>
+> - `piper-tts` pulls in NumPy 2 and onnxruntime. A user-site NumPy 2 shadows
+>   the system NumPy 1.21 that ROS 2 Humble needs.
+> - Then `tf_transformations` → `transforms3d` fails, and `rpp_controller`
+>   crash-loops at import (`np.maximum_sctype was removed in NumPy 2.0`). This
+>   happened on 2026-09-29.
+> - `colcon build` does not fix it.
+> - The script removes such a leak if it finds one.
+>
+> Check with `python3 -c "import numpy; print(numpy.__version__)"`, which must
+> print 1.21.x. It:
 - installs `alsa-utils` + `ffmpeg` and `piper-tts` + `edge-tts`;
 - downloads the voices;
 - detects the USB card and saves `plughw:CARD=<id>,DEV=0`;
