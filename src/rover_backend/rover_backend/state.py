@@ -262,6 +262,19 @@ class RoverState:
                 "status": "UNKNOWN",
                 "updated_at": now,
             },
+            # Forward ultrasonic (obstacle_monitor /obstacle/status).
+            "obstacle": {
+                "available": False,
+                "enabled": False,
+                "healthy": False,
+                "zone": "unknown",
+                "distance_mm": None,
+                "danger_mm": None,
+                "warning_mm": None,
+                "port": None,
+                "serial_error": None,
+                "updated_at": now,
+            },
             "accuracy": {
                 "available": False,
                 "source": "/rpp/accuracy",

@@ -518,6 +518,7 @@ class RoverBackendRosNode(Node):
         # real values (factory default MANUAL + LASER, or the saved defaults).
         self._mission_execution_mode = "MANUAL"
         self._mission_marking_tool = "LASER"
+        self._obstacle_status: dict[str, Any] = {}
         # True from /trajectory_generator/prepare acceptance until the complete
         # multipart trajectory has been accepted by mission_manager. While this
         # is true, an intermediate mission_manager EMPTY snapshot must not make
@@ -590,6 +591,12 @@ class RoverBackendRosNode(Node):
         self._marking_tool_pub = self.create_publisher(
             String,
             "/mission_manager/marking_tool",
+            command_qos,
+        )
+        # Not retained: obstacle_monitor saves its settings to its own file.
+        self._obstacle_config_pub = self.create_publisher(
+            String,
+            "/obstacle/config",
             command_qos,
         )
         # Not retained: spray_controller saves the values to its own file.
@@ -781,6 +788,12 @@ class RoverBackendRosNode(Node):
             "/mission_manager/point_event",
             self._point_event_callback,
             normal_qos,
+        )
+        self.create_subscription(
+            String,
+            "/obstacle/status",
+            self._obstacle_status_callback,
+            command_qos,
         )
 
         self.create_subscription(
@@ -2033,6 +2046,61 @@ class RoverBackendRosNode(Node):
             "message": service_message,
             "config": self.get_spray_config(),
         }
+
+    def _obstacle_status_callback(
+        self,
+        message: String,
+    ) -> None:
+        self._mark_ros_message()
+        payload = _json_object(message.data)
+        if payload is None:
+            return
+        with self._runtime_lock:
+            self._obstacle_status = dict(payload)
+        rover_state.update(
+            "obstacle",
+            available=True,
+            enabled=bool(payload.get("enabled")),
+            healthy=bool(payload.get("healthy")),
+            zone=str(payload.get("zone") or "unknown"),
+            distance_mm=payload.get("distance_mm"),
+            danger_mm=payload.get("danger_mm"),
+            warning_mm=payload.get("warning_mm"),
+            port=payload.get("port"),
+            serial_error=payload.get("serial_error"),
+        )
+        voice_announcer.on_obstacle_status(payload)
+
+    def get_obstacle_status(self) -> dict[str, Any]:
+        with self._runtime_lock:
+            return dict(self._obstacle_status)
+
+    def set_obstacle_config(self, changes: dict[str, Any]) -> dict[str, Any]:
+        """Send changes to obstacle_monitor (it validates and saves) and wait."""
+
+        request_id = uuid.uuid4().hex
+        message = String()
+        message.data = json.dumps(
+            {**changes, "request_id": request_id},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self._obstacle_config_pub.publish(message)
+
+        deadline = time.monotonic() + self.SPRAY_CONFIG_ACK_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            status = self.get_obstacle_status()
+            if str(status.get("config_request_id") or "") == request_id:
+                if str(status.get("config_result") or "").upper() == "ACCEPTED":
+                    return status
+                raise RuntimeError(
+                    "Obstacle configuration rejected: "
+                    f"{status.get('config_reason') or 'unknown reason'}"
+                )
+            time.sleep(0.05)
+        raise RuntimeError(
+            "Timed out waiting for obstacle_monitor to acknowledge the configuration"
+        )
 
     def _battery_callback(
         self,
@@ -4603,6 +4671,13 @@ class RosBridgeRuntime:
     def save_mission_defaults(self) -> dict[str, Any]:
         with self._operation_lock:
             return self.node.save_mission_defaults()
+
+    def get_obstacle_status(self) -> dict[str, Any]:
+        return self.node.get_obstacle_status()
+
+    def set_obstacle_config(self, changes: dict[str, Any]) -> dict[str, Any]:
+        with self._operation_lock:
+            return self.node.set_obstacle_config(changes)
 
     def set_laser_config(
         self,

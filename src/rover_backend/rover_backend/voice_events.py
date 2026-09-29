@@ -17,6 +17,10 @@ Spoken:
   where the pause reason is already announced);
 - battery low <= 20 %, critical <= 10 % (once each, re-armed above 25 %);
 - vehicle link lost during an active mission, and restored afterwards;
+- obstacle: "Obstacle ahead, N centimetres" on entering the warning zone
+  while RUNNING (10 s cooldown), "Obstacle. Mission paused." (pause reason
+  OBSTACLE), and "Obstacle sensor lost" once when an enabled sensor stops
+  reporting during a mission (warning only; the mission continues);
 - a greeting when the vehicle first connects.
 """
 
@@ -42,6 +46,7 @@ PAUSE_REASON_PHRASES = {
     "RTK_LOST": "paused_rtk_lost",
     "PX4_CONTROL_LOST": "paused_vehicle_control",
     "ODOM_STALE": "paused_position",
+    "OBSTACLE": "obstacle_paused",
 }
 PRIORITY_PHRASES = frozenset(
     {"emergency_stop", "connection_lost", *PAUSE_REASON_PHRASES.values(),
@@ -50,6 +55,7 @@ PRIORITY_PHRASES = frozenset(
 
 LASER_MEASURED_MISS_PREFIX = "RAW_GNSS_RADIAL_EXCEEDS_TOLERANCE"
 RTK_ANNOUNCE_COOLDOWN_SEC = 12.0
+OBSTACLE_WARNING_COOLDOWN_SEC = 10.0
 
 Say = Callable[..., None]
 
@@ -87,6 +93,10 @@ class VoiceAnnouncer:
         self._link_seen = False
         self._link_connected = False
         self._link_lost_announced = False
+
+        self._obstacle_zone: Optional[str] = None
+        self._obstacle_warned_at = -1.0e9
+        self._obstacle_sensor_lost_announced = False
 
     # ------------------------------------------------------------ helpers
 
@@ -276,6 +286,39 @@ class VoiceAnnouncer:
         elif self._link_lost_announced:
             self._link_lost_announced = False
             self._say("connection_restored")
+
+    # ------------------------------------------------------------ obstacle
+
+    def on_obstacle_status(self, payload: dict[str, Any]) -> None:
+        try:
+            with self._lock:
+                self._obstacle_locked(payload)
+        except Exception:
+            LOGGER.exception("Voice: obstacle handling failed")
+
+    def _obstacle_locked(self, payload: dict[str, Any]) -> None:
+        if not payload.get("enabled"):
+            self._obstacle_zone = None
+            self._obstacle_sensor_lost_announced = False
+            return
+        healthy = bool(payload.get("healthy"))
+        zone = str(payload.get("zone") or "unknown")
+        previous, self._obstacle_zone = self._obstacle_zone, zone
+
+        if not healthy:
+            if self._state in ACTIVE_STATES and not self._obstacle_sensor_lost_announced:
+                self._obstacle_sensor_lost_announced = True
+                self._say("obstacle_sensor_lost")
+            return
+        self._obstacle_sensor_lost_announced = False
+
+        if zone == "warning" and previous != "warning" and self._state == "RUNNING":
+            now = self._clock()
+            if now - self._obstacle_warned_at >= OBSTACLE_WARNING_COOLDOWN_SEC:
+                distance = payload.get("distance_mm")
+                if isinstance(distance, (int, float)) and distance > 0:
+                    self._obstacle_warned_at = now
+                    self._say("obstacle_ahead", cm=int(round(distance / 100.0)) * 10)
 
     # ------------------------------------------------------------ static cache
 

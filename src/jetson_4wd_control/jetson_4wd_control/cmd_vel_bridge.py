@@ -60,6 +60,7 @@ from rclpy.qos import (
 from std_msgs.msg import Bool, String, UInt64
 
 from jetson_4wd_control.bridge_stats import BridgeStreamStats
+from jetson_4wd_control.obstacle_gate import obstacle_blocks_motion
 
 from jetson_4wd_control.mavlink_stream_rate import (
     MAVLINK_MSG_ID_LOCAL_POSITION_NED,
@@ -230,6 +231,12 @@ class CmdVelBridge(Node):
             self._heartbeat_callback,
             safety_qos,
         )
+        self.create_subscription(
+            String,
+            "/obstacle/status",
+            self._obstacle_callback,
+            10,
+        )
 
         self.setpoint_pub = self.create_publisher(
             PositionTarget,
@@ -263,6 +270,8 @@ class CmdVelBridge(Node):
         self.mode = ""
         self.mission_enabled = False
         self.emergency_stop = True
+        self.obstacle_status: dict[str, Any] = {}
+        self.latest_obstacle_time = None
 
         self.latest_backend_heartbeat_time = None
         self.latest_backend_heartbeat_sequence = None
@@ -503,6 +512,15 @@ class CmdVelBridge(Node):
     def _estop_callback(self, message: Bool) -> None:
         self.emergency_stop = bool(message.data)
 
+    def _obstacle_callback(self, message: String) -> None:
+        try:
+            payload = json.loads(message.data)
+        except Exception:
+            return
+        if isinstance(payload, dict):
+            self.obstacle_status = payload
+            self.latest_obstacle_time = self.get_clock().now()
+
     def _heartbeat_callback(self, message: UInt64) -> None:
         self.latest_backend_heartbeat_time = self.get_clock().now()
         self.latest_backend_heartbeat_sequence = int(message.data)
@@ -608,6 +626,10 @@ class CmdVelBridge(Node):
 
         if self.emergency_stop:
             reason = "emergency_stop"
+        elif obstacle_blocks_motion(
+            self.obstacle_status, self._age_seconds(self.latest_obstacle_time)
+        ):
+            reason = "obstacle_danger"
         elif not self.mission_enabled:
             reason = "mission_disabled"
         elif not heartbeat_healthy:

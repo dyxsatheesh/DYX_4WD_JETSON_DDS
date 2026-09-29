@@ -133,6 +133,22 @@ PHRASES: dict[str, dict[str, str]] = {
         "ta": "பணி பிழை.",
         "hi": "मिशन में त्रुटि.",
     },
+    # ------------------------------------------------------------ obstacle
+    "obstacle_ahead": {
+        "en": "Obstacle ahead, {cm} centimetres.",
+        "ta": "முன்னால் தடை, {cm} சென்டிமீட்டர்.",
+        "hi": "आगे बाधा, {cm} सेंटीमीटर.",
+    },
+    "obstacle_paused": {
+        "en": "Obstacle. Mission paused.",
+        "ta": "தடை. பணி இடைநிறுத்தப்பட்டது.",
+        "hi": "बाधा. मिशन रुक गया.",
+    },
+    "obstacle_sensor_lost": {
+        "en": "Warning! Obstacle sensor lost.",
+        "ta": "எச்சரிக்கை! தடை உணரி இணைப்பு இழந்தது.",
+        "hi": "चेतावनी! बाधा सेंसर बंद है.",
+    },
     # ------------------------------------------------------------ RTK
     "rtk_fixed": {
         "en": "RTK fixed.",

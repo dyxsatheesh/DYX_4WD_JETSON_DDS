@@ -510,3 +510,57 @@ def test_api_control_language_gender_test(voice_api):
     assert client.post("/api/tts/test", json={"message": "hello rover"}).json()["success"] is True
     assert [code for code in (c["code"] for c in client.get("/api/tts/languages").json()["languages"])] == ["en", "ta", "hi"]
     assert client.post("/api/tts/device", json={"audio_device": "plughw:CARD=USB,DEV=0"}).json()["audio_device"] == "plughw:CARD=USB,DEV=0"
+
+
+# ============================================================ obstacle voice
+
+
+def obstacle(**overrides):
+    payload = {"enabled": True, "healthy": True, "zone": "clear", "distance_mm": None}
+    payload.update(overrides)
+    return payload
+
+
+def test_obstacle_warning_spoken_on_entering_warning_while_running():
+    a, r, clock = announcer()
+    a.on_mission_status(status("RUNNING", 0))
+    a.on_obstacle_status(obstacle(zone="warning", distance_mm=2460))
+    a.on_obstacle_status(obstacle(zone="warning", distance_mm=2300))  # still in zone
+    assert r.spoken == [("obstacle_ahead", {"cm": 250}, False)]
+
+    a.on_obstacle_status(obstacle(zone="clear"))
+    clock["t"] += 3
+    a.on_obstacle_status(obstacle(zone="warning", distance_mm=2000))  # inside cooldown
+    assert len(r.spoken) == 1
+    clock["t"] += 10
+    a.on_obstacle_status(obstacle(zone="clear"))
+    a.on_obstacle_status(obstacle(zone="warning", distance_mm=2000))
+    assert r.keys() == ["obstacle_ahead", "obstacle_ahead"]
+
+
+def test_obstacle_warning_silent_when_not_running_or_disabled():
+    a, r, _ = announcer()
+    a.on_mission_status(status("WAITING_FOR_NEXT", 1))
+    a.on_obstacle_status(obstacle(zone="warning", distance_mm=2000))
+    a.on_mission_status(status("RUNNING", 1))
+    r.spoken.clear()
+    a.on_obstacle_status(obstacle(enabled=False, zone="warning", distance_mm=2000))
+    assert r.spoken == []
+
+
+def test_obstacle_pause_reason_spoken_with_priority():
+    a, r, _ = announcer()
+    a.on_mission_status(status("RUNNING", 0))
+    a.on_mission_status(status("PAUSED", 0, pause_reason="OBSTACLE"))
+    assert r.spoken == [("obstacle_paused", {}, True)]
+
+
+def test_obstacle_sensor_lost_once_during_mission():
+    a, r, _ = announcer()
+    a.on_obstacle_status(obstacle(healthy=False, zone="unknown"))   # idle: silent
+    a.on_mission_status(status("RUNNING", 0))
+    a.on_obstacle_status(obstacle(healthy=False, zone="unknown"))
+    a.on_obstacle_status(obstacle(healthy=False, zone="unknown"))
+    a.on_obstacle_status(obstacle())
+    a.on_obstacle_status(obstacle(healthy=False, zone="unknown"))
+    assert r.keys() == ["obstacle_sensor_lost", "obstacle_sensor_lost"]

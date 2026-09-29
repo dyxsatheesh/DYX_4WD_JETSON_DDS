@@ -1169,6 +1169,22 @@ Operational facts:
   nodes suddenly die at import, check
   `python3 -c "import numpy; print(numpy.__file__)"` first.
 
+### Forward obstacle stop-and-wait (2026-09-29, sensor not fitted yet)
+
+The new package `obstacle_monitor` reads a DYP A21 ultrasonic sensor on UART
+and publishes `/obstacle/status`. Contract:
+- **danger** (≤ 1.5 m): `mission_manager` pauses a RUNNING mission with
+  reason `OBSTACLE`, **manual resume only**, and refuses START / RESUME / NEXT
+  until the path clears. `cmd_vel_bridge` independently zeroes velocity.
+- **warning** (≤ 3.0 m): spoken only.
+- **dead sensor**: warning only, the mission continues (operator decision).
+- **Off by default.** Settings are in `~/.ros/dyx_obstacle_settings.json`.
+- Setup: `scripts/setup_obstacle_sensor.sh`. It's a new package, so it needs
+  `colcon build` once.
+
+Full contract: **`docs/OBSTACLE_DETECTION.md`**. Driving *around* obstacles is
+the next feature and is not implemented.
+
 ## Repo status (2026-08-31)
 
 - **`WORKING_STATUS_24_06_2026.txt`** — stale (2026-06-24), architecture it

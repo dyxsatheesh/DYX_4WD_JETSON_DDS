@@ -102,6 +102,11 @@ class MissionManager(Node):
     # SPRAY: timed spray on AUX5. LASER: laser on AUX6 held ON at each
     # verified point until the operator presses NEXT; always MANUAL.
     MARKING_TOOLS = ("LASER", "SPRAY")
+    # Forward ultrasonic (obstacle_monitor, /obstacle/status). Danger pauses a
+    # RUNNING mission (manual resume only) and blocks START/RESUME/NEXT. A
+    # stale or unhealthy sensor is a warning only (operator decision
+    # 2026-09-29); only a fresh, healthy danger reading ever stops the rover.
+    OBSTACLE_STATUS_STALE_SEC = 1.0
     # laser_hold modes: STEADY = point inside tolerance (mark here); BLINK =
     # raw GNSS measured the stop OUTSIDE tolerance (rover is here, do not
     # mark). BLINK is never used when the stop could not be measured.
@@ -497,6 +502,13 @@ class MissionManager(Node):
             callback_group=self._io_group,
         )
         self.create_subscription(
+            String,
+            "/obstacle/status",
+            self._obstacle_status_callback,
+            command_qos,
+            callback_group=self._io_group,
+        )
+        self.create_subscription(
             Float32,
             "/rtk_correction_bridge/correction_age_sec",
             self._rtk_correction_age_callback,
@@ -813,6 +825,9 @@ class MissionManager(Node):
         self._last_rtk_health_rx_monotonic: Optional[float] = None
         self._rtk_correction_age_sec: Optional[float] = None
         self._last_rtk_age_rx_monotonic: Optional[float] = None
+        self._obstacle_status: dict[str, Any] = {}
+        self._obstacle_status_rx_monotonic: Optional[float] = None
+        self._obstacle_sensor_warned = False
 
         # Runtime RTK policy (operator-approved 2026-09-26): FLOAT stops the
         # rover and auto-resumes after FIXED holds 3 s; anything below FLOAT,
@@ -1530,6 +1545,72 @@ class MissionManager(Node):
         with self._lock:
             self._rtk_healthy = bool(message.data)
             self._last_rtk_health_rx_monotonic = time.monotonic()
+
+    def _obstacle_status_callback(self, message: String) -> None:
+        try:
+            payload = json.loads(message.data)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        with self._lock:
+            self._obstacle_status = payload
+            self._obstacle_status_rx_monotonic = time.monotonic()
+            # React on the message itself, not the next 20 Hz tick.
+            self._monitor_runtime_obstacle()
+
+    def _obstacle_danger_distance_mm(self) -> Optional[int]:
+        """Distance of a fresh, healthy, enabled DANGER reading, else None.
+
+        Caller holds self._lock. A stale or unhealthy sensor never returns a
+        distance: sensor failure is warning-only by design.
+        """
+        status = self._obstacle_status
+        if not status.get("enabled") or not status.get("healthy"):
+            return None
+        if status.get("zone") != "danger":
+            return None
+        if self._age(self._obstacle_status_rx_monotonic) > self.OBSTACLE_STATUS_STALE_SEC:
+            return None
+        distance = status.get("distance_mm")
+        return int(distance) if isinstance(distance, (int, float)) else 0
+
+    def _monitor_runtime_obstacle(self) -> None:
+        """Pause a RUNNING mission on a forward obstacle (manual resume only)."""
+        if self._state != "RUNNING":
+            return
+        status = self._obstacle_status
+        enabled = bool(status.get("enabled"))
+        sensor_ok = (
+            bool(status.get("healthy"))
+            and self._age(self._obstacle_status_rx_monotonic)
+            <= self.OBSTACLE_STATUS_STALE_SEC
+        )
+        if enabled and not sensor_ok:
+            if not self._obstacle_sensor_warned:
+                self._obstacle_sensor_warned = True
+                self._emit_system_event(
+                    "OBSTACLE_SENSOR_LOST",
+                    "Obstacle sensor not reporting; mission continues WITHOUT "
+                    "obstacle protection (warning only)",
+                )
+        elif sensor_ok:
+            self._obstacle_sensor_warned = False
+
+        distance = self._obstacle_danger_distance_mm()
+        if distance is None:
+            return
+        self._pause_reason = "OBSTACLE"
+        self._resume_available = False
+        self._state = "PAUSED"
+        self._reset_arrival_state()
+        self._disable_motion_preserve_estop()
+        self._last_message = (
+            f"Obstacle ahead at {distance / 10.0:.0f} cm; rover stopped and "
+            "mission paused. Clear the path, then press Resume"
+        )
+        self._emit_system_event("OBSTACLE_PAUSED", self._last_message)
+        self._publish_status(force=True)
 
     def _rtk_correction_age_callback(self, message: Float32) -> None:
         with self._lock:
@@ -2603,6 +2684,12 @@ class MissionManager(Node):
         if not rtk_ok:
             return False, f"RTK FIXED required: {rtk_reason}"
 
+        obstacle_mm = self._obstacle_danger_distance_mm()
+        if obstacle_mm is not None:
+            return False, (
+                f"Obstacle ahead at {obstacle_mm / 10.0:.0f} cm; clear the path first"
+            )
+
         return True, (
             "Prepared mission + fresh RTK FIXED; "
             "remaining Mission Manager health fields are monitoring only"
@@ -2654,6 +2741,11 @@ class MissionManager(Node):
 
         self._resume_available = True
 
+        if self._pause_reason == "OBSTACLE":
+            self._last_message = (
+                "Path clear of obstacles; mission remains paused. You can resume now"
+            )
+            self._emit_system_event("OBSTACLE_CLEARED", self._last_message)
         if self._pause_reason == "RTK_LOST":
             self._last_message = (
                 "RTK FIXED (fix_type=6) recovered; mission remains paused. "
@@ -4479,6 +4571,16 @@ class MissionManager(Node):
             "defaults_source": self._defaults_source,
             "pause_reason": self._pause_reason,
             "resume_available": self._resume_available,
+            "obstacle": {
+                "enabled": bool(self._obstacle_status.get("enabled")),
+                "healthy": bool(self._obstacle_status.get("healthy"))
+                and self._age(self._obstacle_status_rx_monotonic)
+                <= self.OBSTACLE_STATUS_STALE_SEC,
+                "zone": self._obstacle_status.get("zone"),
+                "distance_mm": self._obstacle_status.get("distance_mm"),
+                "danger_mm": self._obstacle_status.get("danger_mm"),
+                "warning_mm": self._obstacle_status.get("warning_mm"),
+            },
             "trajectory_ready": self._pending_prepared_path.ready,
             "precision_path_contract_enabled": (
                 self.precision_path_contract_enabled
@@ -4903,6 +5005,7 @@ class MissionManager(Node):
 
             self._monitor_runtime_rtk()
             self._monitor_runtime_px4_control()
+            self._monitor_runtime_obstacle()
             self._monitor_pause_recovery()
 
             if self._state not in {

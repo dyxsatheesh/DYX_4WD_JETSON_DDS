@@ -304,6 +304,45 @@ def generate_launch_description() -> LaunchDescription:
         ],
     )
 
+    # Forward ultrasonic (DYP A21, UART). Measures and classifies only; it
+    # never commands motion. mission_manager pauses on danger (manual resume)
+    # and cmd_vel_bridge holds zero velocity. OFF until enabled from the
+    # tablet / POST /api/obstacle/config (saved in settings_path, which then
+    # overrides these values). Sensor failure is warning-only.
+    obstacle_monitor = TimerAction(
+        period=7.8,
+        actions=[
+            LogInfo(msg="Starting forward obstacle monitor"),
+            Node(
+                package="obstacle_monitor",
+                executable="obstacle_monitor_node",
+                name="obstacle_monitor",
+                output="screen",
+                emulate_tty=True,
+                respawn=True,
+                respawn_delay=2.0,
+                parameters=[
+                    {
+                        "enabled": False,
+                        "danger_mm": 1500,
+                        "warning_mm": 3000,
+                        # Orin Nano 40-pin header UART (pins 8 TX / 10 RX).
+                        # scripts/setup_obstacle_sensor.sh finds and saves
+                        # the real port.
+                        "port": "/dev/ttyTHS1",
+                        "baud": 115200,
+                        "debounce_count": 3,
+                        "hysteresis_mm": 200,
+                        "health_timeout_sec": 0.5,
+                        "settings_path": (
+                            "/home/flash/.ros/dyx_obstacle_settings.json"
+                        ),
+                    }
+                ],
+            ),
+        ],
+    )
+
     mission_manager = TimerAction(
         period=8.0,
         actions=[
@@ -1098,6 +1137,7 @@ def generate_launch_description() -> LaunchDescription:
             cmd_vel_bridge,
             trajectory_generator,
             spray_controller,
+            obstacle_monitor,
             mission_manager,
             rpp_controller,
         ]

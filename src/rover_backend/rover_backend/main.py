@@ -42,6 +42,7 @@ from rover_backend.mission_routes import mission_router
 from rover_backend.mission_report import mission_report_store
 from rover_backend.mission_store import MissionValidationError
 from rover_backend.mission_store import mission_store
+from rover_backend.obstacle_routes import obstacle_router
 from rover_backend.realtime import make_asgi_app
 from rover_backend.realtime import start_realtime
 from rover_backend.realtime import stop_realtime
@@ -228,6 +229,8 @@ fastapi_app.include_router(mission_router)
 fastapi_app.include_router(spray_router)
 
 fastapi_app.include_router(voice_router)
+
+fastapi_app.include_router(obstacle_router)
 
 
 @fastapi_app.get(

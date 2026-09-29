@@ -54,6 +54,9 @@ def clock(monkeypatch):
 
 def build(clock: Clock, *, mode: str = "radial20", execution: str = "AUTO"):
     m = object.__new__(MissionManager)
+    m._obstacle_status = {}
+    m._obstacle_status_rx_monotonic = None
+    m._obstacle_sensor_warned = False
     m._marking_tool = "SPRAY"
     m._laser_hold = None
     m._spray_laser_on = False

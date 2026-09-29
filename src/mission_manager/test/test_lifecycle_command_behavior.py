@@ -103,6 +103,9 @@ def build_manager(
     execution_mode: str = "AUTO",
 ) -> tuple[MissionManager, list]:
     manager = object.__new__(MissionManager)
+    manager._obstacle_status = {}
+    manager._obstacle_status_rx_monotonic = None
+    manager._obstacle_sensor_warned = False
     manager._marking_tool = "SPRAY"
     manager._laser_hold = None
     manager._spray_laser_on = False
@@ -586,6 +589,9 @@ def test_resume_refused_while_spray_fault_latched(sleeps):
 
 def mode_request_manager(*, success: bool, result: int = 0):
     manager = object.__new__(MissionManager)
+    manager._obstacle_status = {}
+    manager._obstacle_status_rx_monotonic = None
+    manager._obstacle_sensor_warned = False
     manager._marking_tool = "SPRAY"
     manager._laser_hold = None
     manager._spray_laser_on = False
@@ -665,6 +671,9 @@ def stream_manager(monkeypatch):
     clock = StreamClock()
     monkeypatch.setattr(node_module.time, "monotonic", clock.monotonic)
     manager = object.__new__(MissionManager)
+    manager._obstacle_status = {}
+    manager._obstacle_status_rx_monotonic = None
+    manager._obstacle_sensor_warned = False
     manager._marking_tool = "SPRAY"
     manager._laser_hold = None
     manager._spray_laser_on = False

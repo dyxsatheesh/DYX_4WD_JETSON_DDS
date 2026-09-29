@@ -22,6 +22,7 @@
   <exec_depend>mission_manager</exec_depend>
   <exec_depend>rpp_controller</exec_depend>
   <exec_depend>spray_controller</exec_depend>
+  <exec_depend>obstacle_monitor</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
