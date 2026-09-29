@@ -415,6 +415,7 @@ class VoiceService:
         try:
             result = self._run_process(
                 [edge, "--voice", voice, "--text", text, "--write-media", mp3],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -424,9 +425,11 @@ class VoiceService:
                 return False
             result = self._run_process(
                 self._niced(
-                    [ffmpeg, "-loglevel", "error", "-y", "-i", mp3,
+                    # -nostdin: ffmpeg otherwise reads the parent's stdin.
+                    [ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", mp3,
                      "-ar", "22050", "-ac", "1", wav]
                 ),
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -453,6 +456,7 @@ class VoiceService:
         try:
             result = self._run_process(
                 [aplay, "-q", "-D", device, str(wav)],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=30,

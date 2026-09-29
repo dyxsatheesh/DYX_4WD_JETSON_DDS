@@ -139,7 +139,7 @@ else
 fi
 MP3="$(mktemp --suffix=.mp3)"
 if edge-tts --voice ta-IN-ValluvarNeural --text "குரல் சோதனை" --write-media "$MP3" >/dev/null 2>&1 \
-    && ffmpeg -loglevel error -y -i "$MP3" -ar 22050 -ac 1 "$TMP" \
+    && ffmpeg -nostdin -loglevel error -y -i "$MP3" -ar 22050 -ac 1 "$TMP" \
     && aplay -q -D "$DEVICE" "$TMP"; then
     echo "  Tamil (edge-tts, needs internet): played"
 else
