@@ -154,6 +154,25 @@ def get_rtk_control_service(
     return service
 
 
+def current_rtk_control_service(
+) -> Optional[RtkControlService]:
+    """The installed authority, or None (non-raising, for realtime)."""
+
+    with _registry_lock:
+        return _control_service
+
+
+def _notify_rtk_status_changed() -> None:
+    """Push rtk_status now (lazy import avoids an rtk_routes/realtime cycle)."""
+
+    try:
+        from rover_backend.realtime import notify_rtk_status_changed
+
+        notify_rtk_status_changed()
+    except ImportError:
+        return
+
+
 # ---------------------------------------------------------------------------
 # Write-only request models
 # ---------------------------------------------------------------------------
@@ -853,6 +872,29 @@ def _control_payload(
     }
 
 
+def build_rtk_status_payload(
+    control: RtkControlService,
+) -> dict[str, Any]:
+    """Inner `status` of GET /api/rtk/status, also streamed as rtk_status.
+
+    Blocking (profile store reads): call it off the event loop.
+    """
+
+    payload = _control_payload(
+        control.snapshot
+    )
+
+    payload["correction_source"] = _correction_source_payload(
+        control.correction_source()
+    )
+
+    payload.update(
+        _telemetry_payload()
+    )
+
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Domain-to-HTTP error mapping
 # ---------------------------------------------------------------------------
@@ -1066,6 +1108,8 @@ async def create_rtk_profile(
         )
     )
 
+    _notify_rtk_status_changed()
+
     LOGGER.info(
         "RTK_AUDIT action=PROFILE_CREATE "
         "user=%s profile_id=%s revision=%s",
@@ -1141,6 +1185,8 @@ async def update_rtk_profile(
         )
     ) or "NONE"
 
+    _notify_rtk_status_changed()
+
     LOGGER.info(
         "RTK_AUDIT action=PROFILE_UPDATE "
         "user=%s profile_id=%s revision=%s "
@@ -1176,6 +1222,8 @@ async def delete_rtk_profile(
         )
     )
 
+    _notify_rtk_status_changed()
+
     LOGGER.info(
         "RTK_AUDIT action=PROFILE_DELETE "
         "user=%s profile_id=%s",
@@ -1206,6 +1254,8 @@ async def activate_rtk_profile(
             profile_id
         )
     )
+
+    _notify_rtk_status_changed()
 
     LOGGER.info(
         "RTK_AUDIT action=PROFILE_ACTIVATE "
@@ -1238,6 +1288,8 @@ async def clear_active_rtk_profile(
         control.clear_active_profile
     )
 
+    _notify_rtk_status_changed()
+
     LOGGER.info(
         "RTK_AUDIT action=ACTIVE_PROFILE_CLEAR "
         "user=%s revision=%s",
@@ -1269,23 +1321,8 @@ async def read_rtk_status(
         get_rtk_control_service
     ),
 ) -> dict[str, Any]:
-    snapshot = await _control_call(
-        lambda: control.snapshot
-    )
-
-    payload = _control_payload(
-        snapshot
-    )
-
-    source = await _control_call(
-        control.correction_source
-    )
-    payload["correction_source"] = _correction_source_payload(
-        source
-    )
-
-    payload.update(
-        _telemetry_payload()
+    payload = await _control_call(
+        lambda: build_rtk_status_payload(control)
     )
 
     return {
@@ -1329,6 +1366,8 @@ async def update_rtk_correction_source(
     source = await _control_call(
         lambda: control.update_correction_source(**changes)
     )
+
+    _notify_rtk_status_changed()
 
     LOGGER.info(
         "RTK_AUDIT action=SOURCE_UPDATE user=%s source=%s "
@@ -1381,6 +1420,8 @@ async def start_rtk(
         control.request_start
     )
 
+    _notify_rtk_status_changed()
+
     LOGGER.info(
         "RTK_AUDIT action=START "
         "user=%s profile_id=%s revision=%s",
@@ -1414,6 +1455,8 @@ async def stop_rtk(
     persisted = await _control_call(
         control.request_stop
     )
+
+    _notify_rtk_status_changed()
 
     LOGGER.info(
         "RTK_AUDIT action=STOP "

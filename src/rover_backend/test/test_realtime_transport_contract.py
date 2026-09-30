@@ -271,6 +271,8 @@ def test_loop_emits_every_point_event_in_order_and_mission_status_on_change(
     emitted: list[tuple[str, dict]] = []
     failures: list[str] = []
     queue: collections.deque = collections.deque()
+    import threading
+    rtk_dirty = threading.Event()
 
     async def run():
         stop = asyncio.Event()
@@ -281,6 +283,8 @@ def test_loop_emits_every_point_event_in_order_and_mission_status_on_change(
             1: lambda: [queue.append({"event": "ACCURACY_ACHIEVED", "point_id": "P0003"}),
                         queue.append({"event": "COMPLETED", "point_id": "P0003"})],
             4: lambda: state.update("mission", emergency_stop=True),
+            # An RTK START/STOP between periods emits rtk_status at once.
+            5: lambda: rtk_dirty.set(),
         }
 
         async def records():
@@ -318,6 +322,9 @@ def test_loop_emits_every_point_event_in_order_and_mission_status_on_change(
             "mission_lifecycle_signature": rc.mission_lifecycle_signature,
             "point_event_socket_name": rc.point_event_socket_name,
             "_revalidate_socket_sessions": lambda: asyncio.sleep(0),
+            "_rtk_status_dirty": rtk_dirty,
+            "RTK_STATUS_PERIOD_SEC": 60.0,
+            "build_socket_rtk_status": lambda: {"status": {"persisted": {}, "runtime": {}}},
             "LOGGER": SimpleNamespace(exception=lambda *a, **k: failures.append(
                 traceback.format_exc())),
         }
@@ -343,6 +350,62 @@ def test_loop_emits_every_point_event_in_order_and_mission_status_on_change(
     assert mission_status[1]["emergency_stop"] is True
     # Queued before iteration 1 reads state: delivered ahead of its telemetry.
     assert names.index("point_completed") < names.index("telemetry")
+    # rtk_status: first iteration, then only on the RTK change (period 60 s).
+    assert names.count("rtk_status") == 2
+    assert not rtk_dirty.is_set()
+
+
+def test_rtk_status_socket_payload_is_the_rest_body():
+    control = object()
+    seen = []
+    warnings = []
+    service = {"value": None}
+
+    def fake_build(installed):
+        seen.append(installed)
+        return {"persisted": {"desired_state": "RUNNING"}, "runtime": {}}
+
+    namespace = {
+        "current_rtk_control_service": lambda: service["value"],
+        "build_rtk_status_payload": fake_build,
+        "LOGGER": SimpleNamespace(warning=lambda *a, **k: warnings.append(a)),
+    }
+    build = _production("build_socket_rtk_status", namespace)
+
+    assert build() is None                                  # not installed yet
+    service["value"] = control
+    assert build() == {"status": {"persisted": {"desired_state": "RUNNING"}, "runtime": {}}}
+    assert seen == [control]
+
+    def broken(_installed):
+        raise RuntimeError("store unavailable")
+
+    namespace["build_rtk_status_payload"] = broken
+    assert build() is None                                  # never raises into the loop
+    assert warnings
+
+
+def test_every_rtk_mutation_pushes_rtk_status():
+    source = (SOURCE / "rtk_routes.py").read_text()
+    tree = ast.parse(source)
+    routes = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)]
+    mutating = [
+        n for n in routes
+        if any(
+            isinstance(d, ast.Call) and getattr(d.func, "attr", "") in {"post", "put", "patch", "delete"}
+            for d in n.decorator_list
+        )
+    ]
+    assert len(mutating) == 8
+    for route in mutating:
+        body = ast.get_source_segment(source, route)
+        assert "_notify_rtk_status_changed()" in body, route.name
+
+
+def test_rtk_status_is_emitted_on_connect():
+    source = (SOURCE / "realtime.py").read_text()
+    connect = source[source.index("async def connect("):source.index("async def disconnect(")]
+    assert '"rtk_status"' in connect
 
 
 def test_ros_point_event_callback_publishes_exactly_the_stored_result(state):

@@ -24,6 +24,13 @@ Emitted events:
     safety_state
         Safety-gate state emitted whenever it changes.
 
+    rtk_status
+        The GET /api/rtk/status body ({"status": ...}): RTK intent, manager
+        and worker lifecycle, correction source, correction stream and GNSS
+        solution. Emitted every RTK_STATUS_PERIOD_SEC, at once after any RTK
+        profile/source/START/STOP change, and on connect. Omitted while the
+        RTK control service is not installed.
+
     point_completed
     point_skipped
     point_failed
@@ -69,6 +76,8 @@ from rover_backend.realtime_contract import build_mission_lifecycle_payload
 from rover_backend.realtime_contract import mission_lifecycle_signature
 from rover_backend.realtime_contract import point_event_socket_name
 from rover_backend.realtime_contract import timed
+from rover_backend.rtk_routes import build_rtk_status_payload
+from rover_backend.rtk_routes import current_rtk_control_service
 from rover_backend.state import rover_state
 from rover_backend.state import utc_now_iso
 from rover_backend.system_routes import build_mission_status_payload
@@ -164,6 +173,34 @@ def _socket_mission_payload(mission: dict[str, Any]) -> dict[str, Any]:
             mission, rover_state.section("mission")
         )
     return mission
+
+
+# rtk_status cadence. The RTK panels used to poll REST every 3 s; the stream
+# carries correction/fix ages, so it is periodic rather than change-driven.
+RTK_STATUS_PERIOD_SEC = 1.0
+
+# Set from REST threads after an RTK mutation; the loop emits on the next wake.
+_rtk_status_dirty = threading.Event()
+
+
+def build_socket_rtk_status() -> dict[str, Any] | None:
+    """rtk_status payload, or None when RTK control is not installed."""
+
+    control = current_rtk_control_service()
+    if control is None:
+        return None
+    try:
+        return {"status": build_rtk_status_payload(control)}
+    except Exception:
+        LOGGER.warning("rtk_status build failed", exc_info=True)
+        return None
+
+
+def notify_rtk_status_changed() -> None:
+    """Emit rtk_status without waiting for the next period."""
+
+    _rtk_status_dirty.set()
+    notify_authoritative_state_changed()
 
 
 def notify_authoritative_state_changed() -> None:
@@ -410,6 +447,14 @@ async def connect(
         safety,
         to=sid,
     )
+
+    rtk_status = await asyncio.to_thread(build_socket_rtk_status)
+    if rtk_status is not None:
+        await sio.emit(
+            "rtk_status",
+            rtk_status,
+            to=sid,
+        )
 
     # Only a complete, verified snapshot is replayed; while the backend is
     # still assembling (e.g. just restarted) nothing partial is sent.
@@ -752,6 +797,7 @@ async def _broadcast_loop() -> None:
     previous_progress_signature: str | None = None
     previous_safety_signature: str | None = None
     previous_mission_state: str | None = None
+    last_rtk_status_emit: float | None = None
     next_deadline = asyncio.get_running_loop().time()
     periodic_iteration = True
 
@@ -858,6 +904,21 @@ async def _broadcast_loop() -> None:
                             "mission_completed",
                             _socket_mission_payload(mission),
                         )
+
+                # C. RTK status: periodic, and at once after an RTK change.
+                loop_now = asyncio.get_running_loop().time()
+                if (
+                    _rtk_status_dirty.is_set()
+                    or last_rtk_status_emit is None
+                    or loop_now - last_rtk_status_emit >= RTK_STATUS_PERIOD_SEC
+                ):
+                    _rtk_status_dirty.clear()
+                    rtk_status = await asyncio.to_thread(build_socket_rtk_status)
+                    if rtk_status is not None:
+                        await _emit("rtk_status", rtk_status)
+                    last_rtk_status_emit = loop_now
+            else:
+                last_rtk_status_emit = None
 
             realtime_metrics.maybe_flush()
 
