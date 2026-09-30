@@ -86,7 +86,7 @@ Turn `DYX_REALTIME_METRICS` back off afterwards.
    - FAIL if the point fails with `RADIAL20_TERMINAL_TIMEOUT` 15 s later. Then check `/rpp/terminal_certificate` for `zero_latched` / `state` after resume.
    - Also try: E-stop then release near a point; a mission with two points < 0.75 m apart.
 3. **Check the bag size** of that run: `/mission_manager/status` should now be a few MB, not 200 MB. `/mission_manager/point_history` should hold one message per point.
-4. **Receiver firmware upgrade** (operator, rover parked). This is the lead fix for the RTK FLOAT / GNSS-fusion-stop problem (§3).
+4. **Receiver firmware upgrade** (operator, rover parked). Reasonable maintenance, **not** an evidence-backed fix for the FLOAT / fusion-stop problem (§3: the firmware link was overstated). Do §3's ChannelStatus capture first.
    - Before: back up the receiver config from its web UI.
    - After: confirm Stream1 -> COM3 (PX4 block list, `msec100`), USB2 = RTCMv3 input, `spm` Rover, dual antenna.
    - Then re-run the 5-min `DiffCorrIn` capture (method in CLAUDE.md Quick reference) and compare against the baseline below.
@@ -96,7 +96,7 @@ Turn `DYX_REALTIME_METRICS` back off afterwards.
 Proven on 2026-09-30 (CLAUDE.md §"Base corrections vs receiver use" and
 §"Field run mission.csv_20260930_185447"):
 
-- The base (`MP23960`, **about 6 m away**) sends clean MSM4 GPS/GLO/GAL/BDS at 1 Hz, 0 CRC errors. Its **signals match the rover exactly**.
+- The base (`MP23960`, **about 6 m away**) sends clean MSM4 GPS/GLO/GAL/BDS at 1 Hz, 0 CRC errors, and the header fields are correct (BDS epoch in BDT, consistent station ID). **But BDS is almost all single-frequency: only C10 has B1I+B2I, the other 7 satellites are B1I only.** (The earlier "signals match the rover exactly" compared the mask, not the satellites.)
 - The receiver **uses BDS 0%**, drops GAL ~10% of the time even while parked, and in the mission fell to **GPS-only for 97 s (4 SVs)**. The correction age stayed fresh the whole time.
 - 4 SVs < `EKF2_REQ_NSATS=6` -> EKF dead-reckons -> local velocity invalid -> PX4 reports "No offboard signal" (the stream was intact) -> ALTCTL.
 - **PX4 is not the cause**: it matches the receiver in 99.9% of epochs.

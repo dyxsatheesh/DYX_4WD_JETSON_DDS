@@ -94,7 +94,7 @@ a stack restart or another connection to the FCU serial device.
 | Drive | 4-wheel skid-steer **through a RoboClaw** (operator-confirmed 2026-09-29). PX4 `roboclaw` driver on TELEM3 = `/dev/ttyS1`: `RBCLW_SER_CFG=103`, `RBCLW_BAUD=115200`, `RBCLW_ADDRESS=128`, `RBCLW_FUNC1/2=101/102` (Motor 1/2), `RBCLW_VEL_CTRL=1` (encoder closed-loop), `RBCLW_COUNTS_REV=160000`, `RBCLW_QPPS_MAX=171000`, `RBCLW_ENC_HZ=20`. Airframe `SYS_AUTOSTART=50000` (generic differential rover). `PWM_MAIN_FUNC1..4` were still 101/102/101/102 (old Sabertooth PWM path driven in parallel); **set to 0 and saved 2026-09-29**, so RoboClaw is the only motor output. | NSH `param show`/`set`, 2026-09-29 |
 | Drive (history) | Until some point before 2026-09-29 this rover drove **dual Sabertooth 2X32** via `PWM_MAIN_FUNC1..4` with RoboClaw disabled (`RBCLW_SER_CFG=0`). Every speed/throttle/pivot number measured on the Sabertooth drivetrain (e.g. §2026-09-01 `RO_SPEED_*` droop, throttle->speed slope, breakaway) **may not hold on RoboClaw** — re-measure before relying on it. The switch date is not recorded. | `px4-params/*.params` (stale) |
 | Battery | **8S LiFePO4, 30 Ah** (operator, 2026-09-29). `BAT1_N_CELLS=8`, `BAT1_V_CHARGED=3.45`, `BAT1_V_EMPTY=3.00`, `BAT1_CAPACITY=30000`, set via NSH 2026-09-29 (3.45/3.00 show no `+` in `param show` because they equal this build's defaults — blank means default, not unsaved). Before that `N_CELLS=3`/`V_CHARGED=4.70` made a 26 V pack read 8.66 V/cell -> "Battery 1: over voltage" blocked arming. The INA228 current channel reads ~0.1 A and does **not** measure traction current, so PX4 SoC is voltage-only (LFP curve is flat — treat % as rough). | NSH, `commander check` OK after |
-| GNSS receiver | **Septentrio mosaic-H**, dual-antenna, SBF protocol, 10 Hz PVT, dedicated PX4 driver `src/drivers/gnss/septentrio/` — **not** a u-blox F9P; audit the Septentrio path, not UBX. **Firmware 4.14.0 (2023-05-22)**, serial 3804732. It rejects valid BDS (and at times GAL/GLO) corrections; an **upgrade to the latest stable release is recommended** (see §"Base corrections vs receiver use") | `docs/2026-09-04_EKF_GNSS_Hardware_Audit.md` §8; `lstInternalFile, Identification` 2026-09-30 |
+| GNSS receiver | **Septentrio mosaic-H**, dual-antenna, SBF protocol, 10 Hz PVT, dedicated PX4 driver `src/drivers/gnss/septentrio/` — **not** a u-blox F9P; audit the Septentrio path, not UBX. **Firmware 4.14.0 (2023-05-22)**, serial 3804732. It does not use BDS in RTK; cause **not yet established** (see §"Base corrections vs receiver use": the base sends BDS almost entirely single-frequency). A firmware upgrade is reasonable maintenance but is **not** an evidence-backed fix | `docs/2026-09-04_EKF_GNSS_Hardware_Audit.md` §8; `lstInternalFile, Identification` 2026-09-30 |
 | MAVROS | apt 2.14.0 **plus a patched overlay** at `~/mavros_ws` (`scripts/build_patched_mavros.sh`: upstream duplicate-ACK / param race fixes). The launch log line `MAVROS: patched overlay` confirms it is in use | 2026-09-30 |
 | Wheel track | `RD_WHEEL_TRACK = 0.63 m` | `px4-params/*.params` |
 | | Full NTRIP client (`rtk_correction_bridge`), managed as a supervised child process by `rover_backend`, confirmed FIXED and live 2026-08-31 evening | see RTK section below |
@@ -1373,11 +1373,27 @@ comparing any bag/ULog timing.
   streams turned off afterwards) shows the base sends 1005 + MSM4 GPS 9 /
   GLO 6-7 / GAL 7 / BDS 7 sats + 1230, all at 1 Hz, 0 CRC errors, max gap
   1.2 s. The base is about 6 m away.
-- **Signals match the rover exactly:** GPS L1C+L2C, GLO G1C+G2C, GAL
-  E1C+E5bQ, BDS B1I+B2I.
+- **Format is fine (checked 2026-10-01 from the same capture):** standard
+  MSM4, station ID 0 in every message, correct multiple-message chaining (GPS/
+  GLO/GAL flagged "more follow", BDS last), and BDS epoch times are in BDT
+  (they would read 14.9 s off if the base had used GPS time; they read 0.9 s).
+  Messages arrive 0.5-0.9 s after their epoch.
+- **Per-satellite signal content (the signal MASK hides this):**
+  - GAL: all 7 sats carry E1+E5bQ, every epoch.
+  - GPS: 6-7 of 9 carry L1+L2C.
+  - **BDS: only C10 has B1I+B2I; the other 7 (C07, C08, C13, C23, C28, C32,
+    C37) are B1I only.** BDS is almost entirely single-frequency from this
+    base. No GEO satellites are sent.
+  - ⚠ The earlier bullet "signals match the rover exactly (B1I+B2I)" compared
+    the mask, not the satellites, and was wrong in effect.
 - **What the receiver used:** BDS 0%, GAL dropped in 10% of epochs, NrSV 6-9,
-  `RxError=8` throughout. So the receiver is **rejecting valid, matched
-  corrections**.
+  `RxError=8` throughout. Why BDS is unused is **not established**: a normal
+  dual-frequency requirement on thin BDS content would explain it, but that is
+  an untested assumption about Septentrio's RTK engine. The base sent GAL
+  steadily while the receiver dropped it for ~3.5 s stretches, so the GAL
+  drops point at the rover side (tracking/ambiguity), not the base.
+  I have **no per-satellite rover tracking data** (SBF ChannelStatus 4013) for
+  that capture, so "rejected" and "not usable" cannot be told apart yet.
 - **Mission ULog (`gps_dump`):** every FLOAT window is exactly the time
   corrections-available shrank to GPS-only (97 s, 4 SVs) or GPS+GAL, while
   correction age stayed 1.1-2.5 s. The 0.5 s StandAlone/DGPS epochs used
@@ -1388,7 +1404,16 @@ comparing any bag/ULog timing.
   which is the ULog clock offset.
 - Streams 2-10 on the receiver are all off now (USB1 is silent unless a
   stream is configured).
-- Fix lead: firmware 4.14.0 -> 4.14.10+.
+- Base distance: the baseline was **13.68 km on 2026-09-08/09 and is 6 m now**,
+  so this is a different base. BDS "working on Sep-08" is not evidence of a
+  regression here.
+- Firmware: the 4.14.10 "NTRIP burst" note we quoted concerns the receiver's
+  built-in NTRIP client. This rover pushes RTCM over USB2 and NTR1 shows
+  "waiting", so it may not apply. Not read from Septentrio's notes.
+- **Decisive next measurement:** stream SBF ChannelStatus (4013) on the
+  temporary USB1 stream; it shows, per satellite, whether it is tracked and
+  used in PVT, with a reason. Also check the base's own status for BDS B2I
+  tracking and set it to output MSM7 with all signals.
 
 ## Repo status (2026-08-31)
 
