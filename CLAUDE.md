@@ -1410,10 +1410,28 @@ comparing any bag/ULog timing.
 - Firmware: the 4.14.10 "NTRIP burst" note we quoted concerns the receiver's
   built-in NTRIP client. This rover pushes RTCM over USB2 and NTR1 shows
   "waiting", so it may not apply. Not read from Septentrio's notes.
-- **Decisive next measurement:** stream SBF ChannelStatus (4013) on the
-  temporary USB1 stream; it shows, per satellite, whether it is tracked and
-  used in PVT, with a reason. Also check the base's own status for BDS B2I
-  tracking and set it to output MSM7 with all signals.
+- **The base is a ZED-F9P on a Raspberry Pi** (repo
+  `/Users/dyx_a1/Vetri/gnss_fastapi_backend`, Pi `192.168.1.100`, pushes NTRIP
+  over eth0 to `caster.emlid.com`). Read from its source 2026-10-01:
+  `save_all_config.py` enables GPS/GLO/GAL/BDS with BDS B1 **and** B2; live
+  RTCM is **MSM4** (matches our capture; that repo's docs and autoflow default
+  say MSM7, so they are stale). It **keeps no log** of what it sent, so what
+  the base sent during the 97 s GPS-only window cannot be recovered.
+- **Hypothesis, NOT verified against u-blox/BeiDou documents:** a ZED-F9P
+  tracks only BDS B1I/B2I, and BDS-3 satellites carry no B2I (they use
+  B2a/B2b), so most BDS from this base is B1I-only. That fits the capture:
+  4 of 4 BDS-3 MEO sats (C23/28/32/37) and 3 of 4 BDS-2 IGSO sats (C07/08/13)
+  are B1I-only, and only C10 is dual. MSM7 would not add signals.
+- **BDS is probably NOT the cause of the FLOAT drops.** BDS was unused in the
+  good FIXED epochs too (NrSV 8-12). The drops are GAL/GLO going missing.
+  Open candidates: rover-side tracking (obstruction, multipath, or dusk
+  scintillation at 13 N in equinox season; all trouble was 18:55-19:02 and
+  20:03 IST; untested) versus the base side.
+- **Discriminators:** (1) the same-base daytime bundles of 2026-09-30
+  16:50-17:13 on the Jetson (fix % and NrSV versus dusk); (2) SBF ChannelStatus
+  (4013) on the temporary USB1 stream, which shows per satellite whether it is
+  tracked and used in PVT, with a reason; (3) per-epoch satellite-count
+  logging on the base Pi.
 
 ## Repo status (2026-08-31)
 
