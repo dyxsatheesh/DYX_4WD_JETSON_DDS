@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 BATTERY_FULL_VOLTAGE_V = 26.50
-BATTERY_CRITICAL_VOLTAGE_V = 22.50
+BATTERY_CRITICAL_VOLTAGE_V = 23.80
 
 BATTERY_FULL_PERCENT = 100
 BATTERY_LOW_PERCENT = 30
@@ -19,7 +19,7 @@ def battery_percentage_from_voltage(
 
     Production GCS contract:
       26.50 V and above -> 100%
-      22.50 V and below -> 10%
+      23.80 V and below -> 10%
       Between them      -> one continuous linear curve, displayed as whole %
 
     There is no voltage lookup table. The continuous voltage result is rounded
@@ -27,9 +27,9 @@ def battery_percentage_from_voltage(
 
     Endpoint guards are deliberate:
       - voltage below 26.50 V cannot round up to 100%
-      - voltage above 22.50 V cannot round down to 10%
+      - voltage above 23.80 V cannot round down to 10%
 
-    This keeps the 10% mission lockout tied exactly to 22.50 V and below.
+    This keeps the 10% mission lockout tied exactly to 23.80 V and below.
     """
 
     if voltage_v is None or not math.isfinite(voltage_v) or voltage_v <= 0.0:

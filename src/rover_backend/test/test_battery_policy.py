@@ -9,26 +9,24 @@ from rover_backend.battery_policy import normalize_battery_percentage
 
 def test_voltage_maps_to_smooth_whole_percentage():
     assert BATTERY_FULL_VOLTAGE_V == 26.50
-    assert BATTERY_CRITICAL_VOLTAGE_V == 22.50
+    assert BATTERY_CRITICAL_VOLTAGE_V == 23.80
 
     assert battery_percentage_from_voltage(26.50) == 100
-    assert battery_percentage_from_voltage(26.00) == 89
-    assert battery_percentage_from_voltage(25.50) == 78
-    assert battery_percentage_from_voltage(25.00) == 66
-    assert battery_percentage_from_voltage(24.50) == 55
-    assert battery_percentage_from_voltage(24.00) == 44
-    assert battery_percentage_from_voltage(23.50) == 32
-    assert battery_percentage_from_voltage(23.00) == 21
-    assert battery_percentage_from_voltage(22.80) == 17
-    assert battery_percentage_from_voltage(22.50) == 10
+    assert battery_percentage_from_voltage(26.00) == 83
+    assert battery_percentage_from_voltage(25.50) == 67
+    assert battery_percentage_from_voltage(25.00) == 50
+    assert battery_percentage_from_voltage(24.50) == 33
+    assert battery_percentage_from_voltage(24.00) == 17
+    assert battery_percentage_from_voltage(23.80) == 10
 
 
 def test_whole_percentage_preserves_exact_voltage_endpoints():
     assert battery_percentage_from_voltage(27.20) == 100
     assert battery_percentage_from_voltage(26.49) == 99
-    assert battery_percentage_from_voltage(22.51) == 11
-    assert battery_percentage_from_voltage(22.50) == 10
-    assert battery_percentage_from_voltage(22.40) == 10
+    assert battery_percentage_from_voltage(23.81) == 11
+    assert battery_percentage_from_voltage(23.80) == 10
+    assert battery_percentage_from_voltage(23.79) == 10
+    assert battery_percentage_from_voltage(23.50) == 10
     assert battery_percentage_from_voltage(20.00) == 10
     assert battery_percentage_from_voltage(None) is None
     assert battery_percentage_from_voltage(float("nan")) is None
