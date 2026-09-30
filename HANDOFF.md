@@ -8,7 +8,7 @@
 
 | Item | State |
 |---|---|
-| Jetson code | `latency-hardening` @ `d2828a0` deployed and running since 19:45 IST (`c5bc91c` = docs only). ⚠ `origin/main` is still `33e43e0`, so merge when field-verified |
+| Jetson code | `latency-hardening` @ `d2828a0` deployed and running since 19:45 IST (`c5bc91c` = docs only). `main` == `latency-hardening` @ `586e6fe` (fast-forwarded 22:18 at the user's request; contains the not-yet-field-tested radial20 fix + point_history) |
 | MAVROS | **Patched overlay** `~/mavros_ws`, and the log shows `MAVROS: patched overlay`. Auto-respawn is on |
 | Mission defaults | **AUTO + SPRAY saved** (`~/.ros/dyx_mission_defaults.json`) |
 | Tablet | Release APK `realtime-hardening` @ `ecda663` is built (`android/app/build/outputs/apk/release/app-release.apk`) and **not installed yet** (`adb install -r`) |

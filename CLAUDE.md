@@ -1210,9 +1210,10 @@ the next feature and is not implemented.
 
 ## 2026-09-30 — realtime events, battery critical pause, power-cycle recovery
 
-Branch `latency-hardening`. ⚠ `origin/main` is still at `33e43e0`; everything
-after it (MAVROS patch, relay, radial20 fix, point_history) is **only on
-`latency-hardening`**. **Deployed on the Jetson as of 19:45 IST: `d2828a0`**
+Branch `latency-hardening`, **fast-forwarded into `main` at `586e6fe`
+(2026-09-30 22:18, user's decision)**. So `main` includes the MAVROS patch,
+the relay, the radial20 fix and point_history, although the last two are not
+field-tested yet. **Deployed on the Jetson as of 19:45 IST: `d2828a0`**
 (later commits are docs only). Recovery, the battery pause, E-stop Release &
 Resume and the power-cycle popup were exercised on the rover on 2026-09-30.
 The radial20 fix and point_history are **not field-tested**.
