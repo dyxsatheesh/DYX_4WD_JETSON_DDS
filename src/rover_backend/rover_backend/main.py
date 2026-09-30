@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import uvicorn
@@ -40,6 +41,9 @@ from rover_backend.config import client_ip_is_allowed
 from rover_backend.config import settings
 from rover_backend.mission_routes import mission_router
 from rover_backend.mission_report import mission_report_store
+from rover_backend.mission_recovery import PowerCycleRecoveryCandidate
+from rover_backend.mission_recovery import load_power_cycle_recovery
+from rover_backend.mission_recovery import mark_recovery_detected
 from rover_backend.mission_store import MissionValidationError
 from rover_backend.mission_store import mission_store
 from rover_backend.obstacle_routes import obstacle_router
@@ -352,6 +356,195 @@ async def _force_safe_before_shutdown() -> None:
         LOGGER.exception("Unable to assert ROS emergency stop during shutdown")
 
 
+_power_cycle_recovery_task: asyncio.Task[None] | None = None
+
+RECOVERY_MANAGER_RESYNC_GRACE_SEC = 1.0
+RECOVERY_PX4_SAFE_TIMEOUT_SEC = 120.0
+RECOVERY_PREPARE_TIMEOUT_SEC = 300.0
+
+
+async def _run_power_cycle_recovery(
+    candidate: PowerCycleRecoveryCandidate,
+) -> None:
+    """Safely rebuild an unfinished mission and stop at PAUSED."""
+
+    try:
+        rover_state.update(
+            "mission",
+            recovery_required=True,
+            recovery_available=False,
+            recovery_state="CHECKING",
+            recovery_reason="POWER_CYCLE",
+            recovery_error=None,
+            message="Checking previous unfinished mission after restart",
+        )
+
+        # If only the backend restarted and Mission Manager still owns the same
+        # live run, never overwrite it. Let its authoritative status re-sync.
+        await asyncio.sleep(RECOVERY_MANAGER_RESYNC_GRACE_SEC)
+        live = rover_state.section("mission")
+        live_state = str(live.get("state") or "").strip().upper()
+        live_run_id = str(live.get("mission_run_id") or "").strip()
+        if (
+            live_state in {"RUNNING", "PAUSED", "WAITING_FOR_NEXT"}
+            and live_run_id == candidate.mission_run_id
+        ):
+            rover_state.update(
+                "mission",
+                recovery_required=False,
+                recovery_available=False,
+                recovery_state="RESYNCED",
+                recovery_reason=None,
+                recovery_error=None,
+                message=(
+                    "Mission Manager retained the active run; "
+                    "backend re-synchronized without recovery"
+                ),
+            )
+            return
+
+        # Full/Jetson/stack restart recovery must never silently disarm PX4.
+        # Hold here until MAVROS confirms connected + disarmed.
+        safe_deadline = time.monotonic() + RECOVERY_PX4_SAFE_TIMEOUT_SEC
+        while True:
+            live = rover_state.section("mission")
+            connected = bool(live.get("px4_connected", False))
+            armed = bool(live.get("px4_armed", False))
+
+            if connected and not armed:
+                break
+
+            message = (
+                "PX4 is armed: disarm to continue mission recovery"
+                if connected and armed
+                else "Waiting for PX4/MAVROS before mission recovery"
+            )
+            rover_state.update(
+                "mission",
+                recovery_state="PX4_SAFE",
+                recovery_reason="POWER_CYCLE",
+                recovery_available=False,
+                message=message,
+            )
+
+            if time.monotonic() >= safe_deadline:
+                raise RuntimeError(message)
+            await asyncio.sleep(0.25)
+
+        rover_state.update(
+            "mission",
+            recovery_required=True,
+            recovery_available=False,
+            recovery_state="PREPARING",
+            recovery_reason="POWER_CYCLE",
+            recovery_error=None,
+            message=(
+                "Power-cycle recovery: rebuilding the previous mission "
+                "trajectory"
+            ),
+        )
+
+        await asyncio.to_thread(ros_bridge.prepare_trajectory)
+
+        prepare_deadline = time.monotonic() + RECOVERY_PREPARE_TIMEOUT_SEC
+        while True:
+            ready, error = ros_bridge.preparation_readiness()
+            if error:
+                raise RuntimeError(error)
+            if ready:
+                break
+            if time.monotonic() >= prepare_deadline:
+                raise RuntimeError(
+                    "Timed out waiting for recovered trajectory to become READY"
+                )
+            await asyncio.sleep(0.10)
+
+        rover_state.update(
+            "mission",
+            recovery_state="RESTORING",
+            recovery_reason="POWER_CYCLE",
+            message=(
+                "Power-cycle recovery: restoring saved mission progress"
+            ),
+        )
+
+        await asyncio.to_thread(
+            ros_bridge.restore_mission_runtime,
+            candidate.runtime,
+        )
+
+        mission = rover_state.section("mission")
+        rover_state.update(
+            "mission",
+            recovery_required=True,
+            recovery_available=True,
+            recovery_state="READY",
+            recovery_reason="POWER_CYCLE",
+            recovery_current_point_id=(
+                mission.get("active_point_id")
+                or candidate.current_point_id
+            ),
+            recovery_current_point_number=(
+                mission.get("active_point_number")
+                or candidate.current_point_number
+            ),
+            recovery_error=None,
+            message=(
+                "Previous unfinished mission restored and PAUSED; "
+                "choose Resume Mission or Stop & Upload New Mission"
+            ),
+        )
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        LOGGER.exception("Power-cycle mission recovery failed")
+        rover_state.update(
+            "mission",
+            recovery_required=True,
+            recovery_available=False,
+            recovery_state="ERROR",
+            recovery_reason="POWER_CYCLE",
+            recovery_error=str(error),
+            message=(
+                "Previous mission was detected but could not be restored"
+            ),
+        )
+
+
+def _schedule_power_cycle_recovery(
+    candidate: PowerCycleRecoveryCandidate,
+) -> None:
+    global _power_cycle_recovery_task
+
+    if (
+        _power_cycle_recovery_task is not None
+        and not _power_cycle_recovery_task.done()
+    ):
+        return
+
+    _power_cycle_recovery_task = asyncio.create_task(
+        _run_power_cycle_recovery(candidate),
+        name="mission-power-cycle-recovery",
+    )
+
+
+async def _cancel_power_cycle_recovery() -> None:
+    global _power_cycle_recovery_task
+
+    task = _power_cycle_recovery_task
+    _power_cycle_recovery_task = None
+
+    if task is None or task.done():
+        return
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 async def startup_backend() -> None:
     """Initialize persistent state, ROS and realtime services."""
 
@@ -368,12 +561,21 @@ async def startup_backend() -> None:
     ros_started = False
     rtk_started = False
     beacon_started = False
+    recovery_candidate: PowerCycleRecoveryCandidate | None = None
 
     try:
         await asyncio.to_thread(authentication_store.initialize)
 
         try:
-            await asyncio.to_thread(mission_store.restore_state)
+            restored_metadata = await asyncio.to_thread(
+                mission_store.restore_state
+            )
+            recovery_candidate = await asyncio.to_thread(
+                load_power_cycle_recovery,
+                restored_metadata,
+            )
+            if recovery_candidate is not None:
+                mark_recovery_detected(recovery_candidate)
         except MissionValidationError as error:
             # Keep the backend available so the operator can inspect or
             # delete a corrupt stored mission. The rover remains stopped.
@@ -410,6 +612,9 @@ async def startup_backend() -> None:
 
         await start_realtime()
         realtime_started = True
+
+        if recovery_candidate is not None:
+            _schedule_power_cycle_recovery(recovery_candidate)
 
         try:
             rover_beacon.start()
@@ -487,6 +692,7 @@ async def shutdown_backend() -> None:
         settings.application_name,
     )
 
+    await _cancel_power_cycle_recovery()
     await _force_safe_before_shutdown()
 
     try:

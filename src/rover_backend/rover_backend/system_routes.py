@@ -337,6 +337,25 @@ def build_mission_status_payload() -> dict[str, Any]:
         "marking_active": bool(mission.get("marking_active", False)),
         "pause_reason": mission.get("pause_reason"),
         "resume_available": bool(mission.get("resume_available", False)),
+        "recovery_required": bool(
+            mission.get("recovery_required", False)
+        ),
+        "recovery_available": bool(
+            mission.get("recovery_available", False)
+        ),
+        "recovery_state": mission.get("recovery_state"),
+        "recovery_reason": mission.get("recovery_reason"),
+        "recovery_previous_state": mission.get(
+            "recovery_previous_state"
+        ),
+        "recovery_current_point_id": mission.get(
+            "recovery_current_point_id"
+        ),
+        "recovery_current_point_number": mission.get(
+            "recovery_current_point_number"
+        ),
+        "recovery_saved_at": mission.get("recovery_saved_at"),
+        "recovery_error": mission.get("recovery_error"),
         "gps_fix_type": int(mission.get("gps_fix_type", 0) or 0),
         "rtk_state": mission.get("rtk_state"),
         "rtk_fixed": bool(mission.get("rtk_fixed", False)),

@@ -271,9 +271,15 @@ class Settings:
 
     @property
     def mission_runtime_file(self) -> Path:
-        """Separate runtime-state persistence file."""
+        """Latest Mission Manager runtime snapshot."""
 
         return self.runtime_directory / "mission_runtime.json"
+
+    @property
+    def mission_recovery_file(self) -> Path:
+        """Durable unfinished-mission checkpoint for power-cycle recovery."""
+
+        return self.runtime_directory / "mission_recovery.json"
 
     @property
     def login_failure_limit(self) -> int:

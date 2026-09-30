@@ -1093,6 +1093,7 @@ class MissionStore:
                 self.mission_file,
                 self.metadata_file,
                 settings.mission_runtime_file,
+                settings.mission_recovery_file,
             )
 
             previous_files: dict[Path, bytes] = {}

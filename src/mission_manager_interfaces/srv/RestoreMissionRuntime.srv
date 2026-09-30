@@ -1,0 +1,4 @@
+string runtime_json
+---
+bool success
+string message

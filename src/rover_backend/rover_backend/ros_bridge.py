@@ -57,6 +57,7 @@ from std_msgs.msg import String
 from std_msgs.msg import UInt8MultiArray
 from std_msgs.msg import UInt64
 from mission_manager_interfaces.srv import ReleaseEmergencyStop
+from mission_manager_interfaces.srv import RestoreMissionRuntime
 from std_srvs.srv import SetBool
 from std_srvs.srv import Trigger
 
@@ -886,6 +887,10 @@ class RoverBackendRosNode(Node):
         self._release_emergency_stop_client = self.create_client(
             ReleaseEmergencyStop,
             "/mission_manager/release_emergency_stop",
+        )
+        self._restore_mission_runtime_client = self.create_client(
+            RestoreMissionRuntime,
+            "/mission_manager/restore_runtime",
         )
         self._spray_manual_client = self.create_client(
             SetBool,
@@ -4029,10 +4034,14 @@ class RoverBackendRosNode(Node):
                     )
                 return
 
+            current_mission = rover_state.section("mission")
             runtime_payload = {
                 "schema_version": 1,
                 "saved_at": utc_now_iso(),
                 "mission_id": captured_mission_id,
+                "checksum_sha256": str(
+                    current_mission.get("checksum_sha256") or ""
+                ),
                 "runtime": manager_payload,
             }
 
@@ -4043,6 +4052,40 @@ class RoverBackendRosNode(Node):
                 )
             except OSError:
                 LOGGER.exception("Unable to persist mission runtime state")
+
+            runtime_state = str(
+                manager_payload.get("state") or ""
+            ).strip().upper()
+            runtime_run_id = str(
+                manager_payload.get("mission_run_id") or ""
+            ).strip()
+
+            # Separate durable checkpoint for an actually started unfinished
+            # mission. READY/EMPTY snapshots on the next boot cannot overwrite
+            # the point from which recovery must continue.
+            if (
+                runtime_state
+                in {"RUNNING", "PAUSED", "WAITING_FOR_NEXT"}
+                and runtime_run_id
+            ):
+                try:
+                    _atomic_write_json(
+                        settings.mission_recovery_file,
+                        runtime_payload,
+                    )
+                except OSError:
+                    LOGGER.exception(
+                        "Unable to persist mission recovery checkpoint"
+                    )
+            elif runtime_state in {"EMPTY", "COMPLETED"}:
+                try:
+                    settings.mission_recovery_file.unlink(
+                        missing_ok=True
+                    )
+                except OSError:
+                    LOGGER.exception(
+                        "Unable to remove finished mission recovery checkpoint"
+                    )
 
     # ==========================================================
     # Safety mirroring and backend heartbeat
@@ -4486,8 +4529,56 @@ class RoverBackendRosNode(Node):
     def pause_mission(self) -> dict[str, Any]:
         return self._proxy_manager_operation("pause")
 
+    def restore_mission_runtime(
+        self,
+        runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        request = RestoreMissionRuntime.Request()
+        request.runtime_json = json.dumps(
+            runtime,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        accepted, service_message = self._call_service(
+            client=self._restore_mission_runtime_client,
+            request=request,
+            service_name="/mission_manager/restore_runtime",
+            response_timeout_sec=8.0,
+            timeout_outcome_unknown=True,
+        )
+        if not accepted:
+            raise RuntimeError(service_message)
+
+        deadline = time.monotonic() + self.MANAGER_STATE_ACK_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            with self._runtime_lock:
+                if self._mission_manager_state == "PAUSED":
+                    rover_state.update(
+                        "mission",
+                        message=service_message,
+                        error=None,
+                    )
+                    _notify_authoritative_state_changed()
+                    return rover_state.section("mission")
+            time.sleep(0.02)
+
+        raise RuntimeError(
+            "Mission Manager accepted recovery but PAUSED status "
+            "was not observed"
+        )
+
     def resume_mission(self) -> dict[str, Any]:
-        return self._proxy_manager_operation("resume")
+        self._proxy_manager_operation("resume")
+        rover_state.update(
+            "mission",
+            recovery_required=False,
+            recovery_available=False,
+            recovery_state="RESUMED",
+            recovery_error=None,
+        )
+        _notify_authoritative_state_changed()
+        return rover_state.section("mission")
 
     def next_point(self) -> dict[str, Any]:
         return self._proxy_manager_operation("next_point")
@@ -4499,6 +4590,20 @@ class RoverBackendRosNode(Node):
         # Mission Manager owns disarm and emits MISSION_TERMINATED only after
         # its STOP contract finishes.  That event drives report-first cleanup.
         self._proxy_manager_operation("stop")
+        try:
+            settings.mission_recovery_file.unlink(missing_ok=True)
+        except OSError:
+            LOGGER.exception(
+                "Unable to remove mission recovery checkpoint after STOP"
+            )
+        rover_state.update(
+            "mission",
+            recovery_required=False,
+            recovery_available=False,
+            recovery_state="DISCARDED",
+            recovery_error=None,
+        )
+        _notify_authoritative_state_changed()
         return rover_state.section("mission")
 
     def clear_mission(self) -> dict[str, Any]:
@@ -4517,6 +4622,13 @@ class RoverBackendRosNode(Node):
             raise RuntimeError(manager_message)
         if not trajectory_ok:
             raise RuntimeError(trajectory_message)
+
+        try:
+            settings.mission_recovery_file.unlink(missing_ok=True)
+        except OSError:
+            LOGGER.exception(
+                "Unable to remove mission recovery checkpoint after CLEAR"
+            )
 
         rover_state.clear_mission_runtime(retain_loaded_file=True)
         return rover_state.section("mission")
@@ -4755,6 +4867,13 @@ class RosBridgeRuntime:
     def preparation_readiness(self) -> tuple[bool, str | None]:
         # Read-only snapshot; deliberately not behind _operation_lock.
         return self.node.preparation_readiness()
+
+    def restore_mission_runtime(
+        self,
+        runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._operation_lock:
+            return self.node.restore_mission_runtime(runtime)
 
     def set_execution_mode(
         self,

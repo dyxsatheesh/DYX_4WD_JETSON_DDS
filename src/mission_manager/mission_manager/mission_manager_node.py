@@ -47,9 +47,11 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float32, Int32MultiArray, String, UInt8MultiArray
 from mission_manager_interfaces.srv import ReleaseEmergencyStop
+from mission_manager_interfaces.srv import RestoreMissionRuntime
 from std_srvs.srv import Trigger
 
 from mission_manager.marking_arrival_policy import after_fail_mode_action
+from mission_manager.recovery_runtime import build_recovery_plan
 from mission_manager.rtk_runtime_policy import (
     FloatPauseAction,
     RtkRunningAction,
@@ -658,6 +660,12 @@ class MissionManager(Node):
             Trigger,
             "/mission_manager/clear",
             self._clear_service,
+            callback_group=self._mission_service_group,
+        )
+        self.create_service(
+            RestoreMissionRuntime,
+            "/mission_manager/restore_runtime",
+            self._restore_runtime_service,
             callback_group=self._mission_service_group,
         )
         self.create_service(
@@ -3237,6 +3245,122 @@ class MissionManager(Node):
                 self._publish_status(force=True)
             response.success = False
             response.message = self._last_message
+            return response
+
+    def _restore_runtime_service(
+        self,
+        request: RestoreMissionRuntime.Request,
+        response: RestoreMissionRuntime.Response,
+    ) -> RestoreMissionRuntime.Response:
+        """Restore a rebuilt, unfinished mission into PAUSED state only."""
+
+        try:
+            payload = json.loads(str(request.runtime_json or ""))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            response.success = False
+            response.message = f"Invalid recovery runtime JSON: {error}"
+            return response
+
+        try:
+            with self._lock:
+                if self._state != "READY":
+                    raise RuntimeError(
+                        "Recovery requires a freshly prepared READY mission"
+                    )
+                if self._px4_armed:
+                    raise RuntimeError(
+                        "Recovery requires PX4 disarmed"
+                    )
+                if not self._emergency_stop:
+                    raise RuntimeError(
+                        "Recovery requires emergency stop asserted"
+                    )
+                if self._mission_enable:
+                    raise RuntimeError(
+                        "Recovery requires mission motion disabled"
+                    )
+
+                plan = build_recovery_plan(
+                    payload,
+                    point_count=len(self._mission_waypoints),
+                    marking_path_index_by_number=(
+                        self._marking_path_index_by_number
+                    ),
+                    semantic_path_indices=self._semantic_path_indices,
+                )
+
+                self._execution_mode = plan.execution_mode
+                self._marking_tool = plan.marking_tool
+                self._point_status = list(plan.point_status)
+                self._point_accuracy_snapshots = copy.deepcopy(
+                    list(plan.point_accuracy_snapshots)
+                )
+                self._point_results = copy.deepcopy(
+                    list(plan.point_results)
+                )
+                self._last_point_result = copy.deepcopy(
+                    plan.last_point_result
+                )
+                self._mission_run_id = plan.mission_run_id
+                self._mission_started_unix_ns = (
+                    plan.mission_started_unix_ns
+                )
+                self._spray_success_keys.clear()
+                self._spray_failure_keys.clear()
+                self._laser_hold = None
+                self._current_path_index = plan.current_path_index
+                self._active_marking_number = (
+                    plan.unresolved_marking_number
+                )
+
+                completed_numbers = [
+                    number
+                    for number, status in enumerate(self._point_status)
+                    if status == "COMPLETED"
+                ]
+                self._last_completed_marking_number = (
+                    max(completed_numbers)
+                    if completed_numbers
+                    else None
+                )
+
+                # Never restore old timer, spray, laser, RPP certificate,
+                # OFFBOARD, arm or auto-continue state.
+                self._reset_point_timers()
+                self._reset_arrival_state()
+                self._pause_reason = "POWER_CYCLE_RECOVERY"
+                self._resume_available = True
+                self._state = "PAUSED"
+                self._start_stage = "IDLE"
+                self._resume_stage = "IDLE"
+                self._stop_stage = "IDLE"
+                self._last_error = None
+                self._last_message = (
+                    "Power-cycle recovery restored; "
+                    f"resume from P{plan.unresolved_marking_number + 1}"
+                )
+                self._emit_system_event(
+                    "MISSION_RECOVERED",
+                    self._last_message,
+                )
+
+                self._publish_marking_active(False)
+                self._publish_mission_complete(False)
+                self._disable_motion_preserve_estop()
+                self._publish_runtime_path()
+                self._publish_goal()
+                self._publish_status(force=True)
+
+            response.success = True
+            response.message = self._last_message
+            return response
+
+        except Exception as error:
+            self.get_logger().error(
+                f"Mission runtime recovery rejected: {error}"
+            )
+            response.success = False
+            response.message = str(error)
             return response
 
     def _pause_service(
