@@ -133,9 +133,37 @@ _event_loop: asyncio.AbstractEventLoop | None = None
 
 _lifecycle_lock = asyncio.Lock()
 _revocation_callback_registered = False
+_loop_lag_task: asyncio.Task[None] | None = None
+
+# Event-loop lag probe (DYX_REALTIME_METRICS only). Every HTTP route and every
+# Socket.IO emit shares this loop, so a stall here freezes all tablets at once.
+LOOP_LAG_PROBE_PERIOD_SEC = 0.1
+LOOP_LAG_WARN_MS = 250.0
 
 # DYX_REALTIME_METRICS=1 logs one rate/size/timing summary per second.
 realtime_metrics = RealtimeMetrics(enabled=settings.realtime_metrics_enabled)
+
+
+def _socket_transport(sid: str) -> str:
+    """'websocket' or 'polling' for a connected sid; 'unknown' if unavailable."""
+
+    try:
+        return str(sio.transport(sid))
+    except Exception:  # noqa: BLE001 - diagnostic only, never break a connect
+        return "unknown"
+
+
+async def _loop_lag_probe(stop_event: asyncio.Event) -> None:
+    """Measure how late the loop runs a 100 ms sleep; stalls show as lag."""
+
+    loop = asyncio.get_running_loop()
+    while not stop_event.is_set():
+        expected = loop.time() + LOOP_LAG_PROBE_PERIOD_SEC
+        await asyncio.sleep(LOOP_LAG_PROBE_PERIOD_SEC)
+        lag_ms = max(0.0, (loop.time() - expected) * 1000.0)
+        realtime_metrics.record_timing("event_loop_lag", lag_ms)
+        if lag_ms >= LOOP_LAG_WARN_MS:
+            LOGGER.warning("realtime event loop stalled %.0f ms", lag_ms)
 
 
 async def _emit(event: str, payload: Any, **kwargs: Any) -> None:
@@ -423,11 +451,12 @@ async def connect(
     await _update_frontend_connection_state()
 
     LOGGER.info(
-        "Socket.IO connected: sid=%s session=%s user=%s ip=%s",
+        "Socket.IO connected: sid=%s session=%s user=%s ip=%s transport=%s",
         sid,
         record.session_id,
         record.username,
         record.client_ip,
+        _socket_transport(sid),
     )
 
     # Give a newly connected frontend a complete state immediately instead
@@ -848,6 +877,14 @@ async def _broadcast_loop() -> None:
                         "total_points", mission.get("total_points", 0)
                     )
                     realtime_metrics.set_gauge("socket_clients", len(records))
+                    realtime_metrics.set_gauge(
+                        "socket_transports",
+                        dict(
+                            collections.Counter(
+                                _socket_transport(sid) for sid, _record in records
+                            )
+                        ),
+                    )
 
                 # A. High-rate telemetry: live values, bounded size.
                 await _emit(
@@ -1000,6 +1037,13 @@ async def start_realtime() -> None:
             name="rover-realtime-broadcast",
         )
 
+        global _loop_lag_task
+        if realtime_metrics.enabled:
+            _loop_lag_task = asyncio.create_task(
+                _loop_lag_probe(_stop_event),
+                name="rover-realtime-loop-lag",
+            )
+
         LOGGER.info(
             "Realtime broadcaster started at %.2f Hz",
             settings.telemetry_broadcast_hz,
@@ -1014,9 +1058,15 @@ async def stop_realtime() -> None:
     global _state_change_event
     global _stop_event
 
+    global _loop_lag_task
+
     async with _lifecycle_lock:
         task = _broadcast_task
         stop_event = _stop_event
+        lag_task = _loop_lag_task
+        _loop_lag_task = None
+        if lag_task is not None:
+            lag_task.cancel()
 
         if stop_event is not None:
             stop_event.set()
