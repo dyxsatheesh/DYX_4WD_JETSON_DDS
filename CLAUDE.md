@@ -1341,6 +1341,29 @@ comparing any bag/ULog timing.
     (`_with_point_history`), and only for the same `mission_run_id`.
   - The bag recorder topic list and QoS overrides include the new topic.
 
+### Base corrections vs receiver use (2026-09-30, receiver fw 4.14.0)
+
+- **What arrives:** `DiffCorrIn` on a temporary USB1 stream (parked, 5 min,
+  streams turned off afterwards) shows the base sends 1005 + MSM4 GPS 9 /
+  GLO 6-7 / GAL 7 / BDS 7 sats + 1230, all at 1 Hz, 0 CRC errors, max gap
+  1.2 s. The base is about 6 m away.
+- **Signals match the rover exactly:** GPS L1C+L2C, GLO G1C+G2C, GAL
+  E1C+E5bQ, BDS B1I+B2I.
+- **What the receiver used:** BDS 0%, GAL dropped in 10% of epochs, NrSV 6-9,
+  `RxError=8` throughout. So the receiver is **rejecting valid, matched
+  corrections**.
+- **Mission ULog (`gps_dump`):** every FLOAT window is exactly the time
+  corrections-available shrank to GPS-only (97 s, 4 SVs) or GPS+GAL, while
+  correction age stayed 1.1-2.5 s. The 0.5 s StandAlone/DGPS epochs used
+  15-16 SVs across all four constellations, so sky and tracking were fine.
+- **PX4 is not the cause:** `vehicle_gps_position` matches the receiver
+  `PVTGeodetic` in 99.9% of epochs (fix and NrSV).
+- ⚠ **PX4 `time_utc_usec` from this driver is GPS time** (18 s ahead of UTC),
+  which is the ULog clock offset.
+- Streams 2-10 on the receiver are all off now (USB1 is silent unless a
+  stream is configured).
+- Fix lead: firmware 4.14.0 -> 4.14.10+.
+
 ## Repo status (2026-08-31)
 
 - **`WORKING_STATUS_24_06_2026.txt`** — stale (2026-06-24), architecture it
