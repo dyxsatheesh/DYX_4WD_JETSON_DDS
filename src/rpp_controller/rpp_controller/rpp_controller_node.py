@@ -10448,6 +10448,21 @@ class RPPController(Node):
             0.0,
             float(self.precision_last_published_translational_speed_mps),
         )
+        # TRACK / TERMINAL_GUIDANCE pass the tracking command straight
+        # through, and that command is the speed published LAST cycle. From
+        # standstill inside the terminal zone (resume after a pause, E-stop
+        # release, a short leg) it is 0, so the regulator outputs 0, RPP
+        # publishes 0, and the goal times out without moving (2026-09-30:
+        # P0002/P0009/P0012 failed 15 s after RTK auto-resume at 111/42/97 mm).
+        # Seed with the final-approach floor, which sits above the measured
+        # 0.143 m/s drivetrain breakaway; BRAKE_PROFILE still owns the stop.
+        if (
+            self.radial_stop_regulator.state
+            in (RadialStopState.TRACK, RadialStopState.TERMINAL_GUIDANCE)
+            and along_remaining > 0.0
+            and tracking_speed_command < self.deceleration_floor_speed
+        ):
+            tracking_speed_command = self.deceleration_floor_speed
         yaw_rate = (
             float(self.current_yaw_rate_radps)
             if math.isfinite(self.current_yaw_rate_radps)
