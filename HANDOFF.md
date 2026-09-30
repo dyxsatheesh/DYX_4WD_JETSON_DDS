@@ -11,9 +11,53 @@
 | Jetson code | `latency-hardening` @ `d2828a0` deployed and running since 19:45 IST (`c5bc91c` = docs only). `main` == `latency-hardening` @ `586e6fe` (fast-forwarded 22:18 at the user's request; contains the not-yet-field-tested radial20 fix + point_history) |
 | MAVROS | **Patched overlay** `~/mavros_ws`, and the log shows `MAVROS: patched overlay`. Auto-respawn is on |
 | Mission defaults | **AUTO + SPRAY saved** (`~/.ros/dyx_mission_defaults.json`) |
-| Tablet | Release APK `realtime-hardening` @ `ecda663` is built (`android/app/build/outputs/apk/release/app-release.apk`) and **not installed yet** (`adb install -r`) |
+| Tablet | Release APK `realtime-hardening` @ `ecda663` is built (diag commit `4a42c46` came later and is not in that APK) (`android/app/build/outputs/apk/release/app-release.apk`) and **not installed yet** (`adb install -r`) |
 | Sudo | Full NOPASSWD for `flash` until **2026-10-30 18:30 IST** (auto-removed by `remove-flash-dev-sudo.timer`) |
 | Receiver | mosaic-H **firmware 4.14.0**; Streams 2-10 off; USB1 is free for diagnostics |
+
+## 0.5 TOMORROW'S MAIN GOAL — optimise the app <-> backend realtime transport
+
+**Problem (operator-reported, cause NOT known):** the tablet's link to the
+backend goes stale for 3-4 s, sometimes up to ~15 s. Closing and reopening the
+app makes it fast again. Neither frontend nor backend is trusted yet.
+
+**Established from source only (not measured):**
+- The app watchdog (`useRoverTelemetry.ts` ~L2330) reconnects only after
+  **8 s** of socket silence and checks every **4 s**, so noticing takes 8-12 s
+  before the socket is rebuilt (10 s connect timeout). That explains the
+  *length*, not the *cause*.
+- There are two separate `io()` sockets (`socketClient.ts`,
+  `useRoverTelemetry.ts`), with `forceNew`, `multiplex:false`,
+  `reconnection:false`, `transports:[websocket,polling]`.
+- The backend broadcaster builds its payloads **synchronously on the ASGI
+  event loop** (`realtime.py` `_broadcast_loop`). That loop shares the GIL with
+  the ROS executor in the same process (backend ~70% CPU).
+
+**Candidate causes to separate:** (a) backend event-loop stall, (b) tablet
+JS-thread block, (c) Wi-Fi or a fallback to HTTP long-polling.
+
+**Instrumentation ready (committed and pushed, NOT deployed, off by default):**
+- Backend `4607182`. Set `DYX_REALTIME_METRICS=1` in
+  `src/rover_backend/config/backend.env`, then restart. This gives one
+  per-second summary (`realtime metrics {...}`), including `event_loop_lag`
+  and `socket_transports`, and the warning `realtime event loop stalled N ms`.
+  The connect log now shows `transport=`.
+- App `4a42c46`. Build with `EXPO_PUBLIC_TELEMETRY_DIAG=1` and read
+  `adb logcat | grep GCS-Telemetry`. It logs packet gaps >= 1.5 s, watchdog
+  reconnects, connect/upgrade, and JS lag >= 500 ms.
+- Wi-Fi: during the test run `ping -i 1 <tablet-ip>` and
+  `iw dev wlP1p1s0 station dump` on the Jetson.
+
+**Procedure:**
+1. Deploy both.
+2. Run a normal session until a stall happens.
+3. Line up the timestamps. A loop-lag spike means backend; JS lag with the
+   backend still emitting means app; ping loss or `polling` transport means
+   network.
+4. Then optimise the side that's proven, including the watchdog (8 s silence
+   -> about 3 s) once the cause is known.
+
+Turn `DYX_REALTIME_METRICS` back off afterwards.
 
 ## 1. Shipped on 2026-09-30
 
