@@ -634,6 +634,15 @@ class MissionManager(Node):
         )
         self.create_service(
             Trigger,
+            "/mission_manager/pause_battery",
+            self._acknowledged_trigger(
+                "pause_battery",
+                self._pause_battery_service,
+            ),
+            callback_group=self._mission_service_group,
+        )
+        self.create_service(
+            Trigger,
             "/mission_manager/resume",
             self._acknowledged_trigger("resume", self._resume_service),
             callback_group=self._mission_service_group,
@@ -3381,6 +3390,36 @@ class MissionManager(Node):
             self._publish_status(force=True)
         response.success = True
         response.message = "Mission paused"
+        return response
+
+    def _pause_battery_service(
+        self, _request: Trigger.Request, response: Trigger.Response
+    ) -> Trigger.Response:
+        with self._lock:
+            if self._state != "RUNNING":
+                response.success = False
+                response.message = (
+                    "Battery pause ignored because mission is not RUNNING"
+                )
+                return response
+
+            self._pause_reason = "BATTERY_CRITICAL"
+            self._resume_available = True
+            self._state = "PAUSED"
+            self._reset_point_timers()
+            self._disable_motion_preserve_estop()
+            self._last_message = (
+                "Mission paused by critical battery; progress preserved"
+            )
+            self._emit_system_event(
+                "BATTERY_CRITICAL_PAUSE",
+                self._last_message,
+            )
+            self._publish_goal()
+            self._publish_status(force=True)
+
+        response.success = True
+        response.message = self._last_message
         return response
 
     def _resume_service(

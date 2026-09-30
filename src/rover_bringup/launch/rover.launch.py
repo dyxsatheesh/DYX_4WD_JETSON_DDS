@@ -162,6 +162,10 @@ def generate_launch_description() -> LaunchDescription:
                         # default on this link measured 28-30 Hz. Not stored
                         # on the FCU; 0 leaves PX4's default.
                         "local_position_rate_hz": 50.0,
+                        # /mavros/battery is produced from BATTERY_STATUS.
+                        # 2 Hz gives ~10 fresh samples across the 5 s backend
+                        # critical-voltage confirmation window.
+                        "battery_status_rate_hz": 2.0,
                     }
                 ],
             ),

@@ -19,6 +19,7 @@ import math
 from typing import Callable
 
 MAVLINK_MSG_ID_LOCAL_POSITION_NED = 32
+MAVLINK_MSG_ID_BATTERY_STATUS = 147
 
 
 class StreamRateRequester:

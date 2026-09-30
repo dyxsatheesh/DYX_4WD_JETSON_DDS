@@ -63,6 +63,7 @@ from jetson_4wd_control.bridge_stats import BridgeStreamStats
 from jetson_4wd_control.obstacle_gate import obstacle_blocks_motion
 
 from jetson_4wd_control.mavlink_stream_rate import (
+    MAVLINK_MSG_ID_BATTERY_STATUS,
     MAVLINK_MSG_ID_LOCAL_POSITION_NED,
     StreamRateRequester,
 )
@@ -125,9 +126,10 @@ class CmdVelBridge(Node):
         # PX4 RO_YAW_RATE_LIM remains the final FCU hard ceiling.
         self.declare_parameter("maximum_yaw_rate_radps", 0.45)
 
-        # PX4 LOCAL_POSITION_NED rate requested on each MAVROS connection.
+        # PX4 stream rates requested on each MAVROS connection.
         # 0 leaves PX4's default stream rate untouched.
         self.declare_parameter("local_position_rate_hz", 0.0)
+        self.declare_parameter("battery_status_rate_hz", 0.0)
 
         self.command_timeout_sec = float(
             self.get_parameter("command_timeout_sec").value
@@ -300,7 +302,21 @@ class CmdVelBridge(Node):
             message_id=MAVLINK_MSG_ID_LOCAL_POSITION_NED,
             rate_hz=float(self.get_parameter("local_position_rate_hz").value),
             retry_sec=self.STREAM_RATE_RETRY_SEC,
-            send=self._send_message_interval,
+            send=lambda message_id, rate_hz: self._send_message_interval(
+                self.local_position_rate,
+                message_id,
+                rate_hz,
+            ),
+        )
+        self.battery_status_rate = StreamRateRequester(
+            message_id=MAVLINK_MSG_ID_BATTERY_STATUS,
+            rate_hz=float(self.get_parameter("battery_status_rate_hz").value),
+            retry_sec=self.STREAM_RATE_RETRY_SEC,
+            send=lambda message_id, rate_hz: self._send_message_interval(
+                self.battery_status_rate,
+                message_id,
+                rate_hz,
+            ),
         )
 
         self._publish_heartbeat_health(False, force=True)
@@ -475,17 +491,30 @@ class CmdVelBridge(Node):
         self.connected = bool(message.connected)
         self.armed = bool(message.armed)
         self.mode = str(message.mode).strip().upper()
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        service_ready = self._message_interval_client.service_is_ready()
+
         self.local_position_rate.on_state(
             self.connected,
-            self._message_interval_client.service_is_ready(),
-            self.get_clock().now().nanoseconds / 1e9,
+            service_ready,
+            now_sec,
+        )
+        self.battery_status_rate.on_state(
+            self.connected,
+            service_ready,
+            now_sec,
         )
 
-    def _send_message_interval(self, message_id: int, rate_hz: float) -> bool:
+    def _send_message_interval(
+        self,
+        requester: StreamRateRequester,
+        message_id: int,
+        rate_hz: float,
+    ) -> bool:
         request = MessageInterval.Request()
         request.message_id = int(message_id)
         request.message_rate = float(rate_hz)
-        epoch = self.local_position_rate.connection_epoch
+        epoch = requester.connection_epoch
         future = self._message_interval_client.call_async(request)
 
         def _done(done_future) -> None:
@@ -496,7 +525,7 @@ class CmdVelBridge(Node):
                     f"set_message_interval id={message_id} failed: {error}"
                 )
                 success = False
-            self.local_position_rate.on_response(success, epoch)
+            requester.on_response(success, epoch)
             log = self.get_logger().info if success else self.get_logger().warn
             log(
                 f"PX4 message {message_id} rate {rate_hz:.1f} Hz "

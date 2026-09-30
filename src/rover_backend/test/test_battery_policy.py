@@ -1,14 +1,15 @@
 from pathlib import Path
 
-import pytest
-
+from rover_backend.battery_policy import BATTERY_CRITICAL_DEBOUNCE_SEC
 from rover_backend.battery_policy import BATTERY_CRITICAL_PERCENT
-from rover_backend.battery_policy import BatteryLockoutFilter
 from rover_backend.battery_policy import BATTERY_CRITICAL_VOLTAGE_V
 from rover_backend.battery_policy import BATTERY_FULL_VOLTAGE_V
+from rover_backend.battery_policy import BATTERY_PRECRITICAL_PERCENT
+from rover_backend.battery_policy import BatteryCriticalDebounce
 from rover_backend.battery_policy import battery_mission_locked
 from rover_backend.battery_policy import battery_percentage_from_voltage
 from rover_backend.battery_policy import classify_battery_percentage
+from rover_backend.battery_policy import debounced_battery_percentage
 from rover_backend.battery_policy import normalize_battery_percentage
 
 
@@ -23,6 +24,54 @@ def test_voltage_maps_to_smooth_whole_percentage():
     assert battery_percentage_from_voltage(24.50) == 33
     assert battery_percentage_from_voltage(24.00) == 17
     assert battery_percentage_from_voltage(23.80) == 10
+
+
+def test_exact_five_second_critical_confirmation():
+    assert BATTERY_CRITICAL_DEBOUNCE_SEC == 5.0
+    debounce = BatteryCriticalDebounce()
+
+    # 2 Hz stream: 0.5-second samples across the five-second window.
+    for step in range(10):
+        assert debounce.observe(23.80, step * 0.5) is False
+
+    assert debounce.observe(23.80, 5.0) is True
+
+
+def test_pending_critical_stays_eleven_percent_low():
+    raw = battery_percentage_from_voltage(23.80)
+    assert raw == 10
+    assert BATTERY_PRECRITICAL_PERCENT == 11
+    assert debounced_battery_percentage(
+        raw,
+        critical_confirmed=False,
+    ) == 11
+    assert classify_battery_percentage(11) == "LOW"
+
+
+def test_recovery_above_23_8_cancels_pending_or_confirmed():
+    debounce = BatteryCriticalDebounce()
+
+    debounce.observe(23.70, 0.0)
+    debounce.observe(23.70, 0.5)
+    assert debounce.pending is True
+    assert debounce.observe(23.81, 2.0) is False
+    assert debounce.pending is False
+
+    for step in range(11):
+        debounce.observe(23.70, 10.0 + step * 0.5)
+
+    assert debounce.confirmed is True
+    assert debounce.observe(23.81, 15.1) is False
+    assert debounce.confirmed is False
+
+
+def test_stale_low_stream_does_not_complete_five_seconds():
+    debounce = BatteryCriticalDebounce()
+    debounce.observe(23.70, 0.0)
+    debounce.observe(23.70, 0.5)
+
+    assert debounce.confirm_if_due(5.0) is False
+    assert debounce.pending is False
 
 
 def test_whole_percentage_preserves_exact_voltage_endpoints():
@@ -65,66 +114,7 @@ def test_legacy_percentage_normalization_remains_available():
     assert normalize_battery_percentage(101.0) is None
 
 
-# ---------------------------------------------------------------- lockout filter
-
-
-def _feed(lockout, samples, *, start=0.0, step=3.0):
-    """Feed (voltage) samples ~3 s apart (the measured /mavros/battery rate)."""
-    t = start
-    states = []
-    for voltage in samples:
-        states.append(lockout.update(voltage, t))
-        t += step
-    return states, t
-
-
-def test_single_sag_sample_does_not_lock():
-    lockout = BatteryLockoutFilter()
-    states, _ = _feed(lockout, [23.5, 25.8, 23.6, 25.9])
-    assert states == [False, False, False, False]
-
-
-def test_sustained_critical_voltage_locks_after_confirmation():
-    lockout = BatteryLockoutFilter()
-    states, _ = _feed(lockout, [23.7, 23.7, 23.7, 23.7])
-    # 3 samples span 6 s < 8 s; the 4th (9 s) confirms.
-    assert states == [False, False, False, True]
-
-
-def test_confirmation_needs_both_samples_and_time():
-    lockout = BatteryLockoutFilter()
-    states, _ = _feed(lockout, [23.7] * 5, step=0.5)      # fast samples, 2 s
-    assert not any(states)
-    states, _ = _feed(lockout, [23.7], start=8.5)
-    assert states == [True]
-
-
-def test_invalid_sample_breaks_the_streak_and_keeps_the_lock():
-    lockout = BatteryLockoutFilter()
-    states, _ = _feed(lockout, [23.7, 23.7, None, 23.7, 23.7])
-    assert not any(states)
-    lockout.locked = True
-    assert lockout.update(float("nan"), 100.0) is True
-
-
-def test_unlock_needs_recovered_voltage_confirmed():
-    lockout = BatteryLockoutFilter()
-    _feed(lockout, [23.7] * 4)
-    assert lockout.locked
-    # 24.0 V is above critical but inside the hysteresis band: stays locked.
-    states, _ = _feed(lockout, [24.0, 24.1, 24.0], start=20.0)
-    assert states == [True, True, True]
-    # One recovered sample is not enough; two in a row unlock.
-    states, _ = _feed(lockout, [26.2, 24.0, 26.2, 26.3], start=40.0)
-    assert states == [True, True, True, False]
-
-
-def test_filter_rejects_inverted_thresholds():
-    with pytest.raises(ValueError):
-        BatteryLockoutFilter(critical_voltage_v=24.0, unlock_voltage_v=23.9)
-
-
-def test_critical_battery_pauses_instead_of_stopping():
+def test_critical_battery_uses_dedicated_battery_pause():
     source = (
         Path(__file__).resolve().parents[1] / "rover_backend" / "ros_bridge.py"
     ).read_text()
@@ -132,15 +122,5 @@ def test_critical_battery_pauses_instead_of_stopping():
         source.index("def _critical_battery_stop_worker"):
         source.index("def _schedule_critical_battery_stop")
     ]
-    assert "ros_bridge.pause_mission()" in worker
+    assert "ros_bridge.pause_battery_mission()" in worker
     assert "stop_mission()" not in worker
-    schedule = source[
-        source.index("def _schedule_critical_battery_stop"):
-        source.index("def _battery_callback")
-    ]
-    assert 'if mission_state != "RUNNING":' in schedule
-    callback = source[
-        source.index("def _battery_callback"):
-        source.index("def _rtk_health_callback")
-    ]
-    assert "self._battery_lockout.update(" in callback

@@ -61,9 +61,11 @@ from mission_manager_interfaces.srv import RestoreMissionRuntime
 from std_srvs.srv import SetBool
 from std_srvs.srv import Trigger
 
-from rover_backend.battery_policy import BatteryLockoutFilter
+from rover_backend.battery_policy import BATTERY_CRITICAL_PERCENT
+from rover_backend.battery_policy import BatteryCriticalDebounce
 from rover_backend.battery_policy import battery_percentage_from_voltage
 from rover_backend.battery_policy import classify_battery_percentage
+from rover_backend.battery_policy import debounced_battery_percentage
 from rover_backend.config import settings
 from rover_backend.voice import voice_announcer
 from rover_backend.realtime_contract import build_point_result_event
@@ -154,6 +156,7 @@ GPS_FIX_NAMES: dict[int, str] = {
 MISSION_MANAGER_COMMANDS = {
     "start",
     "pause",
+    "pause_battery",
     "resume",
     "next_point",
     "skip_point",
@@ -437,6 +440,7 @@ class RoverBackendRosNode(Node):
         # STOP can include DISARM service discovery/response and confirmation.
         "stop": 20.0,
         "pause": 8.0,
+        "pause_battery": 8.0,
         "skip_point": 8.0,
         "clear": 8.0,
         # Keep hard-stop acknowledgement latency bounded independently of
@@ -502,13 +506,16 @@ class RoverBackendRosNode(Node):
         self._terminal_cleanup_lock = threading.Lock()
         self._terminal_cleanup_keys: set[str] = set()
 
-        # Battery-critical PAUSE is dispatched outside the BatteryState callback
-        # so the ROS executor thread is never blocked waiting on Mission Manager.
+        # Battery criticality is backend-owned. <=23.80 V remains LOW/11%
+        # during the exact 5.0 s confirmation window, then becomes CRITICAL/10%.
+        self._battery_debounce_lock = threading.Lock()
+        self._battery_critical_debounce = BatteryCriticalDebounce()
+        self._battery_critical_timer: threading.Timer | None = None
+
+        # Telemetry keeps the legacy "critical_stop_*" field names for tablet
+        # compatibility, but the mission action is PAUSE and preserves progress.
         self._battery_stop_lock = threading.Lock()
         self._battery_stop_in_progress = False
-        # Lockout is confirmed over several samples and unlocks with
-        # hysteresis; one sag sample under load must not pause a mission.
-        self._battery_lockout = BatteryLockoutFilter()
 
         # The backend always starts safe.
         self._mission_enable = False
@@ -2130,26 +2137,83 @@ class RoverBackendRosNode(Node):
             "Timed out waiting for obstacle_monitor to acknowledge the configuration"
         )
 
+    def _cancel_battery_critical_timer_locked(self) -> None:
+        timer = self._battery_critical_timer
+        self._battery_critical_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _ensure_battery_critical_timer_locked(
+        self,
+        now_sec: float,
+    ) -> None:
+        if (
+            not self._battery_critical_debounce.pending
+            or self._battery_critical_timer is not None
+        ):
+            return
+
+        remaining = self._battery_critical_debounce.remaining_sec(now_sec)
+        if remaining is None:
+            return
+
+        timer = threading.Timer(
+            max(0.01, remaining),
+            self._battery_critical_debounce_expired,
+        )
+        timer.daemon = True
+        self._battery_critical_timer = timer
+        timer.start()
+
+    def _battery_critical_debounce_expired(self) -> None:
+        with self._battery_debounce_lock:
+            self._battery_critical_timer = None
+            confirmed = self._battery_critical_debounce.confirm_if_due(
+                time.monotonic()
+            )
+
+        if not confirmed:
+            return
+
+        percentage = BATTERY_CRITICAL_PERCENT
+        voice_announcer.on_battery_percent(percentage)
+        rover_state.update(
+            "battery",
+            remaining_percent=percentage,
+            status="CRITICAL",
+            mission_lockout=True,
+            mission_lockout_reason="BATTERY_CRITICAL",
+        )
+        _notify_authoritative_state_changed()
+        self._schedule_critical_battery_stop(percentage)
+
+    def _shutdown_battery_debounce(self) -> None:
+        with self._battery_debounce_lock:
+            self._cancel_battery_critical_timer_locked()
+
     def _critical_battery_stop_worker(
         self,
         percentage: float,
     ) -> None:
-        """PAUSE a RUNNING mission after a confirmed critical battery.
-
-        PAUSE, not STOP: progress is preserved so the operator can change the
-        battery and Resume (docs/DYX_Mission_Power_Cycle_Recovery_Logic.md,
-        "Battery Critical Case"). RESUME/NEXT stay refused by the lockout.
-        The telemetry field names keep "stop" for tablet compatibility.
-        """
+        """PAUSE a RUNNING mission after five-second critical confirmation."""
 
         error_text: str | None = None
 
         try:
+            battery = rover_state.section("battery")
+            mission = rover_state.section("mission")
+
+            if not bool(battery.get("mission_lockout", False)):
+                return
+            if str(mission.get("state") or "").strip().upper() != "RUNNING":
+                return
+
             LOGGER.error(
-                "Battery critical at %.1f%% (confirmed); requesting Mission Manager PAUSE",
+                "Battery critical at %.1f%% after 5.0 s; "
+                "requesting Mission Manager battery PAUSE",
                 percentage,
             )
-            ros_bridge.pause_mission()
+            ros_bridge.pause_battery_mission()
         except Exception as error:
             error_text = str(error)
             LOGGER.exception(
@@ -2169,15 +2233,10 @@ class RoverBackendRosNode(Node):
         self,
         percentage: float,
     ) -> None:
-        """Request one non-blocking PAUSE only while the mission is RUNNING.
+        """Dispatch one non-blocking battery PAUSE for a RUNNING mission."""
 
-        PAUSED and WAITING_FOR_NEXT are already stationary, and the lockout
-        refuses START/RESUME/NEXT/SKIP, so only RUNNING needs an action.
-        """
-
-        mission = rover_state.section("mission")
         mission_state = str(
-            mission.get("state") or "EMPTY"
+            rover_state.section("mission").get("state") or "EMPTY"
         ).strip().upper()
 
         if mission_state != "RUNNING":
@@ -2198,7 +2257,7 @@ class RoverBackendRosNode(Node):
         threading.Thread(
             target=self._critical_battery_stop_worker,
             args=(percentage,),
-            name="battery-critical-mission-stop",
+            name="battery-critical-mission-pause",
             daemon=True,
         ).start()
 
@@ -2209,11 +2268,26 @@ class RoverBackendRosNode(Node):
         self._mark_ros_message()
 
         voltage_v = _finite_float(message.voltage)
-        percentage = battery_percentage_from_voltage(voltage_v)
-        remaining_status = classify_battery_percentage(percentage)
-        mission_lockout = self._battery_lockout.update(
-            voltage_v, time.monotonic()
+        raw_percentage = battery_percentage_from_voltage(voltage_v)
+        now_sec = time.monotonic()
+
+        with self._battery_debounce_lock:
+            critical_confirmed = self._battery_critical_debounce.observe(
+                voltage_v,
+                now_sec,
+            )
+
+            if self._battery_critical_debounce.pending:
+                self._ensure_battery_critical_timer_locked(now_sec)
+            else:
+                self._cancel_battery_critical_timer_locked()
+
+        percentage = debounced_battery_percentage(
+            raw_percentage,
+            critical_confirmed=critical_confirmed,
         )
+        remaining_status = classify_battery_percentage(percentage)
+        mission_lockout = bool(critical_confirmed)
 
         voice_announcer.on_battery_percent(percentage)
 
@@ -4526,6 +4600,9 @@ class RoverBackendRosNode(Node):
         # safety-gate logic is allowed here. mission_manager owns all of it.
         return self._proxy_manager_operation("start")
 
+    def pause_battery_mission(self) -> dict[str, Any]:
+        return self._proxy_manager_operation("pause_battery")
+
     def pause_mission(self) -> dict[str, Any]:
         return self._proxy_manager_operation("pause")
 
@@ -4776,6 +4853,12 @@ class RosBridgeRuntime:
 
         if node is not None:
             try:
+                node._shutdown_battery_debounce()
+            except Exception:
+                LOGGER.exception("Battery debounce timer shutdown failed")
+
+        if node is not None:
+            try:
                 node.destroy_node()
             except Exception:
                 LOGGER.exception("ROS node destruction failed")
@@ -4915,6 +4998,10 @@ class RosBridgeRuntime:
     def start_mission(self) -> dict[str, Any]:
         with self._operation_lock:
             return self.node.start_mission()
+
+    def pause_battery_mission(self) -> dict[str, Any]:
+        with self._operation_lock:
+            return self.node.pause_battery_mission()
 
     def pause_mission(self) -> dict[str, Any]:
         with self._operation_lock:
