@@ -242,7 +242,8 @@ achieves a real stop.
   on the **next node restart, no `colcon build` needed** — unless
   `setup.py` (entry points) or `package.xml` (deps) changed.
 - **`mission_manager_interfaces` is the one `ament_cmake` package**
-  (generates `ReleaseEmergencyStop.srv`). A change to that `.srv` genuinely
+  (generates `ReleaseEmergencyStop.srv` and, since 2026-09-30,
+  `RestoreMissionRuntime.srv`). A change to that `.srv` genuinely
   needs `colcon build --packages-select mission_manager_interfaces`, plus a
   rebuild/restart of every consumer (`mission_manager`, `rover_backend`) —
   this is the one real exception to the symlink-install shortcut above.
@@ -1197,6 +1198,66 @@ and publishes `/obstacle/status`. Contract:
 Full contract: **`docs/OBSTACLE_DETECTION.md`**. Driving *around* obstacles is
 the next feature and is not implemented.
 
+## 2026-09-30 — realtime events, battery critical pause, power-cycle recovery
+
+Branch `latency-hardening` (= `main` at `3ee0070`; `bb6be0c` adds SHARINI's
+recovery + battery rework and is **not yet on `main`**). **Nothing below is
+field-tested.** Deployed on the Jetson as of 14:49 IST: `3ee0070` only.
+`bb6be0c` needs `git pull` +
+`colcon build --packages-select mission_manager_interfaces mission_manager rover_backend jetson_4wd_control`
++ restart (new `.srv`).
+
+- **`rtk_status` socket event** (`a21e6e2`). This is the GET `/api/rtk/status`
+  body, emitted every 1 s, at once after any RTK profile/source/START/STOP
+  mutation, and on connect. Built off the event loop.
+- **`system_event` socket event** (`3ee0070`, `system_event@1`).
+  - mission_manager's `_emit_system_event` publishes on
+    `/mission_manager/point_event` **without a `point_id`**. Examples: OBSTACLE_*,
+    RTK_FLOAT/PAUSED/RECOVERED, ODOM_PAUSED, ESTOP_*, MISSION_*,
+    BATTERY_CRITICAL_PAUSE, MISSION_RECOVERED, SPRAY_*_MONITOR_ONLY.
+  - Before this, ros_bridge only spoke them (voice).
+  - They now share the ordered point-event queue with `event_kind: "SYSTEM"`.
+- **Battery critical** (SHARINI `ef14c9a` supersedes my `3ee0070` filter):
+  - `BatteryCriticalDebounce`: ≤ 23.80 V held for 5 s, with samples no older than 1.5 s.
+  - The action is **PAUSE** via `/mission_manager/pause_battery`
+    (`pause_reason = BATTERY_CRITICAL`), not STOP.
+  - START/RESUME/NEXT/SKIP return 409 `BATTERY_CRITICAL_LOCKOUT`.
+  - `cmd_vel_bridge` requests MAVLink `BATTERY_STATUS` (147) at 2 Hz
+    (`battery_status_rate_hz`); before this, `/mavros/battery` was ~0.3-0.44 Hz.
+  - ⚠ **If the 2 Hz request does not take effect, the freshness check means a
+    critical battery never pauses.** Verify `ros2 topic hz /mavros/battery` ≈ 2
+    after deploying.
+  - ⚠ There is no unlock hysteresis: one sample > 23.80 V clears the lockout,
+    and the pack recovers at rest.
+- **Power-cycle recovery** (SHARINI `b6eb272`):
+  - `/mission_manager/restore_runtime` (`RestoreMissionRuntime.srv`, runtime JSON)
+    restores an unfinished mission to PAUSED with
+    `pause_reason = POWER_CYCLE_RECOVERY`.
+  - The checkpoint is `<runtime_dir>/mission_recovery.json`
+    (`settings.mission_recovery_file`), deleted on STOP/CLEAR.
+  - Plans: `docs/DYX_Mission_Power_Cycle_Recovery_Logic.md` (SHARINI) and
+    `docs/DYX_Persistent_Memory_And_Recovery_Plan.md`.
+  - `trajectory_generator`'s `path_signature` hashes **local x/y**, so it changes
+    every reboot. Never use it as mission identity across a reboot; use the CSV
+    SHA-256.
+  - Operator decision: do not raise RTK re-fix offset as a recovery concern.
+- **Obstacle monitor fixes** (`3fbc789`):
+  - Serial reads block for 1 byte, then drain `in_waiting`.
+    `read(64)` had waited the 0.1 s timeout on every frame.
+  - Interference frames (0xFFFE) no longer count as sensor health.
+  - A reading ≤ `immediate_danger_mm` (800) or the blind zone confirms danger on
+    the first frame.
+  - `cmd_vel_bridge` sends zero on the danger message itself.
+- **RTK / NTRIP facts** (active profile, 2026-09-30):
+  - Emlid caster `caster.emlid.com:2101`, mountpoint `MP23960`,
+    **GGA disabled**, `direct_inject` to Septentrio USB2.
+  - "NTRIP caster connected successfully" followed by `socket_bytes=0` and
+    "No first CRC-valid RTCM frame" means the **base feeding the mountpoint is
+    not streaming**. It is not a rover fault, and not a missing GGA.
+  - When streaming, the rate is ~600 B/s, with 0 CRC errors.
+- **Tablet side:** `realtime-hardening` @ `09b3d3a` has all of the above. The
+  release APK was built 2026-09-30 from that commit.
+
 ## Repo status (2026-08-31)
 
 - **`WORKING_STATUS_24_06_2026.txt`** — stale (2026-06-24), architecture it
@@ -1227,13 +1288,44 @@ the next feature and is not implemented.
 
 The verified 4WD GCS frontend is
 `/Users/dyx_a1/Vetri/temp/DYX_GCS_Frontend` (package `dyx-gcs-mobile`,
-Expo/React Native). It is configured for this rover at
-`192.168.3.101:5001`; `src/config.ts` uses
-`http://192.168.3.101:5001` and `ws://192.168.3.101:5001` as the default
-HTTP and Socket.IO backend URLs. The backend is this `rover_ws` workspace,
-under `src/rover_backend` (the backend package under `src/`), not the
-separate `/Users/dyx_a1/Vetri/4WD_SERVER` repository. Treat this frontend,
-this rover IP, and this workspace backend as the verified 4WD stack.
+app id `com.dyxgcs.mobile`, Expo 54 / React Native 0.81). The working branch
+is `realtime-hardening`, and `main` is fast-forwarded to it. The rover is
+`192.168.3.101:5001`. The backend is this `rover_ws` workspace, under
+`src/rover_backend`, not the separate `/Users/dyx_a1/Vetri/4WD_SERVER`
+repository.
+
+- **How the app finds the rover** (corrected 2026-09-30): `src/config.ts` has
+  **no hard-coded rover IP**. The address comes from:
+  1. the saved selection (`utils/backendStorage.ts`, port default 5001);
+  2. beacon discovery (`utils/autoConnect.ts` + `services/beaconListener`,
+     backend `DYX_BEACON_*`);
+  3. manual entry.
+
+  `EXPO_PUBLIC_ROS_HTTP_BASE` / `EXPO_PUBLIC_ROS_WS_URL` in `.env` are not read
+  by `src/`. They were `192.168.1.101` (old router) and are now corrected to
+  `.3.101`, but changing them does nothing.
+- **Socket events the tablet consumes** from this backend:
+  - `telemetry` (incl. `battery_*`, `obstacle`)
+  - `mission_status`
+  - `point_*`
+  - `trajectory_path`
+  - `rtk_status` (2026-09-30; REST `/api/rtk/status` is only a fallback)
+  - `system_event` (2026-09-30; toast in `SystemEventNotice`)
+  - recovery fields in mission status (`MissionRecoveryNotice`, SHARINI)
+- **Release APK (local, verified 2026-09-30):**
+  - `android/` is generated by `expo prebuild` and gitignored.
+  - Release signing reads `DYX_RELEASE_STORE_FILE/_STORE_PASSWORD/_KEY_ALIAS/_KEY_PASSWORD`
+    from `~/.gradle/gradle.properties`; the build **fails** without them. It never
+    falls back to the debug key.
+  - Always `npm ci` first. `node_modules` drifted from the lockfile once
+    (axios 1.18.1 vs 1.20.0).
+  - Then `cd android && ANDROID_HOME=~/Library/Android/sdk ./gradlew assembleRelease`
+    → `android/app/build/outputs/apk/release/app-release.apk` (~72 MB).
+  - Verify the signer with `apksigner verify --print-certs`. The release certificate
+    is `CN=Vetrivelan Velmurugan, OU=DYX_GCS`, SHA-256 `5eaacb96…4c9a`.
+  - The version is still 1.0.0 / versionCode 1, so bump `app.json` if tablets must
+    see an upgrade.
+  - Install with `adb install -r`.
 
 ## Hard rules
 
