@@ -61,8 +61,8 @@ from std_srvs.srv import SetBool
 from std_srvs.srv import Trigger
 
 from rover_backend.battery_policy import battery_mission_locked
+from rover_backend.battery_policy import battery_percentage_from_voltage
 from rover_backend.battery_policy import classify_battery_percentage
-from rover_backend.battery_policy import normalize_battery_percentage
 from rover_backend.config import settings
 from rover_backend.voice import voice_announcer
 from rover_backend.realtime_contract import build_point_result_event
@@ -2190,8 +2190,8 @@ class RoverBackendRosNode(Node):
     ) -> None:
         self._mark_ros_message()
 
-        raw_percentage = _finite_float(message.percentage)
-        percentage = normalize_battery_percentage(raw_percentage)
+        voltage_v = _finite_float(message.voltage)
+        percentage = battery_percentage_from_voltage(voltage_v)
         remaining_status = classify_battery_percentage(percentage)
         mission_lockout = battery_mission_locked(percentage)
 
@@ -2199,7 +2199,7 @@ class RoverBackendRosNode(Node):
 
         rover_state.update(
             "battery",
-            voltage_v=_finite_float(message.voltage),
+            voltage_v=voltage_v,
             current_a=_finite_float(message.current),
             remaining_percent=percentage,
             temperature_c=_finite_float(message.temperature),
