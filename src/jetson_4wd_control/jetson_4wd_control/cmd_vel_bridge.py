@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import Any, Optional
 
 import rclpy
 from geometry_msgs.msg import Vector3Stamped
@@ -517,9 +517,16 @@ class CmdVelBridge(Node):
             payload = json.loads(message.data)
         except Exception:
             return
-        if isinstance(payload, dict):
-            self.obstacle_status = payload
-            self.latest_obstacle_time = self.get_clock().now()
+        if not isinstance(payload, dict):
+            return
+        was_blocking = obstacle_blocks_motion(
+            self.obstacle_status, self._age_seconds(self.latest_obstacle_time)
+        )
+        self.obstacle_status = payload
+        self.latest_obstacle_time = self.get_clock().now()
+        # Send zero on the danger message itself, not on the next check tick.
+        if not was_blocking and obstacle_blocks_motion(payload, 0.0):
+            self._evaluate_and_publish(from_timer=False, source="gate_change")
 
     def _heartbeat_callback(self, message: UInt64) -> None:
         self.latest_backend_heartbeat_time = self.get_clock().now()
@@ -597,7 +604,9 @@ class CmdVelBridge(Node):
         """50 Hz timer: safety-gate evaluation and keep-alive."""
         self._evaluate_and_publish(from_timer=True)
 
-    def _evaluate_and_publish(self, *, from_timer: bool) -> None:
+    def _evaluate_and_publish(
+        self, *, from_timer: bool, source: Optional[str] = None
+    ) -> None:
         loop_time = self.get_clock().now()
         if from_timer and self._previous_loop_time is not None:
             interval = (
@@ -684,12 +693,13 @@ class CmdVelBridge(Node):
             self.latest_yaw_valid = False
             self.latest_command_time = None
 
-        if not from_timer:
-            source = "rpp"
-        elif reason != self._last_published_reason:
-            source = "gate_change"
-        else:
-            source = "keepalive"
+        if source is None:
+            if not from_timer:
+                source = "rpp"
+            elif reason != self._last_published_reason:
+                source = "gate_change"
+            else:
+                source = "keepalive"
 
         self._publish_local_velocity(
             north,

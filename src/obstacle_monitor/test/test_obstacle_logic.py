@@ -106,12 +106,51 @@ def test_no_echo_is_clear_and_blind_zone_is_danger():
     assert feed(tracker, [0xFFFD] * 3)[0] == [ZONE_CLEAR]
 
 
-def test_interference_keeps_sensor_alive_but_does_not_change_zone():
+def test_interference_does_not_change_zone_or_keep_sensor_alive():
+    tracker = ZoneTracker(ZoneConfig(health_timeout_sec=0.5))
+    _, t = feed(tracker, [4000] * 3)
+    assert tracker.zone(t) == ZONE_CLEAR
+    # A sensor that reports only interference is blind: it must go unknown,
+    # not stay "clear" on its last real reading.
+    changes, t = feed(tracker, [0xFFFE] * 10, start=t)
+    assert changes == [] and tracker.confirmed_zone == ZONE_CLEAR
+    assert tracker.interference == 10
+    assert not tracker.healthy(t)
+    assert tracker.zone(t) == ZONE_UNKNOWN
+
+
+def test_interference_between_readings_does_not_break_health():
+    tracker = ZoneTracker(ZoneConfig(health_timeout_sec=0.5))
+    _, t = feed(tracker, [4000, 0xFFFE, 4000, 0xFFFE, 4000, 0xFFFE])
+    assert tracker.healthy(t) and tracker.zone(t) == ZONE_CLEAR
+
+
+def test_close_reading_confirms_danger_on_first_frame():
+    tracker = ZoneTracker(ZoneConfig(danger_mm=1500, immediate_danger_mm=800))
+    assert feed(tracker, [800])[0] == [ZONE_DANGER]
+
+
+def test_blind_zone_confirms_danger_on_first_frame():
     tracker = ZoneTracker(ZoneConfig())
-    feed(tracker, [1000] * 3)
-    changes, t = feed(tracker, [0xFFFE] * 5, start=1.0)
-    assert changes == [] and tracker.confirmed_zone == ZONE_DANGER
-    assert tracker.healthy(t)
+    assert feed(tracker, [0])[0] == [ZONE_DANGER]
+
+
+def test_danger_beyond_immediate_limit_still_needs_three_readings():
+    tracker = ZoneTracker(ZoneConfig(danger_mm=1500, immediate_danger_mm=800))
+    assert feed(tracker, [801, 1200])[0] == []
+    assert feed(tracker, [1200])[0] == [ZONE_DANGER]
+
+
+def test_immediate_limit_never_exceeds_danger_distance():
+    tracker = ZoneTracker(ZoneConfig(danger_mm=500, warning_mm=3000, immediate_danger_mm=800))
+    assert feed(tracker, [600])[0] == []               # warning, debounced
+
+
+def test_leaving_danger_stays_debounced_after_an_immediate_entry():
+    tracker = ZoneTracker(ZoneConfig(danger_mm=1500, immediate_danger_mm=800))
+    feed(tracker, [500])
+    assert feed(tracker, [4000] * 2)[0] == []
+    assert feed(tracker, [4000])[0] == [ZONE_CLEAR]
 
 
 def test_health_timeout_makes_zone_unknown():
@@ -242,6 +281,8 @@ def _reader_under_test(node, reads_per_open, clock, max_opens, monkeypatch):
             if len(opened) >= max_opens:
                 reader._stop.set()
 
+        in_waiting = 0
+
         def read(self, size):
             clock.t += 0.1  # each read blocks for the 0.1 s serial timeout
             return self._reads.pop(0) if self._reads else b""
@@ -304,6 +345,54 @@ def test_data_after_reopen_clears_the_silence_error(monkeypatch):
 
     assert frame(800) in received
     assert any("data resumed" in text for level, text in logs if level == "warn")
+
+
+def test_reader_returns_each_frame_without_waiting_for_the_timeout():
+    """One byte blocks, the rest of the frame comes from in_waiting at once."""
+    node = _node_module()
+    import threading
+
+    buffered = bytearray(frame(1234) + frame(900))
+    calls = []
+
+    class InstantSerial:
+        def __init__(self, port, baud, timeout):
+            pass
+
+        @property
+        def in_waiting(self):
+            return len(buffered)
+
+        def read(self, size):
+            calls.append(size)
+            if not buffered:
+                reader._stop.set()
+                return b""
+            chunk = bytes(buffered[:size])
+            del buffered[:size]
+            return chunk
+
+        def close(self):
+            pass
+
+    reader = node.ObstacleMonitorNode.__new__(node.ObstacleMonitorNode)
+    reader._lock = threading.Lock()
+    reader._settings = node.ObstacleSettings(port="/dev/fake", baud=115200)
+    reader._stop = threading.Event()
+    reader._reopen = threading.Event()
+    reader._serial_error = None
+    reader._port_open = False
+    received = []
+    reader._on_bytes = received.append
+    sys.modules["serial"] = types.SimpleNamespace(Serial=InstantSerial)
+    try:
+        reader._read_loop()
+    finally:
+        sys.modules.pop("serial", None)
+
+    assert b"".join(received) == frame(1234) + frame(900)
+    assert calls[:2] == [1, 7]      # block for 1 byte, then take the buffer
+    assert 64 not in calls
 
 
 def test_silence_threshold():

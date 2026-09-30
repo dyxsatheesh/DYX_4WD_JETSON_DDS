@@ -6,12 +6,20 @@ were stored but never used):
 - ``danger``  distance <= danger_mm            -> mission_manager pauses
 - ``warning`` danger_mm < distance <= warning_mm -> announcement only
 - ``clear``   farther, or no echo in range
-- ``unknown`` sensor unhealthy (no valid frame recently)
+- ``unknown`` sensor unhealthy (no usable reading recently)
 
 A zone becomes confirmed after ``debounce_count`` consecutive usable
-readings in it. Leaving *danger* additionally requires the distance to be
-beyond ``danger_mm + hysteresis_mm`` so an object at the boundary cannot make
-the state flicker. Pure logic; the node supplies readings and the clock.
+readings in it, except that a reading at or inside ``immediate_danger_mm``
+(or the blind zone) confirms *danger* at once: close in, the ~200 ms a
+three-reading debounce costs matters more than a nuisance pause. Leaving
+*danger* additionally requires the distance to be beyond
+``danger_mm + hysteresis_mm`` so an object at the boundary cannot make the
+state flicker.
+
+Interference frames carry no distance and do not count as the sensor being
+alive: a sensor that reports only interference is blind and goes ``unknown``
+after ``health_timeout_sec``. Pure logic; the node supplies readings and the
+clock.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ class ZoneConfig:
     debounce_count: int = 3
     hysteresis_mm: int = 200
     health_timeout_sec: float = 0.5
+    immediate_danger_mm: int = 800
 
     # A21 measuring range is roughly 0.25-7.5 m depending on the variant.
     MIN_DANGER_MM = 300
@@ -54,6 +63,8 @@ class ZoneConfig:
             raise ValueError("hysteresis_mm must be >= 0")
         if self.health_timeout_sec <= 0:
             raise ValueError("health_timeout_sec must be > 0")
+        if self.immediate_danger_mm < 0:
+            raise ValueError("immediate_danger_mm must be >= 0")
 
 
 class ZoneTracker:
@@ -64,6 +75,7 @@ class ZoneTracker:
         self.distance_mm: Optional[int] = None
         self.last_reading_at: Optional[float] = None
         self.readings = 0
+        self.interference = 0
         self._candidate = ZONE_CLEAR
         self._candidate_count = 0
 
@@ -90,9 +102,12 @@ class ZoneTracker:
 
     def update(self, reading: Reading, now: float) -> bool:
         """Apply one reading. Returns True when the confirmed zone changed."""
-        self.last_reading_at = now  # any valid frame proves the sensor alive
         if not reading.usable:
+            # Interference: no distance, so no evidence about the path. Only
+            # usable readings keep the sensor healthy.
+            self.interference += 1
             return False
+        self.last_reading_at = now
         self.readings += 1
         self.distance_mm = reading.distance_mm
         zone = self.raw_zone(reading)
@@ -101,10 +116,17 @@ class ZoneTracker:
         else:
             self._candidate = zone
             self._candidate_count = 1
-        if self._candidate_count >= self.config.debounce_count and zone != self.confirmed_zone:
+        needed = 1 if self._immediate_danger(reading) else self.config.debounce_count
+        if self._candidate_count >= needed and zone != self.confirmed_zone:
             self.confirmed_zone = zone
             return True
         return False
+
+    def _immediate_danger(self, reading: Reading) -> bool:
+        if reading.kind == KIND_BLIND_ZONE:
+            return True
+        limit = min(self.config.immediate_danger_mm, self.config.danger_mm)
+        return reading.distance_mm is not None and reading.distance_mm <= limit
 
     def healthy(self, now: float) -> bool:
         return (

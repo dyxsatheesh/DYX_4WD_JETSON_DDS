@@ -22,19 +22,29 @@ this.
 | **danger** ≤ 1.5 m | RUNNING mission → **PAUSED, reason `OBSTACLE`**. Motion off at once. Voice: "Obstacle. Mission paused." START / RESUME / NEXT are refused while danger persists. Resume is offered ("Path clear…") **only after the path clears**. It never auto-resumes. |
 | **warning** ≤ 3.0 m | Voice "Obstacle ahead, N centimetres" (while RUNNING, 10 s cooldown). No stop. |
 | clear | nothing |
-| **unknown** (no valid frame for 0.5 s) | **Warning only:** system event `OBSTACLE_SENSOR_LOST` and voice "Obstacle sensor lost" once during a mission. The mission **continues without obstacle protection**. |
+| **unknown** (no usable reading for 0.5 s) | **Warning only:** system event `OBSTACLE_SENSOR_LOST` and voice "Obstacle sensor lost" once during a mission. The mission **continues without obstacle protection**. |
 
 **Details:**
-- A zone is confirmed after **3 consecutive readings**. Leaving danger also
-  needs the object to be more than **200 mm** past the danger distance.
+- A zone is confirmed after **3 consecutive readings**, except that a
+  reading at or inside **0.8 m** (`immediate_danger_mm`), or the blind-zone
+  reading, confirms **danger on the first frame**. Leaving danger is always
+  debounced and also needs the object to be more than **200 mm** past the
+  danger distance.
 - The sensor's "no echo" reading means a clear path. The blind-zone reading
-  (0) counts as **danger**. Interference frames keep the sensor "alive" but
-  don't change the zone.
+  (0) counts as **danger**. Interference frames (`0xFFFE`) change nothing and
+  do **not** keep the sensor healthy: a sensor reporting only interference is
+  blind and goes `unknown` after 0.5 s. They are counted in
+  `interference_frames` in the status.
+- **Transport:** the reader blocks for one byte and then takes whatever is
+  buffered, so a frame is handled as soon as it arrives (it used to wait up to
+  0.1 s for a 64-byte read). A zone change is published at once, and
+  `cmd_vel_bridge` sends zero on the danger message itself rather than on its
+  next 100 Hz check.
 - **Active only while RUNNING.** At a point (`WAITING_FOR_NEXT`, e.g. the laser
   operator standing there) it doesn't pause, but NEXT is refused while someone
   is within the danger distance.
-- **Why 1.5 m:** at 1 m/s, debounce plus reaction is about 0.4 m, and braking
-  adds 0.3–0.5 m.
+- **Why 1.5 m:** at 1 m/s, debounce plus reaction is about 0.25 m (estimated
+  from code, ~10 Hz sensor; not yet measured), and braking adds 0.3–0.5 m.
 
 ## Architecture
 

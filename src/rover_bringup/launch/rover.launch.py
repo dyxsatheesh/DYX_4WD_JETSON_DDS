@@ -334,6 +334,9 @@ def generate_launch_description() -> LaunchDescription:
                         "debounce_count": 3,
                         "hysteresis_mm": 200,
                         "health_timeout_sec": 0.5,
+                        # A reading at or inside this confirms danger on the
+                        # first frame instead of waiting for 3.
+                        "immediate_danger_mm": 800,
                         "settings_path": (
                             "/home/flash/.ros/dyx_obstacle_settings.json"
                         ),

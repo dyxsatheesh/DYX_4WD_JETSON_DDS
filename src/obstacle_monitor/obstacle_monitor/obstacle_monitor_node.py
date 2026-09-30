@@ -166,6 +166,7 @@ class ObstacleMonitorNode(Node):
         self.declare_parameter("debounce_count", 3)
         self.declare_parameter("hysteresis_mm", 200)
         self.declare_parameter("health_timeout_sec", 0.5)
+        self.declare_parameter("immediate_danger_mm", 800)
         self.declare_parameter("settings_path", "~/.ros/dyx_obstacle_settings.json")
         self.declare_parameter("frame_id", "obstacle_front")
 
@@ -185,6 +186,7 @@ class ObstacleMonitorNode(Node):
             debounce_count=int(self.get_parameter("debounce_count").value),
             hysteresis_mm=int(self.get_parameter("hysteresis_mm").value),
             health_timeout_sec=float(self.get_parameter("health_timeout_sec").value),
+            immediate_danger_mm=int(self.get_parameter("immediate_danger_mm").value),
         )
 
         self._lock = threading.Lock()
@@ -242,7 +244,14 @@ class ObstacleMonitorNode(Node):
             last_data_at = time.monotonic()
             try:
                 while not self._stop.is_set() and not self._reopen.is_set():
-                    data = handle.read(64)
+                    # Block for the first byte only, then take whatever else
+                    # is already buffered. read(64) waited for the full 0.1 s
+                    # timeout on every 4-byte frame, delaying each reading.
+                    data = handle.read(1)
+                    if data:
+                        waiting = handle.in_waiting
+                        if waiting:
+                            data += handle.read(waiting)
                     now = time.monotonic()
                     if data:
                         last_data_at = now
@@ -367,6 +376,7 @@ class ObstacleMonitorNode(Node):
                 "port_open": self._port_open,
                 "serial_error": self._serial_error,
                 "readings": tracker.readings,
+                "interference_frames": tracker.interference,
                 "bad_checksums": self._parser.bad_checksums,
                 "settings_source": self._settings_source,
                 "config_request_id": self._config_request_id,

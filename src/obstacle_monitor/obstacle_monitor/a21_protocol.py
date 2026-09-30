@@ -10,8 +10,9 @@ Special values (DYP A21 datasheet / NRP_ROS ``ultrasonic_watch.py``):
 - ``0xFFFD`` and above: no echo, i.e. nothing within range (a *clear* path);
 - ``0``: object inside the blind zone, i.e. *very* close.
 
-Any checksum-valid frame proves the sensor is alive, including the special
-values. Pure and I/O-free.
+No-echo and blind-zone frames are real measurements; an interference frame
+is not, and does not prove the sensor can see (see zones.py). Pure and
+I/O-free.
 """
 
 from __future__ import annotations

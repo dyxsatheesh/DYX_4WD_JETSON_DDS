@@ -38,3 +38,10 @@ def test_bridge_gates_on_obstacle_right_after_estop():
     obstacle = source.index('reason = "obstacle_danger"')
     mission = source.index('reason = "mission_disabled"')
     assert estop < obstacle < mission
+
+
+def test_bridge_sends_zero_on_the_danger_message_itself():
+    source = (Path(__file__).resolve().parents[1] / "jetson_4wd_control" / "cmd_vel_bridge.py").read_text()
+    callback = source[source.index("def _obstacle_callback"):source.index("def _heartbeat_callback")]
+    assert "was_blocking" in callback
+    assert '_evaluate_and_publish(from_timer=False, source="gate_change")' in callback
