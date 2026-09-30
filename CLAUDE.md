@@ -1339,15 +1339,23 @@ comparing any bag/ULog timing.
     and the point failed at `terminal_timeout` after 15 s without moving
     (P0002/9/12 at 111/42/97 mm).
   - Now seeded with `deceleration_floor_speed` (0.15 m/s, above the 0.143 m/s
-    breakaway), **only on a genuine standstill restart**: TRACK/TERMINAL_GUIDANCE,
-    last command a literal 0, and position-derived speed < 0.02 m/s. BRAKE_PROFILE
-    still owns the stop.
+    breakaway), **only while the chassis is stationary**: TRACK/TERMINAL_GUIDANCE,
+    and position-derived speed < 0.02 m/s. It keeps requesting until the
+    wheels move, and `publish_velocity_ned` still caps at the approach profile.
+    A normal approach (always >= 0.10 m/s) never takes this branch, so the
+    **proportional slow approach is unchanged; the operator says that stop is
+    correct, do not alter it.**
   - ⚠ **The first version (`f16d7b0`, deployed 19:45) seeded whenever the last
     command was < 0.15.** A normal approach publishes down to 0.10 m/s
     (`approach_speed_cap`, `approach_min_speed_mps: 0.10`), so it altered
     every stop: it raised the braking speed and moved the brake point. The
-    operator reported drag/skid at the stop. Narrowed afterwards; that fix is
-    **not deployed** and the cause is inferred from source, not from a bag.
+    operator reported drag/skid at the stop.
+  - ⚠ `46e859e` (literal-0 command only) is also wrong. After a stop the
+    acceleration ramp restarts at ~0.01 m/s, the seed releases on the next
+    cycle, and the rover stalls below breakaway.
+  - Fixed in the follow-up commit. Closed-loop tests (regulator + ramp +
+    approach cap + chassis breakaway) separate all three versions. **Not
+    deployed, not field-tested.**
   - The `/rpp/debug` label `ALIGNMENT` during those windows was misleading:
     the radial20 branch ran and returned first.
 - **`/mission_manager/status` was ~97 KB at 4.5 Hz (65% of the bag).**

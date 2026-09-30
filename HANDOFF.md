@@ -65,7 +65,7 @@ Turn `DYX_REALTIME_METRICS` back off afterwards.
 |---|---|---|
 | `c797f8f` | MAVROS: respawn + patched overlay (upstream `97a14ae1` + `6ea0636e`); Mission Manager `px4_link_ok` gate ("PX4 link lost" instead of "spray not ready") | Patch **seen working**: a duplicate `176` ACK was logged, not fatal. Respawn **seen working** after the Pixhawk rebooted |
 | `066e786` | `estimator_status_relay`: the raw ~400 Hz MAVLink stream moved out of `rover_backend` | Backend 83% -> ~70% CPU. The rest is rclpy wake-up overhead (odom + `/rpp/debug` at 50 Hz) |
-| `f16d7b0` | **radial20 standstill deadlock**: pausing inside 0.75 m of a point used to fail the point 15 s later without moving | Operator: the restart works, **but there was drag/skid at every normal stop afterwards.** The seed also fired during the normal 0.10-0.15 m/s final approach. **Narrowed in the follow-up commit (NOT deployed)** |
+| `f16d7b0` | **radial20 standstill deadlock**: pausing inside 0.75 m of a point used to fail the point 15 s later without moving | Operator: the restart works, **but there was drag/skid at every normal stop afterwards.** The seed also fired during the normal 0.10-0.15 m/s final approach. `46e859e` would stall on the acceleration ramp. **Final: seed only while the chassis is stationary** (latest commit, NOT deployed; closed-loop tests only) |
 | `d2828a0` | Per-point history moved to the latched `/mission_manager/point_history`; status went from ~97 KB to 3.4 KB | Verified live (3.4 KB, topic up). **Recovery merge not field-tested** |
 | frontend `b628853` | Recovery popup: **Release E-stop & Resume** | Needs the new APK |
 | frontend `ecda663` | `PX4 LINK LOST` toast | Needs the new APK |

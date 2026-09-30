@@ -10460,17 +10460,21 @@ class RPPController(Node):
         # Seed with the final-approach floor, which sits above the measured
         # 0.143 m/s drivetrain breakaway; BRAKE_PROFILE still owns the stop.
         #
-        # Only a genuine restart: the last command was a literal zero AND the
-        # chassis is stationary. A normal approach legitimately publishes
-        # below the floor -- approach_speed_cap() slows in proportion to the
-        # distance left, down to approach_min_speed_mps (0.10) -- and seeding
-        # there raised the regulator's braking speed and moved the brake point
-        # on every stop (operator-reported drag/skid at the stop, 2026-09-30).
+        # Only while the chassis is STATIONARY. A normal approach is always
+        # moving (approach_speed_cap() slows in proportion to the distance
+        # left, never below approach_min_speed_mps 0.10), so it never takes
+        # this branch and its slow approach is unchanged. f16d7b0 seeded on
+        # "last command below the floor" and so altered every normal stop
+        # (operator-reported drag/skid). Keying on a literal-zero command is
+        # not enough either: after a stop the acceleration ramp restarts at
+        # ~0.01 m/s, and passing that through stalls below breakaway. Keep
+        # requesting until the wheels move; publish_velocity_ned() still caps
+        # the output at the approach profile (0.10 m/s near the point).
         if (
             self.radial_stop_regulator.state
             in (RadialStopState.TRACK, RadialStopState.TERMINAL_GUIDANCE)
             and along_remaining > 0.0
-            and tracking_speed_command <= 1.0e-9
+            and tracking_speed_command < self.deceleration_floor_speed
             and position_derived_speed < self.RADIAL20_RESTART_STATIONARY_MPS
         ):
             tracking_speed_command = self.deceleration_floor_speed

@@ -109,12 +109,60 @@ def test_normal_final_approach_below_floor_is_not_seeded():
     assert math.isclose(node.radial_stop_last_sample.tracking_speed_command_mps, 0.11)
 
 
-def test_zero_command_while_still_rolling_is_not_seeded():
+# --- closed loop: regulator + RPP publish path + chassis --------------------
+ACCEL_MPS2 = 0.5  # acceleration_rate: 1.0 m/s cruise over acceleration_distance_m 1.0
+DT = 0.02         # 50 Hz control
+BREAKAWAY_MPS = 0.08
+
+
+def _approach_cap(along):
+    """approach_speed_cap(): cruise 1.0 over 1.0 m, floored at 0.10 m/s."""
+    return max(0.10, 1.0 * max(0.0, along) / 1.0)
+
+
+def _simulate(along0, speed0, seconds=15.0):
     step = _step_method()
     clock = {"t": 100.0}
     node = _node(clock)
-    node._radial_stop_position_derived_speed_mps = lambda _t: 0.08
-    node.precision_last_published_translational_speed_mps = 0.0
-    step(node, along_remaining=0.30, cross_error=0.0)
-    assert node.radial_stop_last_sample.tracking_speed_command_mps == 0.0
+    chassis = {"v": speed0, "along": along0}
+    node._radial_stop_position_derived_speed_mps = lambda _t: chassis["v"]
+    node.precision_last_published_translational_speed_mps = speed0
+    ramp = {"v": speed0}
+    trace = []
+    for _ in range(int(seconds / DT)):
+        result = step(node, along_remaining=chassis["along"], cross_error=0.0)
+        requested = result.forward_speed_command_mps
+        # publish_velocity_ned: acceleration ramp from the current output,
+        # capped by the regulator request and the approach profile.
+        ramp["v"] = min(requested, ramp["v"] + ACCEL_MPS2 * DT) if requested > 0 else 0.0
+        published = min(ramp["v"], _approach_cap(chassis["along"])) if requested > 0 else 0.0
+        trace.append((chassis["along"], node.radial_stop_last_sample.tracking_speed_command_mps,
+                      node.precision_last_published_translational_speed_mps, published))
+        node.precision_last_published_translational_speed_mps = published
+        # chassis: static friction until the command exceeds breakaway
+        if chassis["v"] > 0.0 or published >= BREAKAWAY_MPS:
+            chassis["v"] = published
+        chassis["along"] -= chassis["v"] * DT
+        clock["t"] += DT
+        if node.radial_stop_regulator.state in (
+            RadialStopState.ZERO_LATCH, RadialStopState.SETTLE,
+            RadialStopState.CERTIFIED, RadialStopState.HOLD_FAIL,
+        ):
+            break
+    return node, chassis, trace
+
+
+def test_closed_loop_resume_from_standstill_reaches_the_point():
+    node, chassis, _ = _simulate(along0=0.097, speed0=0.0)  # P0012 after RTK pause
+    assert node.radial_stop_regulator.state is not RadialStopState.HOLD_FAIL
+    assert node.radial_stop_regulator.state in (RadialStopState.ZERO_LATCH, RadialStopState.SETTLE)
+    assert chassis["along"] < 0.02
+
+
+def test_closed_loop_normal_approach_is_never_seeded():
+    """A moving approach must see exactly the speed it published last cycle."""
+    _, _, trace = _simulate(along0=0.74, speed0=0.74)
+    assert trace
+    for _along, tracking, last_published, _published in trace:
+        assert math.isclose(tracking, max(0.0, last_published))
 
