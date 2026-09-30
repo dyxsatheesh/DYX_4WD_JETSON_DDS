@@ -57,6 +57,11 @@
   depth: 1
   reliability: reliable
   durability: transient_local
+/mission_manager/point_history:
+  history: keep_last
+  depth: 1
+  reliability: reliable
+  durability: transient_local
 /mission_manager/execution_mode:
   history: keep_last
   depth: 1

@@ -480,6 +480,9 @@ class RoverBackendRosNode(Node):
         # writing an older snapshot.
         self._runtime_persist_condition = threading.Condition()
         self._runtime_persist_pending: tuple[str, dict[str, Any]] | None = None
+        # Latest /mission_manager/point_history (replaced whole, never mutated,
+        # so the persistence worker may read it without a lock).
+        self._mission_point_history: dict[str, Any] | None = None
         self._runtime_persist_stopping = False
         self._runtime_persist_thread = threading.Thread(
             target=self._runtime_persist_worker,
@@ -814,6 +817,13 @@ class RoverBackendRosNode(Node):
             String,
             "/mission_manager/status",
             self._mission_status_callback,
+            retained_qos,
+        )
+
+        self.create_subscription(
+            String,
+            "/mission_manager/point_history",
+            self._mission_point_history_callback,
             retained_qos,
         )
 
@@ -3031,6 +3041,42 @@ class RoverBackendRosNode(Node):
         except Exception:  # noqa: BLE001
             LOGGER.exception("trajectory snapshot %s failed", method)
 
+    def _mission_point_history_callback(
+        self,
+        message: String,
+    ) -> None:
+        payload = _json_object(message.data)
+        if payload is None or payload.get("schema") != "dyx4wd/point_history@1":
+            return
+        self._mission_point_history = payload
+
+    def _with_point_history(
+        self,
+        manager_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Restore the per-point evidence Mission Manager moved off status.
+
+        The recovery checkpoint keeps its pre-2026-09-30 shape. History from
+        another mission run is never merged; recovery accepts it absent.
+        """
+        history = getattr(self, "_mission_point_history", None)
+        if (
+            history is None
+            or not history.get("mission_run_id")
+            or history.get("mission_run_id") != manager_payload.get("mission_run_id")
+        ):
+            return manager_payload
+        merged = dict(manager_payload)
+        for key in (
+            "point_accuracy_snapshots",
+            "point_results",
+            "point_survey_snapshots",
+            "last_termination_report",
+        ):
+            if key in history:
+                merged[key] = history[key]
+        return merged
+
     def _mission_status_callback(
         self,
         message: String,
@@ -4092,6 +4138,7 @@ class RoverBackendRosNode(Node):
         captured_mission_id: str,
         manager_payload: dict[str, Any],
     ) -> None:
+        manager_payload = self._with_point_history(manager_payload)
         # Serialize runtime persistence against terminal cleanup and new-mission
         # lifecycle operations.
         with mission_report_store.lifecycle_transaction():

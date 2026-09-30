@@ -167,6 +167,7 @@ TOPICS = [
     "/mission_manager/segment_goal_metadata",
     "/active_waypoint",
     "/mission_manager/status",
+    "/mission_manager/point_history",
     "/mission_manager/point_event",
     "/mission_manager/execution_mode",
     "/mission_enable",

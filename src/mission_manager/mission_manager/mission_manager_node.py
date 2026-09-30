@@ -613,6 +613,14 @@ class MissionManager(Node):
         self.status_pub = self.create_publisher(
             String, "/mission_manager/status", retained_qos
         )
+        # Per-point evidence (results, accuracy/survey snapshots, termination
+        # report) grows with every point: ~92% of a ~97 KB status on a
+        # 15-point mission, re-sent at STATUS_HZ (2026-09-30). It now goes out
+        # latched, only when it changes. The backend merges it back into the
+        # power-cycle recovery checkpoint.
+        self.point_history_pub = self.create_publisher(
+            String, "/mission_manager/point_history", retained_qos
+        )
         self.point_event_pub = self.create_publisher(
             String, "/mission_manager/point_event", command_qos
         )
@@ -868,6 +876,8 @@ class MissionManager(Node):
         self._start_failed_stage: Optional[str] = None
         self._start_debug: dict[str, Any] = {}
         self._last_status_publish_monotonic = 0.0
+        self._point_history_version = 0
+        self._published_point_history: Optional[tuple] = None
 
         self.add_on_set_parameters_callback(
             self._on_precision_feature_parameters
@@ -4797,10 +4807,11 @@ class MissionManager(Node):
             "remaining_points": max(0, total - processed),
             "progress_percent": round(100.0 * processed / total, 2) if total else 0.0,
             "point_status": list(self._point_status),
-            "point_accuracy_snapshots": copy.deepcopy(self._point_accuracy_snapshots),
-            "point_results": copy.deepcopy(self._point_results),
+            # point_results / point_accuracy_snapshots /
+            # point_survey_snapshots / last_termination_report are on
+            # /mission_manager/point_history; this says which version is current.
+            "point_history_version": getattr(self, "_point_history_version", 0),
             "last_point_result": copy.deepcopy(self._last_point_result),
-            "last_termination_report": copy.deepcopy(self._last_termination_report),
             "mission_enable": self._mission_enable,
             "emergency_stop": self._emergency_stop,
             "safety_generation": self._safety_generation,
@@ -4852,12 +4863,6 @@ class MissionManager(Node):
                 and self._survey_targets
                 and len(self._gnss_history) >= self.survey_truth_minimum_samples
             ),
-            "point_survey_snapshots": [
-                copy.deepcopy(snapshot.get("survey"))
-                if isinstance(snapshot, dict)
-                else None
-                for snapshot in self._point_accuracy_snapshots
-            ],
             "gps_fix_status_age_sec": round(
                 self._age(self._last_gps_fix_rx_monotonic), 3
             ),
@@ -4955,6 +4960,44 @@ class MissionManager(Node):
 
         return callback
 
+    def _point_history_payload(self) -> dict[str, Any]:
+        return {
+            "schema": "dyx4wd/point_history@1",
+            "mission_run_id": self._mission_run_id or None,
+            "point_history_version": self._point_history_version,
+            "point_accuracy_snapshots": copy.deepcopy(self._point_accuracy_snapshots),
+            "point_results": copy.deepcopy(self._point_results),
+            "point_survey_snapshots": [
+                copy.deepcopy(snapshot.get("survey"))
+                if isinstance(snapshot, dict)
+                else None
+                for snapshot in self._point_accuracy_snapshots
+            ],
+            "last_termination_report": copy.deepcopy(self._last_termination_report),
+        }
+
+    def _publish_point_history_if_changed(self) -> None:
+        """Publish per-point evidence only when it differs from the last send.
+
+        List/dict equality is evaluated in C without serializing, so the
+        4.5 Hz check stays cheap; the deep copy and JSON only happen on change.
+        """
+        current = (
+            self._mission_run_id,
+            self._point_accuracy_snapshots,
+            self._point_results,
+            self._last_termination_report,
+        )
+        if current == getattr(self, "_published_point_history", None):
+            return
+        self._point_history_version = getattr(self, "_point_history_version", 0) + 1
+        self._published_point_history = copy.deepcopy(current)
+        msg = String()
+        msg.data = json.dumps(
+            self._point_history_payload(), separators=(",", ":"), sort_keys=True
+        )
+        self.point_history_pub.publish(msg)
+
     def _publish_status(self, *, force: bool = False) -> None:
         now = time.monotonic()
         if (
@@ -4963,6 +5006,9 @@ class MissionManager(Node):
         ):
             return
         self._last_status_publish_monotonic = now
+        # History first, so a consumer that sees the new version in status
+        # normally already holds that history.
+        self._publish_point_history_if_changed()
         msg = String()
         msg.data = json.dumps(
             self._status_payload(), separators=(",", ":"), sort_keys=True

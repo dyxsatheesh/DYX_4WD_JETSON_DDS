@@ -1303,6 +1303,44 @@ field-tested.** Deployed on the Jetson as of 14:49 IST: `3ee0070` only.
   - Other load seen: `bag_autorecord.py` polls `/api/mission/status` at 5 Hz;
     MAVROS uses ~94% CPU.
 
+### Field run `mission.csv_20260930_185447` + `log_592` (15 pts) — findings
+
+Bag: `bags_jet/Sep_30_evening/`. The ULog GNSS clock runs **17.1 s ahead** of
+the Jetson/QGC clock (aligned on OFFBOARD->ALTCTL); apply the offset before
+comparing any bag/ULog timing.
+
+- **"GNSS fusion stopped" is a satellite-count failure, not FLOAT.** The RTK
+  solution used only 4-10 SVs all evening, versus 15-16 whenever the receiver
+  fell back to 3D fix; RTK counts only SVs in the base corrections
+  (`MP23960`).
+  - At 4 SVs, `EKF2_REQ_NSATS=6` fails (`gps_check_fail_flags=2`) -> EKF
+    dead-reckons -> about 4 s later local pos/vel are invalid -> PX4 sets
+    `offboard_control_signal_lost` **with** `local_velocity_invalid` -> ALTCTL.
+  - The OFFBOARD stream was intact (0 gaps > 0.2 s). **PX4's "No offboard
+    signal" can mean "velocity estimate invalid".**
+  - MANUAL/Hold changes the same evening were the RC mode switch (slot 4 then
+    back to 1), not the software.
+- **radial20 deadlock after stopping inside the 0.75 m terminal zone (FIXED
+  in source 2026-09-30, not field-tested).**
+  - `_step_radial20_terminal_for_cycle` fed the regulator the *last published*
+    speed. After any stop (RTK pause, E-stop release, resume, short leg) that
+    is 0, so TRACK/TERMINAL_GUIDANCE passed 0 through, RPP published 0 again,
+    and the point failed at `terminal_timeout` after 15 s without moving
+    (P0002/9/12 at 111/42/97 mm).
+  - Now seeded with `deceleration_floor_speed` (0.15 m/s, above the 0.143 m/s
+    breakaway) while in TRACK/TERMINAL_GUIDANCE. BRAKE_PROFILE still owns the
+    stop.
+  - The `/rpp/debug` label `ALIGNMENT` during those windows was misleading:
+    the radial20 branch ran and returned first.
+- **`/mission_manager/status` was ~97 KB at 4.5 Hz (65% of the bag).**
+  - `point_results`, `point_accuracy_snapshots`, `point_survey_snapshots` and
+    `last_termination_report` now go on the latched
+    `/mission_manager/point_history`, published only on change. Status carries
+    `point_history_version` instead.
+  - The backend merges history back into the recovery checkpoint
+    (`_with_point_history`), and only for the same `mission_run_id`.
+  - The bag recorder topic list and QoS overrides include the new topic.
+
 ## Repo status (2026-08-31)
 
 - **`WORKING_STATUS_24_06_2026.txt`** — stale (2026-06-24), architecture it
