@@ -60,12 +60,13 @@ from mission_manager_interfaces.srv import ReleaseEmergencyStop
 from std_srvs.srv import SetBool
 from std_srvs.srv import Trigger
 
-from rover_backend.battery_policy import battery_mission_locked
+from rover_backend.battery_policy import BatteryLockoutFilter
 from rover_backend.battery_policy import battery_percentage_from_voltage
 from rover_backend.battery_policy import classify_battery_percentage
 from rover_backend.config import settings
 from rover_backend.voice import voice_announcer
 from rover_backend.realtime_contract import build_point_result_event
+from rover_backend.realtime_contract import build_system_event
 from rover_backend.manager_status_sync import ManagerStatusSync
 from rover_backend.mission_report import MissionReportError
 from rover_backend.mission_report import StaleMissionTerminalEvent
@@ -111,6 +112,17 @@ def _notify_authoritative_state_changed() -> None:
         notify_authoritative_state_changed()
     except ImportError:
         # Realtime may not be imported during isolated ROS-node tests.
+        return
+
+
+def _publish_system_event(event: dict[str, Any]) -> None:
+    """Queue one Mission Manager system notification (lazy import, see above)."""
+
+    try:
+        from rover_backend.realtime import publish_system_event
+
+        publish_system_event(event)
+    except ImportError:
         return
 
 
@@ -489,10 +501,13 @@ class RoverBackendRosNode(Node):
         self._terminal_cleanup_lock = threading.Lock()
         self._terminal_cleanup_keys: set[str] = set()
 
-        # Battery-critical STOP is dispatched outside the BatteryState callback
+        # Battery-critical PAUSE is dispatched outside the BatteryState callback
         # so the ROS executor thread is never blocked waiting on Mission Manager.
         self._battery_stop_lock = threading.Lock()
         self._battery_stop_in_progress = False
+        # Lockout is confirmed over several samples and unlocks with
+        # hysteresis; one sag sample under load must not pause a mission.
+        self._battery_lockout = BatteryLockoutFilter()
 
         # The backend always starts safe.
         self._mission_enable = False
@@ -2114,22 +2129,26 @@ class RoverBackendRosNode(Node):
         self,
         percentage: float,
     ) -> None:
-        """STOP an active mission after entering the critical battery band."""
+        """PAUSE a RUNNING mission after a confirmed critical battery.
+
+        PAUSE, not STOP: progress is preserved so the operator can change the
+        battery and Resume (docs/DYX_Mission_Power_Cycle_Recovery_Logic.md,
+        "Battery Critical Case"). RESUME/NEXT stay refused by the lockout.
+        The telemetry field names keep "stop" for tablet compatibility.
+        """
 
         error_text: str | None = None
 
         try:
             LOGGER.error(
-                "Battery critical at %.1f%%; requesting Mission Manager STOP",
+                "Battery critical at %.1f%% (confirmed); requesting Mission Manager PAUSE",
                 percentage,
             )
-            # Use the runtime STOP path so its safety-generation ordering stays
-            # identical to an operator-issued STOP.
-            ros_bridge.stop_mission()
+            ros_bridge.pause_mission()
         except Exception as error:
             error_text = str(error)
             LOGGER.exception(
-                "Battery-critical automatic mission STOP failed"
+                "Battery-critical automatic mission PAUSE failed"
             )
         finally:
             rover_state.update(
@@ -2145,24 +2164,18 @@ class RoverBackendRosNode(Node):
         self,
         percentage: float,
     ) -> None:
-        """Request one non-blocking STOP only when a mission can operate."""
+        """Request one non-blocking PAUSE only while the mission is RUNNING.
+
+        PAUSED and WAITING_FOR_NEXT are already stationary, and the lockout
+        refuses START/RESUME/NEXT/SKIP, so only RUNNING needs an action.
+        """
 
         mission = rover_state.section("mission")
-        safety = rover_state.section("safety")
         mission_state = str(
             mission.get("state") or "EMPTY"
         ).strip().upper()
 
-        mission_active = (
-            bool(safety.get("mission_enable", False))
-            or mission_state in {
-                "RUNNING",
-                "PAUSED",
-                "WAITING_FOR_NEXT",
-            }
-        )
-
-        if not mission_active:
+        if mission_state != "RUNNING":
             return
 
         with self._battery_stop_lock:
@@ -2193,7 +2206,9 @@ class RoverBackendRosNode(Node):
         voltage_v = _finite_float(message.voltage)
         percentage = battery_percentage_from_voltage(voltage_v)
         remaining_status = classify_battery_percentage(percentage)
-        mission_lockout = battery_mission_locked(percentage)
+        mission_lockout = self._battery_lockout.update(
+            voltage_v, time.monotonic()
+        )
 
         voice_announcer.on_battery_percent(percentage)
 
@@ -3374,6 +3389,13 @@ class RoverBackendRosNode(Node):
         payload["received_at"] = utc_now_iso()
 
         voice_announcer.on_point_event(payload)
+
+        # Mission Manager also sends system notifications on this topic
+        # (OBSTACLE_PAUSED, RTK_FLOAT, ESTOP_ACTIVE, ...). They carry no
+        # point_id; forward them to the tablet as system_event.
+        system_event = build_system_event(payload)
+        if system_event is not None:
+            _publish_system_event(system_event)
 
         event_name = str(payload.get("event") or "").strip().upper()
 

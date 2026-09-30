@@ -418,9 +418,35 @@ _POINT_EVENT_SOCKET_NAMES = {
 }
 
 
+SYSTEM_EVENT_SCHEMA = "system_event@1"
+
+
 def point_event_socket_name(point_event: dict[str, Any]) -> str:
+    if point_event.get("event_kind") == "SYSTEM":
+        return "system_event"
     event_name = str(point_event.get("event", "")).strip().upper()
     return _POINT_EVENT_SOCKET_NAMES.get(event_name, "point_event")
+
+
+def build_system_event(point_event: dict[str, Any]) -> dict[str, Any] | None:
+    """system_event payload for a Mission Manager notification, else None.
+
+    /mission_manager/point_event also carries system notifications
+    (OBSTACLE_PAUSED, OBSTACLE_CLEARED, RTK_FLOAT, RTK_PAUSED, RTK_RECOVERED,
+    ODOM_PAUSED, ESTOP_ACTIVE, ESTOP_RELEASED, MISSION_COMPLETED). They are
+    the events without a point_id. The original fields are preserved.
+    """
+
+    if str(point_event.get("point_id") or "").strip():
+        return None
+    event_name = str(point_event.get("event") or "").strip().upper()
+    if not event_name:
+        return None
+    payload = dict(point_event)
+    payload["event"] = event_name
+    payload["event_kind"] = "SYSTEM"
+    payload["schema"] = SYSTEM_EVENT_SCHEMA
+    return payload
 
 
 def build_point_result_event(

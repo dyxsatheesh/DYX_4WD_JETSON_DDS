@@ -31,6 +31,12 @@ Emitted events:
         profile/source/START/STOP change, and on connect. Omitted while the
         RTK control service is not installed.
 
+    system_event
+        Mission Manager notification without a point (system_event@1):
+        OBSTACLE_PAUSED/CLEARED, RTK_FLOAT/PAUSED/RECOVERED, ODOM_PAUSED,
+        ESTOP_ACTIVE/RELEASED, MISSION_COMPLETED. Same ordered queue as the
+        point events below, so arrival order across both is preserved.
+
     point_completed
     point_skipped
     point_failed
@@ -163,6 +169,12 @@ def publish_point_event(event: dict[str, Any]) -> None:
         )
     _pending_point_events.append(event)
     notify_authoritative_state_changed()
+
+
+def publish_system_event(event: dict[str, Any]) -> None:
+    """Queue one system notification (ROS thread) in point-event order."""
+
+    publish_point_event(event)
 
 
 def _socket_mission_payload(mission: dict[str, Any]) -> dict[str, Any]:

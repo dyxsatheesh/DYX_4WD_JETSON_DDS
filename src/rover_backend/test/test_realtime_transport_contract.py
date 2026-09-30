@@ -281,7 +281,9 @@ def test_loop_emits_every_point_event_in_order_and_mission_status_on_change(
         script = {
             # iteration -> action before records are read
             1: lambda: [queue.append({"event": "ACCURACY_ACHIEVED", "point_id": "P0003"}),
-                        queue.append({"event": "COMPLETED", "point_id": "P0003"})],
+                        queue.append({"event": "COMPLETED", "point_id": "P0003"}),
+                        queue.append(rc.build_system_event(
+                            {"event": "OBSTACLE_PAUSED", "message": "Obstacle ahead"}))],
             4: lambda: state.update("mission", emergency_stop=True),
             # An RTK START/STOP between periods emits rtk_status at once.
             5: lambda: rtk_dirty.set(),
@@ -343,6 +345,10 @@ def test_loop_emits_every_point_event_in_order_and_mission_status_on_change(
     point_events = [(n, p["event"]) for n, p in emitted if n.startswith("point_")]
     assert point_events == [("point_event", "ACCURACY_ACHIEVED"),
                             ("point_completed", "COMPLETED")]
+    # A system notification queued after them is emitted after them, in order.
+    system_events = [(n, p["event"]) for n, p in emitted if n == "system_event"]
+    assert system_events == [("system_event", "OBSTACLE_PAUSED")]
+    assert names.index("point_completed") < names.index("system_event")
     # Telemetry every iteration; mission_status only first + on e-stop change.
     assert names.count("telemetry") == 7
     mission_status = [p for n, p in emitted if n == "mission_status"]
@@ -420,6 +426,7 @@ def test_ros_point_event_callback_publishes_exactly_the_stored_result(state):
     fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef)
               and n.name == "_point_event_callback")
     published: list[dict] = []
+    system_published: list = []
     namespace = {
         "copy": copy, "Any": object, "String": object,
         "rover_state": state,
@@ -431,6 +438,8 @@ def test_ros_point_event_callback_publishes_exactly_the_stored_result(state):
         "_notify_authoritative_state_changed": lambda: None,
         "_publish_point_result_event": published.append,
         "build_point_result_event": rc.build_point_result_event,
+        "_publish_system_event": system_published.append,
+        "build_system_event": rc.build_system_event,
         # Voice announcements are best-effort and not under test here.
         "voice_announcer": SimpleNamespace(on_point_event=lambda _payload: None),
     }
@@ -451,6 +460,7 @@ def test_ros_point_event_callback_publishes_exactly_the_stored_result(state):
         namespace["_point_event_callback"](node, message)
 
     assert [e["event"] for e in published] == ["ACCURACY_ACHIEVED", "COMPLETED"]
+    assert system_published == []                  # point events are not system events
     stored = state.section("mission")["point_results"]["P0001"]
     last = published[-1]
     assert last["mission_id"] == "mission-1"
@@ -466,3 +476,27 @@ def test_ros_point_event_callback_publishes_exactly_the_stored_result(state):
     last["point_result"]["accuracy"]["overall_accuracy_mm"] = -1
     assert state.section("mission")["point_results"]["P0001"]["accuracy"][
         "overall_accuracy_mm"] == accuracy["overall_accuracy_mm"]
+
+
+
+def test_system_event_is_built_only_for_pointless_notifications():
+    event = rc.build_system_event(
+        {"event": "rtk_float", "message": "RTK FLOAT", "state": "PAUSED"}
+    )
+    assert event["event"] == "RTK_FLOAT"
+    assert event["event_kind"] == "SYSTEM"
+    assert event["schema"] == rc.SYSTEM_EVENT_SCHEMA
+    assert event["message"] == "RTK FLOAT" and event["state"] == "PAUSED"
+    assert rc.point_event_socket_name(event) == "system_event"
+    assert rc.build_system_event({"event": "COMPLETED", "point_id": "P0001"}) is None
+    assert rc.build_system_event({"message": "no event name"}) is None
+    # Existing point-event naming is unchanged.
+    assert rc.point_event_socket_name({"event": "ACCURACY_ACHIEVED"}) == "point_event"
+
+
+def test_ros_bridge_forwards_system_events():
+    source = (SOURCE / "ros_bridge.py").read_text()
+    callback = source[source.index("def _point_event_callback"):]
+    callback = callback[:callback.index("\n    def ", 10)]
+    assert "build_system_event(payload)" in callback
+    assert "_publish_system_event(system_event)" in callback
