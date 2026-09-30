@@ -93,6 +93,8 @@ def gate_manager(obstacle):
     m._state = "READY"
     m._emergency_stop = False
     m._rtk_motion_ok = lambda: (True, "fixed")
+    m._fcu_connected = True
+    m._last_fcu_rx_monotonic = time.monotonic()
     m._obstacle_status = json.loads(status(**obstacle).data)
     m._obstacle_status_rx_monotonic = time.monotonic()
     return m
@@ -120,6 +122,8 @@ def test_resume_offered_only_after_path_clears(clock):
     m._navigation_path = [object()]
     m._pending_prepared_path = SimpleNamespace(ready=True)
     m._rtk_motion_ok = lambda: (True, "fixed")
+    m._fcu_connected = True
+    m._last_fcu_rx_monotonic = clock.t
     recover = MissionManager._monitor_pause_recovery  # harness stubs it out
 
     recover(m)

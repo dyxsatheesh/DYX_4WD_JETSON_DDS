@@ -254,6 +254,8 @@ MISSION_LIFECYCLE_FIELDS: tuple[str, ...] = (
     "rtk_motion_ok",
     "rtk_reason",
     "px4_connected",
+    "px4_link_ok",
+    "px4_link_reason",
     "px4_mode",
     "px4_armed",
     "start_stage",

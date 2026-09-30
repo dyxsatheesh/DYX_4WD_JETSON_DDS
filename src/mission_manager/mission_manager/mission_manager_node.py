@@ -2356,6 +2356,23 @@ class MissionManager(Node):
     def _spray_ready_for_mission_start(self) -> bool:
         return self._spray_not_ready_reason() is None
 
+    def _px4_link_block_reason(self) -> Optional[str]:
+        """Why the MAVROS/PX4 link cannot carry a START/RESUME, or None.
+
+        Checked before spray readiness: a dead MAVROS also makes the spray
+        controller not-ready, and the operator must see the real cause.
+        """
+        age = self._age(self._last_fcu_rx_monotonic)
+        if age > self.FCU_STATE_STALE_SEC:
+            since = "ever" if math.isinf(age) else f"{age:.0f}s"
+            return (
+                f"PX4 link lost: no MAVROS state for {since}; "
+                "MAVROS may have stopped, restart the rover stack"
+            )
+        if not self._fcu_connected:
+            return "PX4 link lost: MAVROS reports the flight controller disconnected"
+        return None
+
     def _spray_not_ready_reason(self) -> Optional[str]:
         """Why a mission needing spray must not START/RESUME, or None.
 
@@ -2674,13 +2691,13 @@ class MissionManager(Node):
           * validated prepared mission exists;
           * lifecycle state is correct;
           * E-stop is released when movement is being re-enabled;
+          * fresh, connected MAVROS state (PX4 link);
           * fresh MAVROS GPSRAW fix_type == 6.
 
         Monitoring only here:
           * RTK correction-health and correction-age;
           * backend heartbeat;
           * spray readiness/fault;
-          * FCU freshness precheck;
           * odometry freshness precheck.
 
         PX4 still must accept OFFBOARD and ARM service commands.
@@ -2696,6 +2713,10 @@ class MissionManager(Node):
                 False,
                 "Emergency stop is active; release E-stop before enabling motion",
             )
+
+        link_reason = self._px4_link_block_reason()
+        if link_reason is not None:
+            return False, link_reason
 
         rtk_ok, rtk_reason = self._rtk_motion_ok()
         if not rtk_ok:
@@ -3113,6 +3134,9 @@ class MissionManager(Node):
                     raise RuntimeError(
                         "Emergency stop is active; release E-stop before START"
                     )
+                link_reason = self._px4_link_block_reason()
+                if link_reason is not None:
+                    raise RuntimeError(link_reason)
                 if self._px4_armed:
                     raise RuntimeError(
                         "START requires PX4 disarmed so sequence is OFFBOARD then ARM"
@@ -3433,6 +3457,9 @@ class MissionManager(Node):
                     response.success = False
                     response.message = "Mission is not paused"
                     return response
+                link_reason = self._px4_link_block_reason()
+                if link_reason is not None:
+                    raise RuntimeError(link_reason)
                 spray_reason = self._spray_not_ready_reason()
                 if spray_reason is not None:
                     raise RuntimeError(spray_reason)
@@ -4780,6 +4807,10 @@ class MissionManager(Node):
             "command_ack_epoch": self._command_ack_epoch,
             "command_acks": dict(self._command_acks),
             "px4_connected": self._fcu_connected,
+            # False when MAVROS state is stale (e.g. MAVROS died) even though
+            # px4_connected still holds the last value MAVROS reported.
+            "px4_link_ok": self._px4_link_block_reason() is None,
+            "px4_link_reason": self._px4_link_block_reason(),
             "px4_mode": self._px4_mode,
             "px4_armed": self._px4_armed,
             "gps_fix_type": self._gps_fix_type,

@@ -1,0 +1,32 @@
+From b159f565f164f788d0ba7e0a3e13ce4810723172 Mon Sep 17 00:00:00 2001
+From: Falah Naufal Zaki <falahnzk.dev@gmail.com>
+Date: Thu, 26 Mar 2026 08:59:04 +0700
+Subject: [PATCH 2/2] fix: std::future_error in command.cpp when the
+ set_value() promise called twice
+
+---
+ mavros/src/plugins/command.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/mavros/src/plugins/command.cpp b/mavros/src/plugins/command.cpp
+index 24578e34..998e6c27 100644
+--- a/mavros/src/plugins/command.cpp
++++ b/mavros/src/plugins/command.cpp
+@@ -193,7 +193,13 @@ private:
+ 
+     for (auto & tr : ack_waiting_list) {
+       if (tr.expected_command == ack.command) {
+-        tr.promise.set_value(ack.result);
++        try {
++          tr.promise.set_value(ack.result);
++        } catch (const std::future_error & e) {
++          if (e.code() == std::future_errc::promise_already_satisfied) {
++            RCLCPP_ERROR(get_logger(), "CMD: ACK for command %u already processed", ack.command);
++          }
++        }
+         return;
+       }
+     }
+-- 
+2.54.0
+

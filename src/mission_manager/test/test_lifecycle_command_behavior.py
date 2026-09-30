@@ -220,8 +220,6 @@ def test_resume_motion_disabled_until_final_locked_validation(sleeps):
     [
         ("POSCTL", True, True, 0.1),     # not OFFBOARD
         ("OFFBOARD", False, True, 0.1),  # disarmed
-        ("OFFBOARD", True, False, 0.1),  # FCU disconnected
-        ("OFFBOARD", True, True, 10.0),  # stale MAVROS state
     ],
 )
 def test_resume_degraded_path_keeps_settle_and_reacquisition(sleeps, mode, armed, connected, age):
@@ -234,6 +232,25 @@ def test_resume_degraded_path_keeps_settle_and_reacquisition(sleeps, mode, armed
     if not armed:
         assert "arm:True" in events
         assert events.index("arm:True") < events.index("enable_motion")
+
+
+@pytest.mark.parametrize(
+    "connected,age",
+    [
+        (False, 0.1),  # FCU disconnected
+        (True, 10.0),  # stale MAVROS state (e.g. MAVROS aborted)
+    ],
+)
+def test_resume_refused_without_live_px4_link(sleeps, connected, age):
+    manager, events = build_manager(
+        state="PAUSED", mode="OFFBOARD", armed=True, connected=connected,
+        fcu_age_sec=age,
+    )
+    response = MissionManager._resume_service(manager, None, Response())
+    assert not response.success and "PX4 link lost" in response.message
+    assert px4_calls(events) == []
+    assert "enable_motion" not in events
+    assert manager._state == "PAUSED" and not manager._mission_enable
 
 
 def test_resume_rtk_float_cannot_enable_motion(sleeps):

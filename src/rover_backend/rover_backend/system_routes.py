@@ -374,6 +374,8 @@ def build_mission_status_payload() -> dict[str, Any]:
         "mission_enable": bool(mission.get("mission_enable", False)),
         "emergency_stop": bool(mission.get("emergency_stop", True)),
         "px4_connected": bool(mission.get("px4_connected", False)),
+        "px4_link_ok": bool(mission.get("px4_link_ok", False)),
+        "px4_link_reason": mission.get("px4_link_reason"),
         "px4_mode": mission.get("px4_mode"),
         "px4_armed": bool(mission.get("px4_armed", False)),
         "spray_controller_ready": bool(mission.get("spray_controller_ready", False)),

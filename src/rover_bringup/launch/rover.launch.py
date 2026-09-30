@@ -96,6 +96,12 @@ def generate_launch_description() -> LaunchDescription:
             "-lc",
             "source "
             "/opt/ros/humble/setup.bash && "
+            # Patched MAVROS overlay (scripts/build_patched_mavros.sh) only
+            # when its build finished; otherwise the apt 2.14.0 install.
+            'if [ -x "$HOME/mavros_ws/install/mavros/lib/mavros/mavros_node" ]; '
+            'then source "$HOME/mavros_ws/install/setup.bash" && '
+            'echo "MAVROS: patched overlay $HOME/mavros_ws"; '
+            'else echo "MAVROS: apt 2.14.0 (UNPATCHED: duplicate-ACK abort)"; fi && '
             "ros2 launch mavros node.launch "
             "fcu_url:="
             f"{FCU_DEVICE_PATH}:921600 "
@@ -112,6 +118,14 @@ def generate_launch_description() -> LaunchDescription:
             "fcu_protocol:=v2.0",
         ],
         output="screen",
+        # MAVROS 2.14.0 aborts (std::future_error "Promise already
+        # satisfied") when PX4 sends a duplicate COMMAND_ACK inside the
+        # command plugin's wait window (2026-09-30). Without respawn it
+        # stayed dead while the rest of the stack ran. Restarting is safe:
+        # Mission Manager pauses on stale PX4 state (PX4_CONTROL_LOST,
+        # manual resume only) and nothing re-requests OFFBOARD or ARM.
+        respawn=True,
+        respawn_delay=3.0,
     )
 
     rover_backend_node = Node(

@@ -3247,6 +3247,15 @@ class RoverBackendRosNode(Node):
                 -1,
             ),
             "px4_connected": bool(payload.get("px4_connected", False)),
+            # Older Mission Manager builds lack px4_link_ok; fall back to
+            # the last reported connection flag.
+            "px4_link_ok": bool(
+                payload.get(
+                    "px4_link_ok",
+                    payload.get("px4_connected", False),
+                )
+            ),
+            "px4_link_reason": payload.get("px4_link_reason"),
             "px4_mode": payload.get("px4_mode"),
             "px4_armed": bool(payload.get("px4_armed", False)),
             "spray_controller_ready": bool(

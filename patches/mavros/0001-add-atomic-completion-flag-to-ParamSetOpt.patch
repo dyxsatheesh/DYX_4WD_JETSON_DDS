@@ -1,0 +1,48 @@
+From 9aaa9bb59a7d8944e71e9a1f206aa27d33c9daf4 Mon Sep 17 00:00:00 2001
+From: Alex Bennett <alex@ascendengineer.com>
+Date: Tue, 3 Feb 2026 15:08:35 -0600
+Subject: [PATCH 1/2] add atomic completion flag to `ParamSetOpt`
+
+---
+ mavros/src/plugins/param.cpp | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/mavros/src/plugins/param.cpp b/mavros/src/plugins/param.cpp
+index d4a60a14..fd225a82 100644
+--- a/mavros/src/plugins/param.cpp
++++ b/mavros/src/plugins/param.cpp
+@@ -406,6 +406,7 @@ public:
+ 
+   Parameter param;
+   std::atomic<size_t> retries_remaining;
++  std::atomic<bool> completed{false};
+   std::promise<Result> promise;
+ };
+ 
+@@ -579,7 +580,10 @@ private:
+         // check that ack required
+         auto set_it = set_parameters.find(p.param_id);
+         if (set_it != set_parameters.end()) {
+-          set_it->second->promise.set_value({true, p});
++          // Guard against double-set if timeout already fired
++          if (!set_it->second->completed.exchange(true)) {
++            set_it->second->promise.set_value({true, p});
++          }
+         }
+ 
+         RCLCPP_WARN_STREAM_EXPRESSION(
+@@ -842,7 +846,10 @@ private:
+         RCLCPP_ERROR(
+           lg, "PR: Param set for %s timed out.",
+           it->second->param.param_id.c_str());
+-        it->second->promise.set_value({false, it->second->param});
++        // Guard against double-set if param value arrives late
++        if (!it->second->completed.exchange(true)) {
++          it->second->promise.set_value({false, it->second->param});
++        }
+       }
+ 
+     } else {
+-- 
+2.54.0
+
