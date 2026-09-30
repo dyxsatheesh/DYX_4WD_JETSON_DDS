@@ -1293,6 +1293,13 @@ field-tested.** Deployed on the Jetson as of 14:49 IST: `3ee0070` only.
   - Now `estimator_status_relay` (a separate process) forwards only #230 on
     `/rover_backend/estimator_status_mavlink`.
   - Rule: **never subscribe a Python node to `/uas1/mavlink_source`.**
+  - Measured after deploy (18:22, patched MAVROS live): backend 83% -> ~70%
+    CPU; the relay itself costs ~27%. py-spy `--gil` (sudo needed,
+    `ptrace_scope=1`): the backend holds the GIL 67% of a core, and ~70% of
+    that is rclpy's `wait_for_ready_callbacks` (the wait set is rebuilt on
+    every wake-up), with FastAPI ~12%. **Cost scales with wake-up rate, not
+    payload.** The remaining ~140 wakes/s are mostly odom 50 Hz + `/rpp/debug`
+    50 Hz.
   - Other load seen: `bag_autorecord.py` polls `/api/mission/status` at 5 Hz;
     MAVROS uses ~94% CPU.
 
