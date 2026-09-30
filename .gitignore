@@ -89,3 +89,9 @@ docs/RPP_CRITICAL_HIGH_PREFIELD_FIX_PLAN.md
 docs/RPP_MOTION_CONTROL_PRODUCTION_REVIEW_PLAN.md
 docs/TRAJECTORY_PIPELINE_LOW_LATENCY_PLAN_FULL_rev2_ARCHIVE.md
 docs/TRAJECTORY_PIPELINE_LOW_LATENCY_PLAN.md
+docs/2026-09-23_FCU_Hardfault_Septentrio_SBF_Decoder.md
+docs/config /roboclaw yellow rover tuned.cfg
+docs/patches/straight-reverse-pivot.patch
+scripts/control_chain_report.py
+scripts/motion_leg_report.py
+scripts/phase_report.py
