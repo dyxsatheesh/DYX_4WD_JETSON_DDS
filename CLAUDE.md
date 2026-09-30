@@ -94,7 +94,8 @@ a stack restart or another connection to the FCU serial device.
 | Drive | 4-wheel skid-steer **through a RoboClaw** (operator-confirmed 2026-09-29). PX4 `roboclaw` driver on TELEM3 = `/dev/ttyS1`: `RBCLW_SER_CFG=103`, `RBCLW_BAUD=115200`, `RBCLW_ADDRESS=128`, `RBCLW_FUNC1/2=101/102` (Motor 1/2), `RBCLW_VEL_CTRL=1` (encoder closed-loop), `RBCLW_COUNTS_REV=160000`, `RBCLW_QPPS_MAX=171000`, `RBCLW_ENC_HZ=20`. Airframe `SYS_AUTOSTART=50000` (generic differential rover). `PWM_MAIN_FUNC1..4` were still 101/102/101/102 (old Sabertooth PWM path driven in parallel); **set to 0 and saved 2026-09-29**, so RoboClaw is the only motor output. | NSH `param show`/`set`, 2026-09-29 |
 | Drive (history) | Until some point before 2026-09-29 this rover drove **dual Sabertooth 2X32** via `PWM_MAIN_FUNC1..4` with RoboClaw disabled (`RBCLW_SER_CFG=0`). Every speed/throttle/pivot number measured on the Sabertooth drivetrain (e.g. §2026-09-01 `RO_SPEED_*` droop, throttle->speed slope, breakaway) **may not hold on RoboClaw** — re-measure before relying on it. The switch date is not recorded. | `px4-params/*.params` (stale) |
 | Battery | **8S LiFePO4, 30 Ah** (operator, 2026-09-29). `BAT1_N_CELLS=8`, `BAT1_V_CHARGED=3.45`, `BAT1_V_EMPTY=3.00`, `BAT1_CAPACITY=30000`, set via NSH 2026-09-29 (3.45/3.00 show no `+` in `param show` because they equal this build's defaults — blank means default, not unsaved). Before that `N_CELLS=3`/`V_CHARGED=4.70` made a 26 V pack read 8.66 V/cell -> "Battery 1: over voltage" blocked arming. The INA228 current channel reads ~0.1 A and does **not** measure traction current, so PX4 SoC is voltage-only (LFP curve is flat — treat % as rough). | NSH, `commander check` OK after |
-| GNSS receiver | **Septentrio mosaic-H**, dual-antenna, SBF protocol, 10 Hz PVT, dedicated PX4 driver `src/drivers/gnss/septentrio/` — **not** a u-blox F9P; audit the Septentrio path, not UBX | `docs/2026-09-04_EKF_GNSS_Hardware_Audit.md` §8 |
+| GNSS receiver | **Septentrio mosaic-H**, dual-antenna, SBF protocol, 10 Hz PVT, dedicated PX4 driver `src/drivers/gnss/septentrio/` — **not** a u-blox F9P; audit the Septentrio path, not UBX. **Firmware 4.14.0 (2023-05-22)**, serial 3804732. It rejects valid BDS (and at times GAL/GLO) corrections; an **upgrade to the latest stable release is recommended** (see §"Base corrections vs receiver use") | `docs/2026-09-04_EKF_GNSS_Hardware_Audit.md` §8; `lstInternalFile, Identification` 2026-09-30 |
+| MAVROS | apt 2.14.0 **plus a patched overlay** at `~/mavros_ws` (`scripts/build_patched_mavros.sh`: upstream duplicate-ACK / param race fixes). The launch log line `MAVROS: patched overlay` confirms it is in use | 2026-09-30 |
 | Wheel track | `RD_WHEEL_TRACK = 0.63 m` | `px4-params/*.params` |
 | | Full NTRIP client (`rtk_correction_bridge`), managed as a supervised child process by `rover_backend`, confirmed FIXED and live 2026-08-31 evening | see RTK section below |
 
@@ -184,10 +185,11 @@ initial commit and never updated as the architecture moved on.
 **Since 2026-09-29 it can run as the boot service `dyx-rover.service`**
 (`scripts/rover_launch.sh`, installed by the operator with
 `sudo ./scripts/install_rover_service.sh --now`; runbook
-`docs/ROVER_BOOT_SERVICE.md`). When it is installed, "restart the stack" is
-`sudo systemctl restart dyx-rover`, and nobody should also launch by hand.
-Until the service is installed and boot-verified, a manual launch is
-`ros2 launch rover_bringup rover.launch.py` with ROS and the overlay sourced.
+`docs/ROVER_BOOT_SERVICE.md`). **It is installed and in daily use (verified
+2026-09-30)**: "restart the stack" is `sudo systemctl restart dyx-rover`, and
+nobody should also launch by hand. The bag recorder is a separate unit,
+`bag-autorecord.service`; restart it too after changing
+`scripts/bag_autorecord.py`.
 
 `scripts/stop_rover.sh`'s disarm sequence is still broadly sound
 (disable mission → e-stop → zero velocity → disarm → MANUAL) even though it
@@ -1116,8 +1118,13 @@ keeps `192.168.3.101`, so the frontend and `backend.env` are unchanged.
 Tablets get `192.168.3.x` by DHCP and share the Jetson's USB 4G internet
 (they need it for Mapbox tiles). Runbook for provisioning a new rover:
 **`docs/JETSON_HOTSPOT_NETWORK.md`** (`scripts/setup_jetson_hotspot.sh`,
-`scripts/install_hotspot_qos.sh`, both run by the operator with sudo —
-`flash` has no passwordless sudo).
+`scripts/install_hotspot_qos.sh`, both run by the operator with sudo).
+⚠ **Temporary dev exception:** `flash` has full NOPASSWD sudo via
+`/etc/sudoers.d/99-flash-dev-nopasswd`, granted by the user for one month. The
+persistent timer `remove-flash-dev-sudo.timer` deletes it at **2026-10-30
+18:30 IST**, and the timer survives reboots. Check the file exists before
+relying on it. Replace it with a rule restricted to `systemctl ... dyx-rover`
+before shipping.
 
 - ⚠ **Client internet is capped on purpose** (200 KiB/s down / 64 KiB/s up,
   all clients together, `mangle/DYX_HOTSPOT_QOS` via an NM dispatcher). Before
@@ -1153,6 +1160,9 @@ final point does NOT wait for NEXT** (operator request): the mission
 completes at once in every mode, and the completion E-stop turns the laser
 OFF, so the final point's laser shows only momentarily. START refuses LASER + AUTO. Operator can pick SPRAY/AUTO per
 mission and save defaults (`/home/flash/.ros/dyx_mission_defaults.json`).
+**This rover's saved default is AUTO + SPRAY** (set 2026-09-30,
+`defaults_source: saved`, survived a stack restart). The factory/launch
+default is still MANUAL + LASER.
 Full contract, PX4 params and API: **`docs/LASER_MARKING_MODE.md`**. ⚠ PX4
 `PWM_AUX_FUNC6/MIN6/MAX6/DIS6` must be set (302 / 1000 / 2000 / 1000) before
 the laser will move — not verified on the FCU yet.
@@ -1200,12 +1210,12 @@ the next feature and is not implemented.
 
 ## 2026-09-30 — realtime events, battery critical pause, power-cycle recovery
 
-Branch `latency-hardening` (= `main` at `3ee0070`; `bb6be0c` adds SHARINI's
-recovery + battery rework and is **not yet on `main`**). **Nothing below is
-field-tested.** Deployed on the Jetson as of 14:49 IST: `3ee0070` only.
-`bb6be0c` needs `git pull` +
-`colcon build --packages-select mission_manager_interfaces mission_manager rover_backend jetson_4wd_control`
-+ restart (new `.srv`).
+Branch `latency-hardening`. ⚠ `origin/main` is still at `33e43e0`; everything
+after it (MAVROS patch, relay, radial20 fix, point_history) is **only on
+`latency-hardening`**. **Deployed on the Jetson as of 19:45 IST: `d2828a0`**
+(later commits are docs only). Recovery, the battery pause, E-stop Release &
+Resume and the power-cycle popup were exercised on the rover on 2026-09-30.
+The radial20 fix and point_history are **not field-tested**.
 
 - **`rtk_status` socket event** (`a21e6e2`). This is the GET `/api/rtk/status`
   body, emitted every 1 s, at once after any RTK profile/source/START/STOP
@@ -1224,9 +1234,9 @@ field-tested.** Deployed on the Jetson as of 14:49 IST: `3ee0070` only.
   - START/RESUME/NEXT/SKIP return 409 `BATTERY_CRITICAL_LOCKOUT`.
   - `cmd_vel_bridge` requests MAVLink `BATTERY_STATUS` (147) at 2 Hz
     (`battery_status_rate_hz`); before this, `/mavros/battery` was ~0.3-0.44 Hz.
-  - ⚠ **If the 2 Hz request does not take effect, the freshness check means a
-    critical battery never pauses.** Verify `ros2 topic hz /mavros/battery` ≈ 2
-    after deploying.
+  - ✅ Verified 2026-09-30: `/mavros/battery` measured **1.8 Hz, largest gap
+    0.51 s**, well inside the 1.5 s freshness limit. If it ever falls back
+    to ~0.3 Hz, a critical battery never pauses.
   - ⚠ There is no unlock hysteresis: one sample > 23.80 V clears the lockout,
     and the pack recovers at rest.
 - **Power-cycle recovery** (SHARINI `b6eb272`):
@@ -1257,6 +1267,112 @@ field-tested.** Deployed on the Jetson as of 14:49 IST: `3ee0070` only.
   - When streaming, the rate is ~600 B/s, with 0 CRC errors.
 - **Tablet side:** `realtime-hardening` @ `09b3d3a` has all of the above. The
   release APK was built 2026-09-30 from that commit.
+
+### MAVROS abort + slow commands (2026-09-30 evening, not field-tested)
+
+- **MAVROS 2.14.0 (apt) aborts on a duplicate `COMMAND_ACK`.**
+  - `command.cpp` delivers an ACK with `promise.set_value()`, keyed only on
+    the command number.
+  - A second ACK that arrives before the waiter erases its entry throws
+    `std::future_error: Promise already satisfied`. Nothing catches it, so
+    the process exits with code -6.
+  - PX4 ACKs Mission Manager's `DO_SET_MODE` (176) twice here. Two harmless
+    `CMD: Unexpected command 176` came first (17:29, 17:32); the crash was
+    at 17:34:46, 1 s after a tablet Start.
+  - Why PX4 sends two ACKs is not known. Lead: a GCS at MAVLink 255.190 on
+    the UDP link.
+  - Upstream fixed it after 2.14.0: `97a14ae1` (command, #2159) and
+    `6ea0636e` (param, PR #2093). Both are backported in `patches/mavros/`
+    and built into `~/mavros_ws` by `scripts/build_patched_mavros.sh`.
+  - `rover.launch.py` uses that overlay only if its `mavros_node` exists,
+    and logs which MAVROS started.
+- **MAVROS now respawns** (`respawn_delay=3.0`). Before this, a dead MAVROS
+  left the stack "active" with every Start refused as "Spray controller not
+  ready", because the spray controller needs `/mavros/state` < 2.5 s old.
+- **Mission Manager `_px4_link_block_reason()`** (stale > 3 s or
+  disconnected) blocks START/RESUME and motion health, and is checked
+  *before* spray readiness. Status exposes `px4_link_ok` and
+  `px4_link_reason`; the tablet shows a `PX4 LINK LOST` toast.
+- **Why every command was slow:** `rover_backend` subscribed to
+  `/uas1/mavlink_source`, ~350-420 Hz (ATTITUDE ~100 Hz, several 50 Hz
+  streams), to decode ESTIMATOR_STATUS, which arrives at < 1 Hz.
+  - rclpy costs **~550 us per delivered message on this Jetson, raw or
+    deserialized** (measured), so one backend thread sat at ~54% CPU and the
+    process at ~100%.
+  - API calls and ROS service replies queued behind it on the GIL.
+  - Now `estimator_status_relay` (a separate process) forwards only #230 on
+    `/rover_backend/estimator_status_mavlink`.
+  - Rule: **never subscribe a Python node to `/uas1/mavlink_source`.**
+  - Measured after deploy (18:22, patched MAVROS live): backend 83% -> ~70%
+    CPU; the relay itself costs ~27%. py-spy `--gil` (sudo needed,
+    `ptrace_scope=1`): the backend holds the GIL 67% of a core, and ~70% of
+    that is rclpy's `wait_for_ready_callbacks` (the wait set is rebuilt on
+    every wake-up), with FastAPI ~12%. **Cost scales with wake-up rate, not
+    payload.** The remaining ~140 wakes/s are mostly odom 50 Hz + `/rpp/debug`
+    50 Hz.
+  - Other load seen: `bag_autorecord.py` polls `/api/mission/status` at 5 Hz;
+    MAVROS uses ~94% CPU.
+
+### Field run `mission.csv_20260930_185447` + `log_592` (15 pts) — findings
+
+Bag: `bags_jet/Sep_30_evening/`. The ULog GNSS clock runs **17.1 s ahead** of
+the Jetson/QGC clock (aligned on OFFBOARD->ALTCTL); apply the offset before
+comparing any bag/ULog timing.
+
+- **"GNSS fusion stopped" is a satellite-count failure, not FLOAT.** The RTK
+  solution used only 4-10 SVs all evening, versus 15-16 whenever the receiver
+  fell back to 3D fix; RTK counts only SVs in the base corrections
+  (`MP23960`).
+  - At 4 SVs, `EKF2_REQ_NSATS=6` fails (`gps_check_fail_flags=2`) -> EKF
+    dead-reckons -> about 4 s later local pos/vel are invalid -> PX4 sets
+    `offboard_control_signal_lost` **with** `local_velocity_invalid` -> ALTCTL.
+  - The OFFBOARD stream was intact (0 gaps > 0.2 s). **PX4's "No offboard
+    signal" can mean "velocity estimate invalid".**
+  - MANUAL/Hold changes the same evening were the RC mode switch (slot 4 then
+    back to 1), not the software.
+- **radial20 deadlock after stopping inside the 0.75 m terminal zone (FIXED
+  in source 2026-09-30, not field-tested).**
+  - `_step_radial20_terminal_for_cycle` fed the regulator the *last published*
+    speed. After any stop (RTK pause, E-stop release, resume, short leg) that
+    is 0, so TRACK/TERMINAL_GUIDANCE passed 0 through, RPP published 0 again,
+    and the point failed at `terminal_timeout` after 15 s without moving
+    (P0002/9/12 at 111/42/97 mm).
+  - Now seeded with `deceleration_floor_speed` (0.15 m/s, above the 0.143 m/s
+    breakaway) while in TRACK/TERMINAL_GUIDANCE. BRAKE_PROFILE still owns the
+    stop.
+  - The `/rpp/debug` label `ALIGNMENT` during those windows was misleading:
+    the radial20 branch ran and returned first.
+- **`/mission_manager/status` was ~97 KB at 4.5 Hz (65% of the bag).**
+  - `point_results`, `point_accuracy_snapshots`, `point_survey_snapshots` and
+    `last_termination_report` now go on the latched
+    `/mission_manager/point_history`, published only on change. Status carries
+    `point_history_version` instead.
+  - The backend merges history back into the recovery checkpoint
+    (`_with_point_history`), and only for the same `mission_run_id`.
+  - The bag recorder topic list and QoS overrides include the new topic.
+
+### Base corrections vs receiver use (2026-09-30, receiver fw 4.14.0)
+
+- **What arrives:** `DiffCorrIn` on a temporary USB1 stream (parked, 5 min,
+  streams turned off afterwards) shows the base sends 1005 + MSM4 GPS 9 /
+  GLO 6-7 / GAL 7 / BDS 7 sats + 1230, all at 1 Hz, 0 CRC errors, max gap
+  1.2 s. The base is about 6 m away.
+- **Signals match the rover exactly:** GPS L1C+L2C, GLO G1C+G2C, GAL
+  E1C+E5bQ, BDS B1I+B2I.
+- **What the receiver used:** BDS 0%, GAL dropped in 10% of epochs, NrSV 6-9,
+  `RxError=8` throughout. So the receiver is **rejecting valid, matched
+  corrections**.
+- **Mission ULog (`gps_dump`):** every FLOAT window is exactly the time
+  corrections-available shrank to GPS-only (97 s, 4 SVs) or GPS+GAL, while
+  correction age stayed 1.1-2.5 s. The 0.5 s StandAlone/DGPS epochs used
+  15-16 SVs across all four constellations, so sky and tracking were fine.
+- **PX4 is not the cause:** `vehicle_gps_position` matches the receiver
+  `PVTGeodetic` in 99.9% of epochs (fix and NrSV).
+- ⚠ **PX4 `time_utc_usec` from this driver is GPS time** (18 s ahead of UTC),
+  which is the ULog clock offset.
+- Streams 2-10 on the receiver are all off now (USB1 is silent unless a
+  stream is configured).
+- Fix lead: firmware 4.14.0 -> 4.14.10+.
 
 ## Repo status (2026-08-31)
 
@@ -1393,7 +1509,9 @@ ros2 topic echo /mavros/state --once
 ros2 topic echo /mavros/local_position/odom
 ros2 topic echo /rpp/accuracy --once
 journalctl -u bag-autorecord.service -f      # bag recorder unit
-journalctl -u dyx-rover -f                    # rover stack unit (once installed)
+journalctl -u dyx-rover -f                    # rover stack unit
+journalctl -u dyx-rover -b | grep "MAVROS:"   # patched overlay vs apt MAVROS
+sudo systemctl restart dyx-rover bag-autorecord   # restart (rover idle + disarmed first)
 iw dev wlP1p1s0 station dump | grep -E "^Station|signal:"   # hotspot clients
 sudo iptables -t mangle -L DYX_HOTSPOT_QOS -n -v            # client-internet cap counters
 ```
@@ -1410,8 +1528,27 @@ sudo iptables -t mangle -L DYX_HOTSPOT_QOS -n -v            # client-internet ca
   — decodes the raw Septentrio SBF and injected RTCM3 out of `gps_dump`: which
   signals/constellations the RTK solution used, ARP/phase-centre flags, base
   correction contents, receiver uptime, and stationary error vs surveyed truth.
+  ⚠ With `direct_inject` (USB2) the ULog carries **no** RTCM (the `.rtcm`
+  stream is 0 bytes). Only the receiver's own `BaseVectorGeod` "corrections
+  available" signal mask is in the log.
+- **Receiver console (USB1 = `/dev/ttyACM1`, free; USB2 belongs to the RTCM
+  worker).** Open it raw and send ASCII commands ending in `\r\n`.
+  - Read-only: `getSBFOutput, all`, `getDataInOut, all`, `getSignalUsage`,
+    `getSatelliteUsage`, `getDiffCorrUsage`, `lstInternalFile, Identification`.
+  - Do not send `lif, error` without asking: it **clears** the error log.
+  - To see raw corrections, set `Stream2 -> USB1, DiffCorrIn, OnChange` plus
+    `Stream3 -> PVTGeodetic+BaseVectorGeod+ReceiverStatus`, capture, then set
+    both back to `none, off` and re-read to confirm. Never save to boot: the
+    receiver config is user-owned (memory: gnss-manual-config-architecture).
+    Decode the RTCM inside SBF 5919 with `scripts/gps_dump_sbf_report.py`
+    helpers; MSM signal mask = DF395 at bit 137.
+- `python3 scripts/nsh_bridge.py "<cmd>"` on the Jetson: PX4 NSH over MAVROS
+  (`commander check`, `listener failsafe_flags -n 1`, ...). It refuses while
+  armed.
 - Backend: `http://192.168.3.101:5001` (FastAPI, port from
   `src/rover_backend/config/backend.env`).
-- Deploy/review workflow: see the `rover-ship` skill — this repo has no
-  systemd-managed core services, so "restart" mostly means "ask the
-  operator to restart the stack at the rover", not a scriptable SSH command.
+- Deploy/review workflow: see the `rover-ship` skill. Deploy is git only:
+  commit, push, then `git pull` on the Jetson, then `colcon build` (only when
+  entry points, `.srv` files or `package.xml` change), then
+  `sudo systemctl restart dyx-rover`. Check first that the rover is idle and
+  disarmed (`/mission_manager/status`).
