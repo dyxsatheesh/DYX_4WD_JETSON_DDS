@@ -528,6 +528,19 @@ def build_telemetry_payload(
         "alt": position.get("altitude_m"),
         "battery_v": battery.get("voltage_v"),
         "battery_pct": battery.get("remaining_percent"),
+        "battery_status": battery.get("status"),
+        "battery_mission_lockout": bool(
+            battery.get("mission_lockout", False)
+        ),
+        "battery_mission_lockout_reason": battery.get(
+            "mission_lockout_reason"
+        ),
+        "battery_critical_stop_in_progress": bool(
+            battery.get("critical_stop_in_progress", False)
+        ),
+        "battery_critical_stop_error": battery.get(
+            "critical_stop_error"
+        ),
         "gps_fix": _safe_int(
             gps.get("fix_type"),
             0,

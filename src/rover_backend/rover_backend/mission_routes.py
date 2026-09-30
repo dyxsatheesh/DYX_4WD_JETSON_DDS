@@ -41,6 +41,8 @@ from starlette.concurrency import run_in_threadpool
 
 from rover_backend.auth import AuthenticatedSession
 from rover_backend.auth import require_auth
+from rover_backend.battery_policy import BATTERY_CRITICAL_PERCENT
+from rover_backend.battery_policy import battery_mission_locked
 from rover_backend.config import settings
 from rover_backend.mission_report import MissionReportError
 from rover_backend.mission_report import mission_report_store
@@ -187,6 +189,42 @@ def _require_not_driving(
     operation: str,
 ) -> None:
     _require_not_active(operation=operation, include_preparing=False)
+
+
+def _require_battery_mission_operable(
+    *,
+    operation: str,
+) -> None:
+    """Reject movement-producing mission commands at critical battery."""
+
+    battery = rover_state.section("battery")
+    percentage = battery.get("remaining_percent")
+    locked = bool(battery.get("mission_lockout", False))
+
+    try:
+        locked = locked or battery_mission_locked(
+            float(percentage) if percentage is not None else None
+        )
+    except (TypeError, ValueError):
+        locked = bool(battery.get("mission_lockout", False))
+
+    if not locked:
+        return
+
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "success": False,
+            "code": "BATTERY_CRITICAL_LOCKOUT",
+            "message": (
+                "Battery is at 10% or below. Mission operation is disabled "
+                "until battery percentage rises above the critical threshold."
+            ),
+            "operation": operation,
+            "battery_percent": percentage,
+            "critical_threshold_percent": BATTERY_CRITICAL_PERCENT,
+        },
+    )
 
 
 def _require_ros_bridge() -> None:
@@ -795,6 +833,7 @@ async def start_mission(
     _session: AuthenticatedSession = Depends(require_auth),
     _mutation: None = Depends(_serialize_mission_mutation),
 ) -> dict[str, Any]:
+    _require_battery_mission_operable(operation="start")
     mission = _mission_state()
     requested_id = str(request.mission_id).strip() if request and request.mission_id else None
     if requested_id and requested_id != str(mission.get("mission_id") or ""):
@@ -834,6 +873,10 @@ async def start_mission(
             ),
         )
 
+    # Re-check immediately before ROS dispatch because archived restore and
+    # trajectory preparation can take long enough for battery state to change.
+    _require_battery_mission_operable(operation="start")
+
     return await _run_ros_operation(
         "start",
         ros_bridge.start_mission,
@@ -856,6 +899,7 @@ async def resume_mission(
     _session: AuthenticatedSession = Depends(require_auth),
     _mutation: None = Depends(_serialize_mission_mutation),
 ) -> dict[str, Any]:
+    _require_battery_mission_operable(operation="resume")
     return await _run_ros_operation(
         "resume",
         ros_bridge.resume_mission,
@@ -867,6 +911,7 @@ async def next_point(
     _session: AuthenticatedSession = Depends(require_auth),
     _mutation: None = Depends(_serialize_mission_mutation),
 ) -> dict[str, Any]:
+    _require_battery_mission_operable(operation="next-point")
     return await _run_ros_operation(
         "next-point",
         ros_bridge.next_point,
@@ -878,6 +923,7 @@ async def skip_point(
     _session: AuthenticatedSession = Depends(require_auth),
     _mutation: None = Depends(_serialize_mission_mutation),
 ) -> dict[str, Any]:
+    _require_battery_mission_operable(operation="skip-point")
     return await _run_ros_operation(
         "skip-point",
         ros_bridge.skip_point,

@@ -260,6 +260,10 @@ class RoverState:
                 "remaining_percent": None,
                 "temperature_c": None,
                 "status": "UNKNOWN",
+                "mission_lockout": False,
+                "mission_lockout_reason": None,
+                "critical_stop_in_progress": False,
+                "critical_stop_error": None,
                 "updated_at": now,
             },
             # Forward ultrasonic (obstacle_monitor /obstacle/status).

@@ -60,6 +60,9 @@ from mission_manager_interfaces.srv import ReleaseEmergencyStop
 from std_srvs.srv import SetBool
 from std_srvs.srv import Trigger
 
+from rover_backend.battery_policy import battery_mission_locked
+from rover_backend.battery_policy import classify_battery_percentage
+from rover_backend.battery_policy import normalize_battery_percentage
 from rover_backend.config import settings
 from rover_backend.voice import voice_announcer
 from rover_backend.realtime_contract import build_point_result_event
@@ -485,6 +488,11 @@ class RoverBackendRosNode(Node):
 
         self._terminal_cleanup_lock = threading.Lock()
         self._terminal_cleanup_keys: set[str] = set()
+
+        # Battery-critical STOP is dispatched outside the BatteryState callback
+        # so the ROS executor thread is never blocked waiting on Mission Manager.
+        self._battery_stop_lock = threading.Lock()
+        self._battery_stop_in_progress = False
 
         # The backend always starts safe.
         self._mission_enable = False
@@ -2102,30 +2110,92 @@ class RoverBackendRosNode(Node):
             "Timed out waiting for obstacle_monitor to acknowledge the configuration"
         )
 
+    def _critical_battery_stop_worker(
+        self,
+        percentage: float,
+    ) -> None:
+        """STOP an active mission after entering the critical battery band."""
+
+        error_text: str | None = None
+
+        try:
+            LOGGER.error(
+                "Battery critical at %.1f%%; requesting Mission Manager STOP",
+                percentage,
+            )
+            # Use the runtime STOP path so its safety-generation ordering stays
+            # identical to an operator-issued STOP.
+            ros_bridge.stop_mission()
+        except Exception as error:
+            error_text = str(error)
+            LOGGER.exception(
+                "Battery-critical automatic mission STOP failed"
+            )
+        finally:
+            rover_state.update(
+                "battery",
+                critical_stop_in_progress=False,
+                critical_stop_error=error_text,
+            )
+            with self._battery_stop_lock:
+                self._battery_stop_in_progress = False
+            _notify_authoritative_state_changed()
+
+    def _schedule_critical_battery_stop(
+        self,
+        percentage: float,
+    ) -> None:
+        """Request one non-blocking STOP only when a mission can operate."""
+
+        mission = rover_state.section("mission")
+        safety = rover_state.section("safety")
+        mission_state = str(
+            mission.get("state") or "EMPTY"
+        ).strip().upper()
+
+        mission_active = (
+            bool(safety.get("mission_enable", False))
+            or mission_state in {
+                "RUNNING",
+                "PAUSED",
+                "WAITING_FOR_NEXT",
+            }
+        )
+
+        if not mission_active:
+            return
+
+        with self._battery_stop_lock:
+            if self._battery_stop_in_progress:
+                return
+            self._battery_stop_in_progress = True
+
+        rover_state.update(
+            "battery",
+            critical_stop_in_progress=True,
+            critical_stop_error=None,
+        )
+        _notify_authoritative_state_changed()
+
+        threading.Thread(
+            target=self._critical_battery_stop_worker,
+            args=(percentage,),
+            name="battery-critical-mission-stop",
+            daemon=True,
+        ).start()
+
     def _battery_callback(
         self,
         message: BatteryState,
     ) -> None:
         self._mark_ros_message()
 
-        percentage = _finite_float(message.percentage)
-
-        if percentage is not None:
-            if 0.0 <= percentage <= 1.0:
-                percentage *= 100.0
-            elif percentage < 0.0:
-                percentage = None
+        raw_percentage = _finite_float(message.percentage)
+        percentage = normalize_battery_percentage(raw_percentage)
+        remaining_status = classify_battery_percentage(percentage)
+        mission_lockout = battery_mission_locked(percentage)
 
         voice_announcer.on_battery_percent(percentage)
-
-        remaining_status = "UNKNOWN"
-        if percentage is not None:
-            if percentage <= 10.0:
-                remaining_status = "CRITICAL"
-            elif percentage <= 20.0:
-                remaining_status = "LOW"
-            else:
-                remaining_status = "OK"
 
         rover_state.update(
             "battery",
@@ -2134,7 +2204,17 @@ class RoverBackendRosNode(Node):
             remaining_percent=percentage,
             temperature_c=_finite_float(message.temperature),
             status=remaining_status,
+            mission_lockout=mission_lockout,
+            mission_lockout_reason=(
+                "BATTERY_CRITICAL"
+                if mission_lockout
+                else None
+            ),
         )
+        _notify_authoritative_state_changed()
+
+        if mission_lockout and percentage is not None:
+            self._schedule_critical_battery_stop(percentage)
 
     def _rtk_health_callback(
         self,
