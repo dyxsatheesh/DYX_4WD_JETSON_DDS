@@ -51,6 +51,7 @@ def _node(clock):
         brake_margin_m=0.003,
     )
     node = SimpleNamespace(
+        RADIAL20_RESTART_STATIONARY_MPS=0.02,
         radial_stop_regulator=TerminalStopRegulator(config),
         deceleration_floor_speed=FLOOR_MPS,
         precision_last_published_translational_speed_mps=0.0,  # after the pause
@@ -93,3 +94,27 @@ def test_moving_approach_speed_is_passed_through_unchanged():
     node.precision_last_published_translational_speed_mps = 0.6
     result = step(node, along_remaining=0.70, cross_error=0.0)
     assert math.isclose(result.forward_speed_command_mps, 0.6)
+
+
+def test_normal_final_approach_below_floor_is_not_seeded():
+    """approach_speed_cap() publishes down to 0.10 m/s near the point; the
+    restart seed must not touch a moving approach (2026-09-30 drag/skid)."""
+    step = _step_method()
+    clock = {"t": 100.0}
+    node = _node(clock)
+    node._radial_stop_position_derived_speed_mps = lambda _t: 0.11  # still rolling
+    node.precision_last_published_translational_speed_mps = 0.11
+    result = step(node, along_remaining=0.11, cross_error=0.0)
+    assert math.isclose(result.forward_speed_command_mps, 0.11)
+    assert math.isclose(node.radial_stop_last_sample.tracking_speed_command_mps, 0.11)
+
+
+def test_zero_command_while_still_rolling_is_not_seeded():
+    step = _step_method()
+    clock = {"t": 100.0}
+    node = _node(clock)
+    node._radial_stop_position_derived_speed_mps = lambda _t: 0.08
+    node.precision_last_published_translational_speed_mps = 0.0
+    step(node, along_remaining=0.30, cross_error=0.0)
+    assert node.radial_stop_last_sample.tracking_speed_command_mps == 0.0
+

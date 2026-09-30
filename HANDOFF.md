@@ -65,7 +65,7 @@ Turn `DYX_REALTIME_METRICS` back off afterwards.
 |---|---|---|
 | `c797f8f` | MAVROS: respawn + patched overlay (upstream `97a14ae1` + `6ea0636e`); Mission Manager `px4_link_ok` gate ("PX4 link lost" instead of "spray not ready") | Patch **seen working**: a duplicate `176` ACK was logged, not fatal. Respawn **seen working** after the Pixhawk rebooted |
 | `066e786` | `estimator_status_relay`: the raw ~400 Hz MAVLink stream moved out of `rover_backend` | Backend 83% -> ~70% CPU. The rest is rclpy wake-up overhead (odom + `/rpp/debug` at 50 Hz) |
-| `f16d7b0` | **radial20 standstill deadlock**: pausing inside 0.75 m of a point used to fail the point 15 s later without moving | **NOT field-tested** |
+| `f16d7b0` | **radial20 standstill deadlock**: pausing inside 0.75 m of a point used to fail the point 15 s later without moving | Operator: the restart works, **but there was drag/skid at every normal stop afterwards.** The seed also fired during the normal 0.10-0.15 m/s final approach. **Narrowed in the follow-up commit (NOT deployed)** |
 | `d2828a0` | Per-point history moved to the latched `/mission_manager/point_history`; status went from ~97 KB to 3.4 KB | Verified live (3.4 KB, topic up). **Recovery merge not field-tested** |
 | frontend `b628853` | Recovery popup: **Release E-stop & Resume** | Needs the new APK |
 | frontend `ecda663` | `PX4 LINK LOST` toast | Needs the new APK |
@@ -75,7 +75,12 @@ Turn `DYX_REALTIME_METRICS` back off afterwards.
 1. **Install the APK** on the tablet, then test:
    - Power-cycle mid-mission -> the popup shows **Release E-stop & Resume** -> it resumes from the right point.
    - The PX4 LINK LOST toast does NOT appear during normal running.
-2. **Field-test the radial20 fix (`f16d7b0`)**. It needs no RTK trouble:
+2. **Deploy the narrowed radial20 fix and field-test it.** First check that
+   normal stops are back to the pre-`f16d7b0` behaviour: a smooth slow-down,
+   no drag/skid. Compare the stop profile in the bag (`/rpp/debug`
+   `command_speed_mps` over the last 0.3 m) against `mission.csv_20260930_185447`,
+   which is pre-fix, and against a post-`f16d7b0` bag if one exists. Then run the
+   pause test. It needs no RTK trouble:
    - Tablet **PAUSE** when the rover is < 0.5 m from a point, wait 5 s, **RESUME**.
    - PASS if the rover creeps in (about 0.15 m/s), stops, and the point completes.
    - FAIL if the point fails with `RADIAL20_TERMINAL_TIMEOUT` 15 s later. Then check `/rpp/terminal_certificate` for `zero_latched` / `state` after resume.

@@ -133,6 +133,9 @@ class RPPController(Node):
     # alphas are specified at this 20 Hz reference rate and are converted to
     # the running rate so their time constants are unchanged.
     CONTROL_HZ = 20.0
+    # Position-derived speed below which radial20 treats the chassis as stopped
+    # for a standstill restart (parked floor measured 6.3 mm/s, 2026-09-05).
+    RADIAL20_RESTART_STATIONARY_MPS = 0.02
     FILTER_ALPHA_REFERENCE_HZ = 20.0
     TELEMETRY_HZ = 50.0
     MAXIMUM_MOVING_SPEED_MPS = 1.00
@@ -10456,11 +10459,19 @@ class RPPController(Node):
         # P0002/P0009/P0012 failed 15 s after RTK auto-resume at 111/42/97 mm).
         # Seed with the final-approach floor, which sits above the measured
         # 0.143 m/s drivetrain breakaway; BRAKE_PROFILE still owns the stop.
+        #
+        # Only a genuine restart: the last command was a literal zero AND the
+        # chassis is stationary. A normal approach legitimately publishes
+        # below the floor -- approach_speed_cap() slows in proportion to the
+        # distance left, down to approach_min_speed_mps (0.10) -- and seeding
+        # there raised the regulator's braking speed and moved the brake point
+        # on every stop (operator-reported drag/skid at the stop, 2026-09-30).
         if (
             self.radial_stop_regulator.state
             in (RadialStopState.TRACK, RadialStopState.TERMINAL_GUIDANCE)
             and along_remaining > 0.0
-            and tracking_speed_command < self.deceleration_floor_speed
+            and tracking_speed_command <= 1.0e-9
+            and position_derived_speed < self.RADIAL20_RESTART_STATIONARY_MPS
         ):
             tracking_speed_command = self.deceleration_floor_speed
         yaw_rate = (
