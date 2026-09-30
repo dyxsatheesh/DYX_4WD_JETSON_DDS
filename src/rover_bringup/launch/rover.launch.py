@@ -144,6 +144,15 @@ def generate_launch_description() -> LaunchDescription:
         actions=[
             LogInfo(msg=("Starting production " "rover_backend")),
             rover_backend_node,
+            # Keeps the ~400 Hz raw MAVLink stream out of rover_backend.
+            Node(
+                package="rover_backend",
+                executable="estimator_status_relay",
+                name="estimator_status_relay",
+                output="screen",
+                respawn=True,
+                respawn_delay=2.0,
+            ),
         ],
     )
 

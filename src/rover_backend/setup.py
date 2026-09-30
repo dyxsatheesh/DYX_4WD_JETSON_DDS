@@ -60,6 +60,10 @@ setup(
                 "rtk_worker = "
                 "rover_backend.rtk_worker_bootstrap:main"
             ),
+            (
+                "estimator_status_relay = "
+                "rover_backend.estimator_status_relay:main"
+            ),
         ],
     },
 )

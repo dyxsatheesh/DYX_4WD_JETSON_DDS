@@ -1258,6 +1258,44 @@ field-tested.** Deployed on the Jetson as of 14:49 IST: `3ee0070` only.
 - **Tablet side:** `realtime-hardening` @ `09b3d3a` has all of the above. The
   release APK was built 2026-09-30 from that commit.
 
+### MAVROS abort + slow commands (2026-09-30 evening, not field-tested)
+
+- **MAVROS 2.14.0 (apt) aborts on a duplicate `COMMAND_ACK`.**
+  - `command.cpp` delivers an ACK with `promise.set_value()`, keyed only on
+    the command number.
+  - A second ACK that arrives before the waiter erases its entry throws
+    `std::future_error: Promise already satisfied`. Nothing catches it, so
+    the process exits with code -6.
+  - PX4 ACKs Mission Manager's `DO_SET_MODE` (176) twice here. Two harmless
+    `CMD: Unexpected command 176` came first (17:29, 17:32); the crash was
+    at 17:34:46, 1 s after a tablet Start.
+  - Why PX4 sends two ACKs is not known. Lead: a GCS at MAVLink 255.190 on
+    the UDP link.
+  - Upstream fixed it after 2.14.0: `97a14ae1` (command, #2159) and
+    `6ea0636e` (param, PR #2093). Both are backported in `patches/mavros/`
+    and built into `~/mavros_ws` by `scripts/build_patched_mavros.sh`.
+  - `rover.launch.py` uses that overlay only if its `mavros_node` exists,
+    and logs which MAVROS started.
+- **MAVROS now respawns** (`respawn_delay=3.0`). Before this, a dead MAVROS
+  left the stack "active" with every Start refused as "Spray controller not
+  ready", because the spray controller needs `/mavros/state` < 2.5 s old.
+- **Mission Manager `_px4_link_block_reason()`** (stale > 3 s or
+  disconnected) blocks START/RESUME and motion health, and is checked
+  *before* spray readiness. Status exposes `px4_link_ok` and
+  `px4_link_reason`; the tablet shows a `PX4 LINK LOST` toast.
+- **Why every command was slow:** `rover_backend` subscribed to
+  `/uas1/mavlink_source`, ~350-420 Hz (ATTITUDE ~100 Hz, several 50 Hz
+  streams), to decode ESTIMATOR_STATUS, which arrives at < 1 Hz.
+  - rclpy costs **~550 us per delivered message on this Jetson, raw or
+    deserialized** (measured), so one backend thread sat at ~54% CPU and the
+    process at ~100%.
+  - API calls and ROS service replies queued behind it on the GIL.
+  - Now `estimator_status_relay` (a separate process) forwards only #230 on
+    `/rover_backend/estimator_status_mavlink`.
+  - Rule: **never subscribe a Python node to `/uas1/mavlink_source`.**
+  - Other load seen: `bag_autorecord.py` polls `/api/mission/status` at 5 Hz;
+    MAVROS uses ~94% CPU.
+
 ## Repo status (2026-08-31)
 
 - **`WORKING_STATUS_24_06_2026.txt`** — stale (2026-06-24), architecture it

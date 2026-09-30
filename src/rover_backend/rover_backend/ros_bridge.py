@@ -682,9 +682,12 @@ class RoverBackendRosNode(Node):
             sensor_qos,
         )
 
+        # Only ESTIMATOR_STATUS, pre-filtered by estimator_status_relay:
+        # the full /uas1/mavlink_source stream (~400 Hz) saturated this
+        # process's executor and slowed every API command.
         self.create_subscription(
             Mavlink,
-            "/uas1/mavlink_source",
+            "/rover_backend/estimator_status_mavlink",
             self._mavlink_estimator_status_callback,
             sensor_qos,
         )
