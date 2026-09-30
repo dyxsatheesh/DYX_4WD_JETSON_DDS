@@ -1,3 +1,95 @@
+# Handoff — for the 2026-10-01 session (written 2026-09-30 evening)
+
+> Newest section first. Everything under the next `---` rule is older history
+> (2026-09-04 onward), kept for reference. **CLAUDE.md is the source of truth**
+> for facts; this file is *what to do next*.
+
+## 0. Rover state right now
+
+| Item | State |
+|---|---|
+| Jetson code | `latency-hardening` @ `d2828a0` deployed and running since 19:45 IST (`c5bc91c` = docs only). ⚠ `origin/main` is still `33e43e0`, so merge when field-verified |
+| MAVROS | **Patched overlay** `~/mavros_ws`, and the log shows `MAVROS: patched overlay`. Auto-respawn is on |
+| Mission defaults | **AUTO + SPRAY saved** (`~/.ros/dyx_mission_defaults.json`) |
+| Tablet | Release APK `realtime-hardening` @ `ecda663` is built (`android/app/build/outputs/apk/release/app-release.apk`) and **not installed yet** (`adb install -r`) |
+| Sudo | Full NOPASSWD for `flash` until **2026-10-30 18:30 IST** (auto-removed by `remove-flash-dev-sudo.timer`) |
+| Receiver | mosaic-H **firmware 4.14.0**; Streams 2-10 off; USB1 is free for diagnostics |
+
+## 1. Shipped on 2026-09-30
+
+| Commit | What | Field status |
+|---|---|---|
+| `c797f8f` | MAVROS: respawn + patched overlay (upstream `97a14ae1` + `6ea0636e`); Mission Manager `px4_link_ok` gate ("PX4 link lost" instead of "spray not ready") | Patch **seen working**: a duplicate `176` ACK was logged, not fatal. Respawn **seen working** after the Pixhawk rebooted |
+| `066e786` | `estimator_status_relay`: the raw ~400 Hz MAVLink stream moved out of `rover_backend` | Backend 83% -> ~70% CPU. The rest is rclpy wake-up overhead (odom + `/rpp/debug` at 50 Hz) |
+| `f16d7b0` | **radial20 standstill deadlock**: pausing inside 0.75 m of a point used to fail the point 15 s later without moving | **NOT field-tested** |
+| `d2828a0` | Per-point history moved to the latched `/mission_manager/point_history`; status went from ~97 KB to 3.4 KB | Verified live (3.4 KB, topic up). **Recovery merge not field-tested** |
+| frontend `b628853` | Recovery popup: **Release E-stop & Resume** | Needs the new APK |
+| frontend `ecda663` | `PX4 LINK LOST` toast | Needs the new APK |
+
+## 2. Tomorrow — in this order
+
+1. **Install the APK** on the tablet, then test:
+   - Power-cycle mid-mission -> the popup shows **Release E-stop & Resume** -> it resumes from the right point.
+   - The PX4 LINK LOST toast does NOT appear during normal running.
+2. **Field-test the radial20 fix (`f16d7b0`)**. It needs no RTK trouble:
+   - Tablet **PAUSE** when the rover is < 0.5 m from a point, wait 5 s, **RESUME**.
+   - PASS if the rover creeps in (about 0.15 m/s), stops, and the point completes.
+   - FAIL if the point fails with `RADIAL20_TERMINAL_TIMEOUT` 15 s later. Then check `/rpp/terminal_certificate` for `zero_latched` / `state` after resume.
+   - Also try: E-stop then release near a point; a mission with two points < 0.75 m apart.
+3. **Check the bag size** of that run: `/mission_manager/status` should now be a few MB, not 200 MB. `/mission_manager/point_history` should hold one message per point.
+4. **Receiver firmware upgrade** (operator, rover parked). This is the lead fix for the RTK FLOAT / GNSS-fusion-stop problem (§3).
+   - Before: back up the receiver config from its web UI.
+   - After: confirm Stream1 -> COM3 (PX4 block list, `msec100`), USB2 = RTCMv3 input, `spm` Rover, dual antenna.
+   - Then re-run the 5-min `DiffCorrIn` capture (method in CLAUDE.md Quick reference) and compare against the baseline below.
+
+## 3. Open problem #1: RTK drops to FLOAT, PX4 drops GNSS, mode goes to ALTCTL
+
+Proven on 2026-09-30 (CLAUDE.md §"Base corrections vs receiver use" and
+§"Field run mission.csv_20260930_185447"):
+
+- The base (`MP23960`, **about 6 m away**) sends clean MSM4 GPS/GLO/GAL/BDS at 1 Hz, 0 CRC errors. Its **signals match the rover exactly**.
+- The receiver **uses BDS 0%**, drops GAL ~10% of the time even while parked, and in the mission fell to **GPS-only for 97 s (4 SVs)**. The correction age stayed fresh the whole time.
+- 4 SVs < `EKF2_REQ_NSATS=6` -> EKF dead-reckons -> local velocity invalid -> PX4 reports "No offboard signal" (the stream was intact) -> ALTCTL.
+- **PX4 is not the cause**: it matches the receiver in 99.9% of epochs.
+- The 3D-fix moments used 15-16 SVs, so the sky is fine.
+
+**Baseline to beat after the firmware upgrade** (parked, 5 min):
+- used GPS+GLO+GAL 89.7% / GPS+GLO 10%, BDS 0%;
+- NrSV 6-9;
+- `RxError=8` in every epoch.
+
+**Still unproven:** whether the base *also* thinned GLO/GAL during the
+mission's 97 s GPS-only window (`DiffCorrIn` was not being recorded then).
+Proposed, not done, and **needs user OK because it changes the receiver
+config**: a persistent USB1 `DiffCorrIn` + PVT stream, logged by a small
+recorder on the Jetson during missions.
+
+Do NOT lower `EKF2_REQ_NSATS` as a fix; the user has not decided. Do NOT send
+`lif, error` (it clears the log) without asking.
+
+## 4. Other open items
+
+- **Pixhawk rebooted at 18:54:07** (USB bootloader re-enumeration); cause unknown. Check whether anyone rebooted it. If not, read `hardfault_log` via `nsh_bridge.py` (disarmed only).
+- **Arming denied before that reboot**: "Resolve system health failures first". The exact failing check is unknown; it is in the pre-reboot ULog (18:22-18:54), which has not been pulled yet.
+- The operator flicked the **RC mode switch to slot 4 (Hold)** three times mid-mission. Brief them, or remap slot 4.
+- The second MAVROS abort path (`serial0: receive: End of file` -> `Resource deadlock avoided` when the FCU USB drops) is **not** covered by the patch; respawn covers it.
+- `rover_backend` still ~70% CPU. Proposed, awaiting OK: the relay also throttles odom + `/rpp/debug` to 10 Hz for the backend (expected ~35-40%).
+- `bag_autorecord.py` polls `/api/mission/status` at 5 Hz.
+- ~80 stale `.mission_runtime.json.*.tmp` in `~/.local/share/dyx_rover/runtime/` (harmless; cleanup at startup = persistence plan A3).
+- PX4 `time_utc_usec` from the Septentrio driver is GPS time (+18 s), which offsets ULog wall time.
+- P0006 / P0014 failed the raw-GNSS 30 mm gate (37.5 / 45.5 mm); P0001 failed `RADIAL20_STALE_TELEMETRY` 9 s after start, next to a 0.3 s setpoint gap. Not investigated.
+
+## 5. Data from 2026-09-30
+
+- `bags_jet/Sep_30_evening/mission.csv_20260930_185447/` (bag, 15 pts, 18:54:50-19:02:38 IST)
+- `bags_jet/Sep_30_evening/log_592_2026-9-30-19-02-54.ulg` (paired; GNSS clock +17.1 s)
+- `bags_jet/Sep_30_evening/receiver_capture_2003/`, the firmware-upgrade comparison baseline:
+  - `usb1_capture_2.sbf`: receiver USB1, `DiffCorrIn` + PVTGeodetic + BaseVectorGeod + ReceiverStatus, parked 20:03-20:08;
+  - `px4raw_capture_2.csv`: the simultaneous MAVROS GPSRAW;
+  - `log_592_...sbf`: the SBF extracted from the mission ULog `gps_dump`.
+
+---
+
 # Handoff — 2026-09-04 session
 
 Analysis of the **2026-09-03 evening dataset** (8 runs, 43 waypoints, 29 straight
