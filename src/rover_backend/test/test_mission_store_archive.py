@@ -13,6 +13,7 @@ def _store(tmp_path, monkeypatch):
         default_dummy_point_distance_m=4.0,
         row_transition_threshold_m=3.0,
         mission_runtime_file=runtime / "mission_runtime.json",
+        mission_recovery_file=runtime / "mission_recovery.json",
     )
     monkeypatch.setattr(mission_store_module, "settings", settings)
     return mission_store_module.MissionStore(
