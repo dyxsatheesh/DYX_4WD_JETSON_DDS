@@ -87,6 +87,27 @@ LOGGER = logging.getLogger(__name__)
 
 
 RTCM_INJECTION_TOPIC = "/mavros/gps_rtk/send_rtcm"
+# rover.launch.py sets this when its C++ topic_tools relay is running. The
+# relay passes the high-rate inputs below at 10 Hz on /rover_backend/input/*,
+# because every message delivered to this rclpy process costs a wake-up
+# (~0.55 ms on the Jetson) however little the callback does. The values only
+# feed tablet telemetry (broadcast at 20 Hz); no mission or motion logic.
+INPUT_THROTTLE_ENABLED = os.environ.get("DYX_BACKEND_INPUT_THROTTLE") == "1"
+THROTTLED_INPUTS = {
+    "/mavros/local_position/odom": "odom",
+    "/mavros/global_position/global": "global",
+    "/mavros/global_position/compass_hdg": "compass_hdg",
+    "/rpp/debug": "rpp_debug",
+    "/rpp/accuracy": "rpp_accuracy",
+}
+
+
+def _input_topic(source: str) -> str:
+    if INPUT_THROTTLE_ENABLED and source in THROTTLED_INPUTS:
+        return f"/rover_backend/input/{THROTTLED_INPUTS[source]}"
+    return source
+
+
 RAW_GNSS_COVARIANCE_SOURCE = (
     "/mavros/global_position/raw/fix.position_covariance"
 )
@@ -673,7 +694,7 @@ class RoverBackendRosNode(Node):
 
         self.create_subscription(
             NavSatFix,
-            "/mavros/global_position/global",
+            _input_topic("/mavros/global_position/global"),
             self._fused_global_position_callback,
             sensor_qos,
         )
@@ -697,14 +718,14 @@ class RoverBackendRosNode(Node):
 
         self.create_subscription(
             Float64,
-            "/mavros/global_position/compass_hdg",
+            _input_topic("/mavros/global_position/compass_hdg"),
             self._heading_callback,
             sensor_qos,
         )
 
         self.create_subscription(
             Odometry,
-            "/mavros/local_position/odom",
+            _input_topic("/mavros/local_position/odom"),
             self._local_odom_callback,
             sensor_qos,
         )
@@ -863,13 +884,13 @@ class RoverBackendRosNode(Node):
 
         self.create_subscription(
             String,
-            "/rpp/accuracy",
+            _input_topic("/rpp/accuracy"),
             self._accuracy_callback,
             retained_qos,
         )
         self.create_subscription(
             String,
-            "/rpp/debug",
+            _input_topic("/rpp/debug"),
             self._rpp_debug_callback,
             debug_qos,
             callback_group=self._rpp_debug_callback_group,
@@ -1037,6 +1058,8 @@ class RoverBackendRosNode(Node):
     # hold and other early-return states. 0.25 s = five missed 50 ms cycles,
     # the same window used for /rpp/debug.
     RPP_ACCURACY_STALE_SEC = 0.25
+    # 10 Hz through the input relay arrives every 0.10-0.13 s.
+    RPP_DEBUG_STALE_SEC = 0.5 if INPUT_THROTTLE_ENABLED else 0.25
 
     def _rpp_debug_stale_monitor(self) -> None:
         rpp_debug_age = self._monotonic_age(self._last_rpp_debug_monotonic)
@@ -1046,7 +1069,7 @@ class RoverBackendRosNode(Node):
             rpp_debug_receive_age_ms=(
                 rpp_debug_age * 1000.0 if math.isfinite(rpp_debug_age) else None
             ),
-            rpp_debug_stream_fresh=(rpp_debug_age <= 0.25),
+            rpp_debug_stream_fresh=(rpp_debug_age <= self.RPP_DEBUG_STALE_SEC),
             rpp_debug_dropped_frames=self._rpp_debug_dropped_frames,
             rpp_accuracy_receive_age_ms=(
                 rpp_accuracy_age * 1000.0
@@ -1590,7 +1613,8 @@ class RoverBackendRosNode(Node):
         if telemetry_sequence >= 0:
             previous_sequence = self._last_rpp_debug_sequence
             if (
-                previous_sequence is not None
+                not INPUT_THROTTLE_ENABLED
+                and previous_sequence is not None
                 and telemetry_sequence > previous_sequence + 1
             ):
                 self._rpp_debug_dropped_frames += (

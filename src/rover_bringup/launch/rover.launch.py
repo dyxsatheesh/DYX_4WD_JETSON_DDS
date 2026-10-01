@@ -23,7 +23,12 @@ from launch.actions import ExecuteProcess
 from launch.actions import LogInfo
 from launch.actions import TimerAction
 
+from launch_ros.actions import ComposableNodeContainer
 from launch_ros.actions import Node
+from launch_ros.descriptions import ComposableNode
+
+from ament_index_python.packages import PackageNotFoundError
+from ament_index_python.packages import get_package_prefix
 
 MISSION_FILE = "/home/flash/rover_ws/" "missions/mission.csv"
 
@@ -55,6 +60,29 @@ _ROVER_MAVROS_PLUGINLISTS = os.path.join(
     "config",
     "mavros_pluginlists.yaml",
 )
+# rover_backend only displays these inputs (tablet telemetry at 20 Hz), but
+# each message costs its rclpy process a wake-up. A C++ topic_tools relay
+# passes them at 10 Hz on /rover_backend/input/<name>; keep these names in
+# sync with THROTTLED_INPUTS in rover_backend/ros_bridge.py. Nothing else
+# subscribes to the relay outputs, so missions and motion are unaffected.
+BACKEND_INPUT_THROTTLE_HZ = 10.0
+BACKEND_THROTTLED_INPUTS = (
+    ("/mavros/local_position/odom", "odom"),
+    ("/mavros/global_position/global", "global"),
+    ("/mavros/global_position/compass_hdg", "compass_hdg"),
+    ("/rpp/debug", "rpp_debug"),
+    ("/rpp/accuracy", "rpp_accuracy"),
+)
+
+
+def _topic_tools_available() -> bool:
+    try:
+        get_package_prefix("topic_tools")
+    except PackageNotFoundError:
+        return False
+    return True
+
+
 MAVROS_PLUGINLISTS_YAML = (
     _ROVER_MAVROS_PLUGINLISTS
     if os.path.isfile(_ROVER_MAVROS_PLUGINLISTS)
@@ -145,12 +173,49 @@ def generate_launch_description() -> LaunchDescription:
         respawn_delay=3.0,
     )
 
+    input_throttle = _topic_tools_available()
+    if input_throttle:
+        backend_input_relay = ComposableNodeContainer(
+            name="backend_input_throttle",
+            namespace="",
+            package="rclcpp_components",
+            executable="component_container",
+            output="screen",
+            respawn=True,
+            respawn_delay=2.0,
+            composable_node_descriptions=[
+                ComposableNode(
+                    package="topic_tools",
+                    plugin="topic_tools::ThrottleNode",
+                    name=f"backend_throttle_{name}",
+                    parameters=[
+                        {
+                            "input_topic": source,
+                            "output_topic": f"/rover_backend/input/{name}",
+                            "throttle_type": "messages",
+                            "msgs_per_sec": BACKEND_INPUT_THROTTLE_HZ,
+                        }
+                    ],
+                )
+                for source, name in BACKEND_THROTTLED_INPUTS
+            ],
+        )
+    else:
+        backend_input_relay = LogInfo(
+            msg=(
+                "topic_tools not installed: rover_backend subscribes to "
+                "its inputs at full rate (sudo apt install "
+                "ros-humble-topic-tools)"
+            )
+        )
+
     rover_backend_node = Node(
         package="rover_backend",
         executable="rover_backend",
         name="rover_backend",
         output="screen",
         emulate_tty=True,
+        additional_env={"DYX_BACKEND_INPUT_THROTTLE": "1" if input_throttle else "0"},
         # Keep one visible backend process during manual testing. If it exits,
         # the operator can inspect the error without a bind-failure respawn loop.
         respawn=False,
@@ -160,6 +225,7 @@ def generate_launch_description() -> LaunchDescription:
         period=4.0,
         actions=[
             LogInfo(msg=("Starting production " "rover_backend")),
+            backend_input_relay,
             rover_backend_node,
             # Keeps the ~400 Hz raw MAVLink stream out of rover_backend.
             Node(
