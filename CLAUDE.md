@@ -1236,8 +1236,12 @@ the next feature and is not implemented.
 Branch `latency-hardening`, **fast-forwarded into `main` at `586e6fe`
 (2026-09-30 22:18, user's decision)**. So `main` includes the MAVROS patch,
 the relay, the radial20 fix and point_history, although the last two are not
-field-tested yet. **Deployed on the Jetson as of 19:45 IST: `d2828a0`**
-(later commits are docs only). Recovery, the battery pause, E-stop Release &
+field-tested yet. **Deployed on the Jetson: `8bed9c5` since 2026-10-01 12:09 IST**
+(verified on the Jetson after restart: all 9 nodes up, `px4_link_ok`,
+`/mavros/battery` 2.0 Hz, estimator relay 1 Hz, 0 errors after the first 20 s;
+it carries the stationary-only radial20 seed, `fe1b6ff`, and SHARINI's 22 V /
+20 s battery policy, `5602d83`). Before that `d2828a0` ran from 2026-09-30
+19:45 IST, with the over-broad `f16d7b0` seed. Recovery, the battery pause, E-stop Release &
 Resume and the power-cycle popup were exercised on the rover on 2026-09-30.
 The radial20 fix and point_history are **not field-tested**.
 

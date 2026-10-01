@@ -8,7 +8,7 @@
 
 | Item | State |
 |---|---|
-| Jetson code | `latency-hardening` @ `d2828a0` deployed and running since 19:45 IST (`c5bc91c` = docs only). `main` == `latency-hardening` @ `586e6fe` (fast-forwarded 22:18 at the user's request; contains the not-yet-field-tested radial20 fix + point_history) |
+| Jetson code | `latency-hardening` @ `8bed9c5` **deployed 2026-10-01 12:09 IST** (verified on the Jetson: 9 nodes up, PX4 link OK, battery 2.0 Hz, 0 errors after startup). It contains the stationary-only radial20 fix and SHARINI's 22 V / 20 s battery policy, **neither field-tested**. The rover had **0 satellites visible** after boot (no GNSS fix; NTRIP corrections were arriving fine). `main` == `latency-hardening` @ `586e6fe` (fast-forwarded 22:18 at the user's request; contains the not-yet-field-tested radial20 fix + point_history) |
 | MAVROS | **Patched overlay** `~/mavros_ws`, and the log shows `MAVROS: patched overlay`. Auto-respawn is on |
 | Mission defaults | **AUTO + SPRAY saved** (`~/.ros/dyx_mission_defaults.json`) |
 | Tablet | Release APK `realtime-hardening` @ `ecda663` is built (diag commit `4a42c46` came later and is not in that APK) (`android/app/build/outputs/apk/release/app-release.apk`) and **not installed yet** (`adb install -r`) |
@@ -75,7 +75,7 @@ Turn `DYX_REALTIME_METRICS` back off afterwards.
 1. **Install the APK** on the tablet, then test:
    - Power-cycle mid-mission -> the popup shows **Release E-stop & Resume** -> it resumes from the right point.
    - The PX4 LINK LOST toast does NOT appear during normal running.
-2. **Deploy the narrowed radial20 fix and field-test it.** First check that
+2. **Field-test the narrowed radial20 fix (already deployed 2026-10-01 12:09).** First check that
    normal stops are back to the pre-`f16d7b0` behaviour: a smooth slow-down,
    no drag/skid. Compare the stop profile in the bag (`/rpp/debug`
    `command_speed_mps` over the last 0.3 m) against `mission.csv_20260930_185447`,
