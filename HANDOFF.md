@@ -1,19 +1,78 @@
-# Handoff — for the 2026-10-01 session (written 2026-09-30 evening)
+# Handoff — for the next session (rewritten 2026-10-01 evening)
 
 > Newest section first. Everything under the next `---` rule is older history
 > (2026-09-04 onward), kept for reference. **CLAUDE.md is the source of truth**
 > for facts; this file is *what to do next*.
 
+## READ FIRST — receiver swap: Septentrio mosaic-H -> CUAV C-RTK 2HP (Unicore UM982), IN PROGRESS
+
+**Nothing has been applied to the FCU or the Jetson yet.** What exists: the module is configured and saved, and a parameter file is prepared. The next session applies the parameters and **verifies**. Facts and the PX4 source analysis are in CLAUDE.md §"Receiver swap".
+
+### State
+
+| Item | State |
+|---|---|
+| Module | CUAV C-RTK 2HP = **UM982, firmware R4.10 Build11826 (2023-11-24)**. Configured and **saved** from the Mac on 2026-10-01 (user-approved). The saved commands were `GPGST COM2 1`, `GPGSA COM2 1`, `CONFIG HEADING LENGTH 73.5 2` (**centimeters**) and `saveconfig`; all replied OK and the read-back matched. |
+| Module outputs on UART2 (= **COM2, 115200**) | `GNGGA` `GNRMC` `UNIHEADINGA` `AGRICA` at **10 Hz**; `GNGSV` `GPGST` `GPGSA` at 1 Hz. COM1 (230400) already carries a PX4-style set at 5 Hz; COM3 nothing. `ANTENNA POWERON`, mode `FIXLENGTH`, `RTK/DGPS TIMEOUT 600`, elevation mask 5. |
+| Heading baseline | **735 mm = 73.5 cm**, tolerance 2 cm (accepts 71.5-75.5). History: the user first sent 76, then corrected to 735 mm. The Septentrio had measured 72.5 cm. |
+| FCU | **Unchanged**: Septentrio parameter set, driver on TELEM2 (`SEP_PORT1_CFG=102`). |
+| Parameter files | `~/Documents/QGroundControl Daily/Parameters/4WD/OCT_01/UM982_CRTK2HP_TELEM2/`: `param_um982_telem2.params` (the original export plus 3 changed values and 2 new lines) and `um982_telem2_nsh.txt` (apply, verify, **revert**). The original export in `.../Septnario_Mosai_H_Version_updated /` is untouched. |
+| Planned wiring | Module **UART2 -> Pixhawk TELEM2** (the Septentrio's port). |
+| Jetson RTK | **Unchanged**: profile `direct_inject=true` into the Septentrio's USB2 device, which becomes invalid after the swap (see step 5). |
+
+### What was verified, and how
+- **Live FCU (NSH, disarmed):** `gps status` answers "[gps] not running", so the generic GPS driver **is compiled into the firmware**. `GPS_1_PROTOCOL` (default 1), `GPS_YAW_OFFSET`, `SER_GPS1_BAUD` and `GPS_DUMP_COMM` exist (`param show -a`, 1604 params, 792 used). They are missing from QGC exports only because PX4 exports parameters a running module has read. **No firmware rebuild is needed.**
+- **PX4 source** (`/Users/dyx_a1/px4-rover-build` = v1.16.2 plus uncommitted rover changes; the flashed commit `1fe1789` is in no local repo): Unicore parsing, publish and heading behaviour, listed in CLAUDE.md.
+- **Module** (read-only queries, then the saved changes above), over a CP2102N USB-UART adapter at `/dev/cu.usbserial-10`, 115200. The port name is that of the Mac used on 2026-10-01 and may differ. The loglist reply header said `COM2`, which is how UART2 = COM2 was established.
+
+### NOT verified (do not assume)
+- The settings **surviving a full power cycle** (the module's own microcontroller runs AP_Periph firmware and might rewrite them).
+- The TELEM2 pinout and the 5 V supply for the module (needs 4.7-5.2 V). CUAV's manual returned 404; its pin table was never read.
+- Heading **outdoors**, and the baseline the module measures versus 73.5 cm.
+- Whether the **flashed binary** contains the same Unicore code (only `gps` presence is proven).
+- PX4 startup behaviour: `request_unicore_messages()` fires when no heading was seen in the last 1 s, and its timestamp member is uninitialised. Its six commands all target **COM1**, so they cannot change COM2's output (source reading, not tested).
+- RTK through the **MAVROS** injection path, `EKF2_GPS_DELAY`, and `GPS_YAW_OFFSET` (neither measured).
+
+### Pickup procedure (in order)
+**0. Preconditions.** Rover disarmed, E-stop on, mission EMPTY (`/mission_manager/status`). Jetson reachable at `192.168.3.101` (hotspot `DYX-4WD`). **Wire the module first** (UART2 -> TELEM2, powered per CUAV's pin table). Applying the parameters before it is wired leaves the FCU with no GPS driver on the Septentrio.
+**1. Optional but recommended: power-cycle check of the module.** Plug it into the Mac (**quit QGroundControl or switch off its serial auto-connect first**, because it grabs the port). Power-cycle it, then run `loglist` and `config` and confirm `COM2 115200`, the 7 COM2 logs and `HEADING LENGTH 73.50 2.00`. Console method:
+```python
+import os,termios,tty,time,select
+fd=os.open("/dev/cu.usbserial-10",os.O_RDWR|os.O_NOCTTY|os.O_NONBLOCK); tty.setraw(fd)
+a=termios.tcgetattr(fd); a[4]=a[5]=termios.B115200; a[2]|=termios.CLOCAL|termios.CREAD; termios.tcsetattr(fd,termios.TCSANOW,a)
+os.write(fd,b"loglist\r\n"); time.sleep(3); print(os.read(fd,65536).decode("ascii","replace"))  # query commands only; no set/saveconfig unless asked
+```
+**2. Apply** (disarmed), from the Jetson with the NSH bridge (it refuses while armed):
+```bash
+ssh flash@192.168.3.101 'cd ~/rover_ws && source /opt/ros/humble/setup.bash && source install/setup.bash && python3 -u scripts/nsh_bridge.py "param set SEP_PORT1_CFG 0" "param set GPS_1_CONFIG 102" "param set GPS_1_PROTOCOL 6" "param set SER_TEL2_BAUD 115200" "param set GPS_DUMP_COMM 1" "param save"'
+```
+then reboot the FCU. (QGC can load the `.params` file for the first three, but `GPS_1_PROTOCOL` and `GPS_DUMP_COMM` are hidden from it, so use NSH for those.)
+**3. Verify after the reboot, indoors:**
+```bash
+... scripts/nsh_bridge.py "param show GPS_1_CONFIG" "gps status" "listener sensor_gps -n 1" "commander check"
+```
+Pass: `GPS_1_CONFIG` = 102; `gps status` shows the driver **running** on the TELEM2 device with NMEA, and about 10 position updates per second; `sensor_gps` is publishing (fix_type 0-1 and `satellites_used` 0 indoors is normal); no new preflight failure. Fail: "not running", wrong baud (nothing parsed), or no `sensor_gps`: use the REVERT block in `um982_telem2_nsh.txt` and report.
+**4. Outdoors with a clear sky** (antennas 73.5 cm apart, open view). Expect `fix_type` 3, then 5 (float) or 6 (fixed) once corrections flow. Check heading is valid (`sensor_gps.heading` not NaN), the EKF yaw is aligned, and `estimator_gps_status` shows the GPS checks passing (`EKF2_GPS_CHECK=829` may reject fields NMEA does not fill). Check the module's `#UNIHEADINGA` baseline is about 0.735 m. **If heading never locks, suspect `HEADING LENGTH` first.**
+**5. RTCM path.** The Jetson profile's `direct_inject=true` points at the Septentrio USB2 device. Set `direct_inject=false` so MAVROS feeds the FCU (`/mavros/gps_rtk/send_rtcm` -> PX4 `gps_inject_data` -> the gps driver writes it to the module). See `docs/RTCM_DIRECT_INJECTION_AB_REVIEW_PLAN.md` for the API. **Changing the profile forces `desired_state=STOPPED`, so START RTK explicitly afterwards.** Verify the RTK HEALTH log lines show `mavros_subscribers>=1`, that `ros2 topic hz /mavros/gps_rtk/send_rtcm` is non-zero, and that `fix_type` reaches 6.
+**6. Measure and tune (needs an outdoor drive):** `GPS_YAW_OFFSET` (compare GPS yaw with the course over ground on a straight; **use the PX4 parameter OR the module's `CONFIG HEADING OFFSET`, never both**; PX4 already adds 180 degrees, assuming the primary antenna is in front) and `EKF2_GPS_DELAY` (still the Septentrio's 50 ms). Then set `GPS_DUMP_COMM` back to 0.
+**7. Check the consumers:** the raw-GNSS spray gate needs at least 3 samples in 0.5 s (about 5 at 10 Hz; verify the real rate at the Jetson with `ros2 topic hz /mavros/gpsstatus/gps1/raw`), `h_acc` comes from GST only, and mission_manager's RTK gate uses `fix_type == 6`.
+**8. Rollback** (any time): the REVERT block in `um982_telem2_nsh.txt`, plus the Jetson RTK profile back to `direct_inject=true` against the Septentrio device. The module's own settings are independent of the FCU.
+
+### Cautions
+- `COM_ARM_WO_GPS=1` in the parameter file: the FCU **can arm with no GPS**. Motion is still gated by Mission Manager's RTK check, but do not rely on PX4 to refuse arming.
+- `gps_dump_sbf_report.py` and the `SEP_*` parameters are Septentrio-only and no longer apply. `gps_dump` will contain NMEA/Unicore text, not SBF.
+- Do not `saveconfig` again on the module without a reason; its configuration is meant to be set once by hand.
+
 ## 0. Rover state right now
 
 | Item | State |
 |---|---|
-| Jetson code | `latency-hardening` @ `8bed9c5` **deployed 2026-10-01 12:09 IST** (verified on the Jetson: 9 nodes up, PX4 link OK, battery 2.0 Hz, 0 errors after startup). It contains the stationary-only radial20 fix and SHARINI's 22 V / 20 s battery policy, **neither field-tested**. The rover had **0 satellites visible** after boot (no GNSS fix; NTRIP corrections were arriving fine). `main` == `latency-hardening` @ `586e6fe` (fast-forwarded 22:18 at the user's request; contains the not-yet-field-tested radial20 fix + point_history) |
+| Jetson code | `latency-hardening` @ `8bed9c5` **deployed 2026-10-01 12:09 IST** (verified on the Jetson: 9 nodes up, PX4 link OK, battery 2.0 Hz, 0 errors after startup). It contains the stationary-only radial20 fix and SHARINI's 22 V / 20 s battery policy, **neither field-tested**. The rover had **0 satellites visible** after boot (no GNSS fix; NTRIP corrections were arriving fine). `main` is **13 commits behind** `latency-hardening` (last fast-forwarded to `586e6fe` on 2026-09-30 22:18; not moved since, no decision recorded) |
 | MAVROS | **Patched overlay** `~/mavros_ws`, and the log shows `MAVROS: patched overlay`. Auto-respawn is on |
 | Mission defaults | **AUTO + SPRAY saved** (`~/.ros/dyx_mission_defaults.json`) |
 | Tablet | Release APK `realtime-hardening` @ `ecda663` is built (diag commit `4a42c46` came later and is not in that APK) (`android/app/build/outputs/apk/release/app-release.apk`) and **not installed yet** (`adb install -r`) |
 | Sudo | Full NOPASSWD for `flash` until **2026-10-30 18:30 IST** (auto-removed by `remove-flash-dev-sudo.timer`) |
-| Receiver | mosaic-H **firmware 4.14.0**; Streams 2-10 off; USB1 is free for diagnostics |
+| Receiver | **Still the Septentrio mosaic-H on the FCU** (fw 4.14.0). A CUAV C-RTK 2HP (UM982) is configured and waiting; **see the next section**. |
 
 ## 0.5 TOMORROW'S MAIN GOAL — optimise the app <-> backend realtime transport
 
@@ -36,7 +95,7 @@ app makes it fast again. Neither frontend nor backend is trusted yet.
 **Candidate causes to separate:** (a) backend event-loop stall, (b) tablet
 JS-thread block, (c) Wi-Fi or a fallback to HTTP long-polling.
 
-**Instrumentation ready (committed and pushed, NOT deployed, off by default):**
+**Instrumentation ready (committed and pushed). The backend part has been deployed since 2026-10-01 12:09 and is off by default; the app part is NOT in the installed APK:**
 - Backend `4607182`. Set `DYX_REALTIME_METRICS=1` in
   `src/rover_backend/config/backend.env`, then restart. This gives one
   per-second summary (`realtime metrics {...}`), including `event_loop_lag`

@@ -94,7 +94,7 @@ a stack restart or another connection to the FCU serial device.
 | Drive | 4-wheel skid-steer **through a RoboClaw** (operator-confirmed 2026-09-29). PX4 `roboclaw` driver on TELEM3 = `/dev/ttyS1`: `RBCLW_SER_CFG=103`, `RBCLW_BAUD=115200`, `RBCLW_ADDRESS=128`, `RBCLW_FUNC1/2=101/102` (Motor 1/2), `RBCLW_VEL_CTRL=1` (encoder closed-loop), `RBCLW_COUNTS_REV=160000`, `RBCLW_QPPS_MAX=171000`, `RBCLW_ENC_HZ=20`. Airframe `SYS_AUTOSTART=50000` (generic differential rover). `PWM_MAIN_FUNC1..4` were still 101/102/101/102 (old Sabertooth PWM path driven in parallel); **set to 0 and saved 2026-09-29**, so RoboClaw is the only motor output. | NSH `param show`/`set`, 2026-09-29 |
 | Drive (history) | Until some point before 2026-09-29 this rover drove **dual Sabertooth 2X32** via `PWM_MAIN_FUNC1..4` with RoboClaw disabled (`RBCLW_SER_CFG=0`). Every speed/throttle/pivot number measured on the Sabertooth drivetrain (e.g. §2026-09-01 `RO_SPEED_*` droop, throttle->speed slope, breakaway) **may not hold on RoboClaw** — re-measure before relying on it. The switch date is not recorded. | `px4-params/*.params` (stale) |
 | Battery | **8S LiFePO4, 30 Ah** (operator, 2026-09-29). `BAT1_N_CELLS=8`, `BAT1_V_CHARGED=3.45`, `BAT1_V_EMPTY=3.00`, `BAT1_CAPACITY=30000`, set via NSH 2026-09-29 (3.45/3.00 show no `+` in `param show` because they equal this build's defaults — blank means default, not unsaved). Before that `N_CELLS=3`/`V_CHARGED=4.70` made a 26 V pack read 8.66 V/cell -> "Battery 1: over voltage" blocked arming. The INA228 current channel reads ~0.1 A and does **not** measure traction current, so PX4 SoC is voltage-only (LFP curve is flat — treat % as rough). | NSH, `commander check` OK after |
-| GNSS receiver | **Septentrio mosaic-H**, dual-antenna, SBF protocol, 10 Hz PVT, dedicated PX4 driver `src/drivers/gnss/septentrio/` — **not** a u-blox F9P; audit the Septentrio path, not UBX. **Firmware 4.14.0 (2023-05-22)**, serial 3804732. It does not use BDS in RTK; cause **not yet established** (see §"Base corrections vs receiver use": the base sends BDS almost entirely single-frequency). A firmware upgrade is reasonable maintenance but is **not** an evidence-backed fix | `docs/2026-09-04_EKF_GNSS_Hardware_Audit.md` §8; `lstInternalFile, Identification` 2026-09-30 |
+| GNSS receiver | ⚠ **Being replaced by a CUAV C-RTK 2HP (Unicore UM982); configured but NOT yet applied to the FCU, see §"Receiver swap" and HANDOFF.md.** Currently still the **Septentrio mosaic-H**, dual-antenna, SBF protocol, 10 Hz PVT, dedicated PX4 driver `src/drivers/gnss/septentrio/` — **not** a u-blox F9P; audit the Septentrio path, not UBX. **Firmware 4.14.0 (2023-05-22)**, serial 3804732. It does not use BDS in RTK; cause **not yet established** (see §"Base corrections vs receiver use": the base sends BDS almost entirely single-frequency). A firmware upgrade is reasonable maintenance but is **not** an evidence-backed fix | `docs/2026-09-04_EKF_GNSS_Hardware_Audit.md` §8; `lstInternalFile, Identification` 2026-09-30 |
 | MAVROS | apt 2.14.0 **plus a patched overlay** at `~/mavros_ws` (`scripts/build_patched_mavros.sh`: upstream duplicate-ACK / param race fixes). The launch log line `MAVROS: patched overlay` confirms it is in use | 2026-09-30 |
 | Wheel track | `RD_WHEEL_TRACK = 0.63 m` | `px4-params/*.params` |
 | | Full NTRIP client (`rtk_correction_bridge`), managed as a supervised child process by `rover_backend`, confirmed FIXED and live 2026-08-31 evening | see RTK section below |
@@ -1482,6 +1482,31 @@ comparing any bag/ULog timing.
   (2) the same-base daytime bundles of 2026-09-30 16:50-17:13 (fix % and NrSV
   versus dusk); (3) SBF ChannelStatus (4013) on the temporary USB1 stream: per
   satellite, tracked / used in PVT, with a reason.
+
+## Receiver swap: Septentrio mosaic-H -> CUAV C-RTK 2HP (UM982), in progress (2026-10-01), NOT applied
+
+Pickup procedure: HANDOFF.md §"READ FIRST". Memory: `um982-receiver-swap-plan.md`. Verification status is stated per item.
+
+**Verified on the live FCU (NSH, disarmed)**
+- `gps status` -> "[gps] not running": the generic GPS driver is **compiled in**. `GPS_1_PROTOCOL` (default 1), `GPS_YAW_OFFSET`, `SER_GPS1_BAUD`, `GPS_DUMP_COMM` exist. No firmware rebuild is needed.
+- `param show` and QGC hide parameters no running module has read (792 of 1604 used). `param show -a` prints the whole table (it ignores the filter).
+- The flashed build is `1fe1789`, variant `differential`, built 2026-09-25 13:25. **That commit is in no local repo.** `/Users/dyx_a1/px4-rover-build` is v1.16.2 (`54f0455`) plus uncommitted rover changes, and has no `differential` board variant. A rebuild from it may not reproduce the flashed firmware.
+
+**PX4 NMEA/Unicore driver, read from source (`px4-rover-build`, not the flashed binary)**
+- `GPS_1_PROTOCOL`: 0 auto, 1 u-blox, 2 MTK, 3 Ashtech/Trimble, 4 Emlid, 5 Femtomes, **6 NMEA (generic)**. The Septentrio has its own driver (`SEP_*`).
+- It parses `UNIHEADINGA` (heading, adds 180 degrees assuming the primary antenna is in front, then subtracts `GPS_YAW_OFFSET`), `UNIAGRICA` (velocity and its accuracy), `GPGST` (`eph`, `epv`), `GPGSA`, `GPRMC`.
+- A fix is published when **GGA and velocity** have both arrived, so GST is not required. Without GST, `eph`/`epv` stay at their defaults.
+- GGA quality 4 -> `fix_type` 6 (RTK fixed) and quality 5 -> 5 (float): this matches the `fix_type == 6` gating here.
+- **The only configuration PX4 writes to the receiver** is `request_unicore_messages()`: six commands (`GPGGA`, `UNIAGRICA`, `UNIHEADINGA` at 0.2 s, `GPGST`, `GPGSA`, `GPRMC` at 1 s), **all addressed to `COM1`**. It has one call site (when no heading arrived in the last second) and the timestamp it tests is uninitialised. **No parameter disables it.** On COM2 it cannot alter the port's output.
+- The only other receiver-bound data is RTCM injection (data, not configuration).
+
+**The module (read and configured from the Mac, 2026-10-01)**
+- UM982 R4.10 Build11826 via a CP2102N adapter at 115200 = **COM2** (`config` shows COM1 230400, COM2 115200, COM3 115200).
+- Saved: COM2 logs `GNGGA GNRMC UNIHEADINGA AGRICA` at 10 Hz, `GNGSV GPGST GPGSA` at 1 Hz; `CONFIG HEADING LENGTH 73.5 2`.
+- Unicore units: **`CONFIG HEADING LENGTH` is in centimeters** (manual section 4.8). `CONFIG HEADING OFFSET` is a second place to put a heading offset; use only one of it and PX4's `GPS_YAW_OFFSET`.
+- DroneCAN carries no heading to PX4, so UART is required.
+- Parameter files: `~/Documents/QGroundControl Daily/Parameters/4WD/OCT_01/UM982_CRTK2HP_TELEM2/`. Changes: `SEP_PORT1_CFG` 102->0, `GPS_1_CONFIG` 0->102, `SER_TEL2_BAUD` 921600->115200, new `GPS_1_PROTOCOL=6`, `GPS_DUMP_COMM=1`.
+- Sources: PX4 docs for the Holybro UM982 (NMEA, `EKF2_GPS_CTRL` bit 3), ArduPilot's C-RTK2 HP page, Unicore's N4 command reference. CUAV's own manual returned 404.
 
 ## Repo status (2026-08-31)
 
