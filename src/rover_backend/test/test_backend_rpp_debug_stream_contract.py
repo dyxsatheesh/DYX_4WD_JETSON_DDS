@@ -25,7 +25,7 @@ def test_backend_broadcast_is_configured_for_20_hz():
 
 def test_debug_subscription_matches_latest_sample_qos():
     source = BRIDGE.read_text(encoding="utf-8")
-    subscription = source[source.index('"/rpp/debug"') :]
+    subscription = source[source.index('_input_topic("/rpp/debug")') :]
     assert "debug_qos" in subscription[:200]
     assert "callback_group=self._rpp_debug_callback_group" in subscription[:300]
 

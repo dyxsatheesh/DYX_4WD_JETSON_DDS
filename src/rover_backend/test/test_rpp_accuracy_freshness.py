@@ -73,6 +73,7 @@ def bridge():
         _rpp_debug_dropped_frames=0,
         _mark_ros_message=lambda: None,
         RPP_ACCURACY_STALE_SEC=stale_sec,
+        RPP_DEBUG_STALE_SEC=0.25,
     )
     node._monotonic_age = methods["_monotonic_age"]  # @staticmethod in production
     return SimpleNamespace(
