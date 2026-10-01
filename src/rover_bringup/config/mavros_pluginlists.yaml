@@ -1,0 +1,43 @@
+# MAVROS plugins this rover uses. Everything else is denied.
+#
+# The stock px4_pluginlists.yaml loads ~60 plugins (camera, adsb, gimbal,
+# mocap, mission/geofence/rally download, ...) that nothing on this rover
+# reads. Names are from MAVROS 2.14.0 mavros_plugins.xml (core + extras).
+#
+# Before removing an entry, grep src/ and scripts/ for its topics.
+/**:
+  ros__parameters:
+    plugin_denylist:
+      - '*'
+    plugin_allowlist:
+      # /mavros/state, battery, statustext, extended_state, sys_status,
+      # set_mode, set_message_interval
+      - sys_status
+      # FCU time sync (message timestamps), timesync_status
+      - sys_time
+      # cmd/arming, cmd/command (laser / spray actuator)
+      - command
+      # FCU parameter capture in the bag recorder
+      - param
+      # /mavros/setpoint_raw/local: the production OFFBOARD setpoint
+      - setpoint_raw
+      # /mavros/setpoint_velocity/cmd_vel: stop_rover.sh and bench scripts
+      - setpoint_velocity
+      # /mavros/local_position/odom
+      - local_position
+      # global, raw/fix, gp_origin, compass_hdg
+      - global_position
+      # imu/data, imu/mag
+      - imu
+      # rc/in
+      - rc_io
+      # home_position/home
+      - home_position
+      # manual_control/send (authorized ground test), manual_control/control
+      - manual_control
+      # /mavros/gps_rtk/send_rtcm: RTCM injection through PX4
+      - gps_rtk
+      # /mavros/gpsstatus/gps1/raw: fix type for the RTK gates
+      - gps_status
+      # scripts/mavros_ftp_pull.py
+      - ftp

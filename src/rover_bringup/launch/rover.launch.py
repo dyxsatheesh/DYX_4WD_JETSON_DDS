@@ -15,6 +15,8 @@ worker. Operators must use the authenticated /api/rtk control surface rather
 than launching an NTRIP/RTCM ROS node directly.
 """
 
+import os
+
 from launch import LaunchDescription
 
 from launch.actions import ExecuteProcess
@@ -43,6 +45,21 @@ MISSION_METADATA_FILE = (
 # applied to the Mosaic-H's direct RTCM injection device
 # (see docs/RTCM_DIRECT_INJECTION_AB_REVIEW_PLAN.md).
 FCU_DEVICE_PATH = "/dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00"
+
+# Load only the MAVROS plugins this rover uses (config/mavros_pluginlists.yaml).
+# Resolved through the symlink-install back to src/, so no colcon build is
+# needed; falls back to the stock list if the file is missing.
+_STOCK_MAVROS_PLUGINLISTS = "/opt/ros/humble/share/mavros/launch/px4_pluginlists.yaml"
+_ROVER_MAVROS_PLUGINLISTS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+    "config",
+    "mavros_pluginlists.yaml",
+)
+MAVROS_PLUGINLISTS_YAML = (
+    _ROVER_MAVROS_PLUGINLISTS
+    if os.path.isfile(_ROVER_MAVROS_PLUGINLISTS)
+    else _STOCK_MAVROS_PLUGINLISTS
+)
 
 # Field-test cruise speed. Forward line capture and normal xtrack recovery
 # target this value; the only planned reductions are the start ramp and the
@@ -102,14 +119,14 @@ def generate_launch_description() -> LaunchDescription:
             'then source "$HOME/mavros_ws/install/setup.bash" && '
             'echo "MAVROS: patched overlay $HOME/mavros_ws"; '
             'else echo "MAVROS: apt 2.14.0 (UNPATCHED: duplicate-ACK abort)"; fi && '
+            f'echo "MAVROS: pluginlists {MAVROS_PLUGINLISTS_YAML}" && '
             "ros2 launch mavros node.launch "
             "fcu_url:="
             f"{FCU_DEVICE_PATH}:921600 "
             "gcs_url:="
             "udp://:14550@192.168.3.105:14550 "
             "pluginlists_yaml:="
-            "/opt/ros/humble/share/mavros/"
-            "launch/px4_pluginlists.yaml "
+            f"{MAVROS_PLUGINLISTS_YAML} "
             "config_yaml:="
             "/opt/ros/humble/share/mavros/"
             "launch/px4_config.yaml "

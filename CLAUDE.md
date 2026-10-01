@@ -1345,6 +1345,24 @@ The radial20 fix and point_history are **not field-tested**.
   - Other load seen: `bag_autorecord.py` polls `/api/mission/status` at 5 Hz;
     MAVROS uses ~94% CPU.
 
+### Node load cuts (2026-10-01, not field-tested)
+
+- `field_test_logger.py` is removed. It subscribed to ~25 topics, most at
+  50 Hz (~750 Python callbacks/s on every mission), only to write
+  `telemetry.csv`, which duplicated the bag. New bundles have no
+  `telemetry.csv`.
+- `/rpp/debug` publishes at 30 Hz (`TELEMETRY_HZ`; its own timer copies the
+  last control snapshot). The RPP control loop is unchanged at 50 Hz.
+- MAVROS loads only the plugins listed in
+  `src/rover_bringup/config/mavros_pluginlists.yaml` (15 of ~65). The launch
+  log line `MAVROS: pluginlists <path>` says which list loaded; it falls back
+  to the stock list if the file is missing. A topic from an unlisted plugin
+  simply does not exist, so add the plugin there first.
+- Measured before the change (5 bags, 2026-10-01): RPP compute p50 2.5 ms,
+  p99 15-19 ms, max 65-79 ms per 20 ms cycle; 96-124 missed deadlines per
+  run. MAVROS stopped all topics for 0.26-0.38 s once or twice per run, and
+  once for 1.35 s (MANUAL driving, run 154042).
+
 ### Field run `mission.csv_20260930_185447` + `log_592` (15 pts) — findings
 
 Bag: `bags_jet/Sep_30_evening/`. The ULog GNSS clock runs **17.1 s ahead** of
