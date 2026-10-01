@@ -1229,7 +1229,11 @@ The radial20 fix and point_history are **not field-tested**.
   - Before this, ros_bridge only spoke them (voice).
   - They now share the ordered point-event queue with `event_kind: "SYSTEM"`.
 - **Battery critical** (SHARINI `ef14c9a` supersedes my `3ee0070` filter):
-  - `BatteryCriticalDebounce`: ≤ 23.80 V held for 5 s, with samples no older than 1.5 s.
+  - `BatteryCriticalDebounce`: ≤ **22.00 V held for 20 s** (SHARINI `5602d83`,
+    2026-10-01; was 23.80 V / 5 s), with samples no older than 1.5 s. The
+    docstrings in `battery_policy.py` still say 23.80 V / "five seconds"; the
+    constants are `BATTERY_CRITICAL_VOLTAGE_V` and `BATTERY_CRITICAL_DEBOUNCE_SEC`.
+    Not checked whether it is deployed on the Jetson.
   - The action is **PAUSE** via `/mission_manager/pause_battery`
     (`pause_reason = BATTERY_CRITICAL`), not STOP.
   - START/RESUME/NEXT/SKIP return 409 `BATTERY_CRITICAL_LOCKOUT`.
@@ -1238,7 +1242,7 @@ The radial20 fix and point_history are **not field-tested**.
   - ✅ Verified 2026-09-30: `/mavros/battery` measured **1.8 Hz, largest gap
     0.51 s**, well inside the 1.5 s freshness limit. If it ever falls back
     to ~0.3 Hz, a critical battery never pauses.
-  - ⚠ There is no unlock hysteresis: one sample > 23.80 V clears the lockout,
+  - ⚠ There is no unlock hysteresis: one sample above the threshold clears the lockout,
     and the pack recovers at rest.
 - **Power-cycle recovery** (SHARINI `b6eb272`):
   - `/mission_manager/restore_runtime` (`RestoreMissionRuntime.srv`, runtime JSON)
