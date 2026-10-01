@@ -5,14 +5,14 @@ from __future__ import annotations
 import math
 
 BATTERY_FULL_VOLTAGE_V = 26.50
-BATTERY_CRITICAL_VOLTAGE_V = 23.80
+BATTERY_CRITICAL_VOLTAGE_V = 22.00
 
 BATTERY_FULL_PERCENT = 100
 BATTERY_LOW_PERCENT = 30
 BATTERY_PRECRITICAL_PERCENT = 11
 BATTERY_CRITICAL_PERCENT = 10
 
-BATTERY_CRITICAL_DEBOUNCE_SEC = 5.0
+BATTERY_CRITICAL_DEBOUNCE_SEC = 20.0
 # BATTERY_STATUS is requested at 2 Hz. A 1.5 s freshness limit tolerates a
 # small scheduling delay while preventing stale telemetry from completing
 # the five-second critical window.
@@ -37,9 +37,7 @@ def battery_percentage_from_voltage(
     percentage_span = BATTERY_FULL_PERCENT - BATTERY_CRITICAL_PERCENT
 
     continuous_percentage = BATTERY_CRITICAL_PERCENT + (
-        (voltage_v - BATTERY_CRITICAL_VOLTAGE_V)
-        / voltage_span
-        * percentage_span
+        (voltage_v - BATTERY_CRITICAL_VOLTAGE_V) / voltage_span * percentage_span
     )
     whole_percentage = int(round(continuous_percentage))
 
@@ -54,15 +52,12 @@ def debounced_battery_percentage(
     *,
     critical_confirmed: bool,
 ) -> int | None:
-    """Show 11%/LOW while <=23.80 V is still inside the five-second window."""
+    """Show 11%/LOW while <=22.00 V is still inside the five-second window."""
 
     if raw_percentage is None:
         return None
 
-    if (
-        raw_percentage <= BATTERY_CRITICAL_PERCENT
-        and not critical_confirmed
-    ):
+    if raw_percentage <= BATTERY_CRITICAL_PERCENT and not critical_confirmed:
         return BATTERY_PRECRITICAL_PERCENT
 
     return raw_percentage
@@ -116,9 +111,9 @@ def battery_mission_locked(
 
 
 class BatteryCriticalDebounce:
-    """Confirm <=23.80 V continuously for exactly five seconds.
+    """Confirm <=22.00 V continuously for exactly five seconds.
 
-    A valid voltage above 23.80 V cancels both a pending and a confirmed
+    A valid voltage above 22.00 V cancels both a pending and a confirmed
     critical condition. Invalid/stale telemetry cannot create a critical lock.
     """
 
@@ -169,11 +164,7 @@ class BatteryCriticalDebounce:
         if not math.isfinite(now_sec):
             return self.confirmed
 
-        if (
-            voltage_v is None
-            or not math.isfinite(voltage_v)
-            or voltage_v <= 0.0
-        ):
+        if voltage_v is None or not math.isfinite(voltage_v) or voltage_v <= 0.0:
             if not self.confirmed:
                 self.reset_pending()
             return self.confirmed
