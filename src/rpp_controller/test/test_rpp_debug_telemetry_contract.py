@@ -30,7 +30,7 @@ def test_control_rate_is_a_restart_parameter_run_at_50_hz():
     assert '"control_rate_hz"' in source
     assert "self.CONTROL_HZ = control_rate_hz" in source
     assert '"control_rate_hz": 50.0' in LAUNCH_PATH.read_text(encoding="utf-8")
-    assert "TELEMETRY_HZ = 50.0" in source
+    assert "TELEMETRY_HZ = 30.0" in source
     assert "1.0 / self.TELEMETRY_HZ" in source
 
 

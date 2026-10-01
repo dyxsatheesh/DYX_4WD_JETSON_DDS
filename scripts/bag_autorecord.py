@@ -71,8 +71,6 @@ BAGS_DIR = os.environ.get("BAGS_DIR", os.path.expanduser("~/bags_jet"))
 RECORD_ALL = os.environ.get("BAG_RECORD_ALL", "0") == "1"
 POLL_S = float(os.environ.get("BAG_POLL_S", "0.2"))
 MAX_S = float(os.environ.get("BAG_MAX_S", "7200"))
-CSV_LOGGER = os.environ.get("BAG_ENABLE_CSV_LOGGER", "1") == "1"
-_FIELD_LOGGER = os.path.join(_REPO_ROOT, "scripts", "field_test_logger.py")
 API_GRACE_S = float(os.environ.get("BAG_API_GRACE_S", "8"))
 FINAL_CAPTURE_GRACE_S = float(os.environ.get("BAG_FINAL_CAPTURE_GRACE_S", "1.0"))
 
@@ -733,7 +731,6 @@ def _dump_node_params(bundle_dir: str) -> dict:
 class Recorder:
     def __init__(self) -> None:
         self.proc: subprocess.Popen | None = None
-        self.logger_proc: subprocess.Popen | None = None
         self.bundle_dir: str | None = None
         self.bag_dir: str | None = None
         self.manifest: dict | None = None
@@ -809,7 +806,6 @@ class Recorder:
             return
         self.arm_t = self.start_t = time.time()
         self.started = False
-        self._start_csv_logger(self.bundle_dir)
 
         copied = [
             name
@@ -893,44 +889,6 @@ class Recorder:
         )
         thread.start()
 
-    def _start_csv_logger(self, bundle_dir: str) -> None:
-        if not CSV_LOGGER or not os.path.isfile(_FIELD_LOGGER):
-            return
-        try:
-            env = os.environ.copy()
-            env["ROVER_FIELD_LOG_DIR"] = bundle_dir
-            handle = open(
-                os.path.join(bundle_dir, "field_test_logger_console.log"),
-                "w",
-                encoding="utf-8",
-            )
-            self.logger_proc = subprocess.Popen(
-                ["python3", _FIELD_LOGGER],
-                env=env,
-                start_new_session=True,
-                stdout=handle,
-                stderr=subprocess.STDOUT,
-            )
-            log("  field_test_logger started → telemetry.csv")
-        except Exception as error:
-            self.logger_proc = None
-            log(f"  field_test_logger skipped: {error}")
-
-    def _stop_csv_logger(self) -> None:
-        proc = self.logger_proc
-        self.logger_proc = None
-        if proc is None:
-            return
-        try:
-            if proc.poll() is None:
-                os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-                proc.wait(timeout=5)
-        except Exception:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except Exception:
-                pass
-
     def _capture_ros_params(self, bundle_dir: str) -> None:
         try:
             dumped = _dump_node_params(bundle_dir)
@@ -949,7 +907,6 @@ class Recorder:
         self.bundle_dir = None
         self.bag_dir = None
         self.manifest = None
-        self._stop_csv_logger()
         log(
             f"{'DISCARD' if discard else 'STOP'} ({reason}) → "
             f"{os.path.basename(bundle or '')}"

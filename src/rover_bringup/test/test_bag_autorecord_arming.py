@@ -147,7 +147,6 @@ def test_rearm_in_the_same_second_never_reuses_the_kept_bundle(tmp_path, monkeyp
             return None
 
     monkeypatch.setattr(bag, "BAGS_DIR", str(tmp_path))
-    monkeypatch.setattr(bag, "CSV_LOGGER", False)
     monkeypatch.setattr(bag, "log", lambda _msg: None)
     monkeypatch.setattr(bag, "_preflight_free_space", lambda _d: True)
     monkeypatch.setattr(bag, "_environment", lambda: {})

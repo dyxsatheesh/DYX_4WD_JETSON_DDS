@@ -134,7 +134,10 @@ class RPPController(Node):
     # the running rate so their time constants are unchanged.
     CONTROL_HZ = 20.0
     FILTER_ALPHA_REFERENCE_HZ = 20.0
-    TELEMETRY_HZ = 50.0
+    # /rpp/debug publish rate only (own timer, copies the last control
+    # snapshot). 30 Hz is enough for the tablet and the bags; it does not
+    # change the control loop.
+    TELEMETRY_HZ = 30.0
     MAXIMUM_MOVING_SPEED_MPS = 1.00
     MAX_MOVING_HEADING_ERROR_RAD = math.radians(30.0)
     WAYPOINT_CHANGE_EPSILON_M = 0.001
