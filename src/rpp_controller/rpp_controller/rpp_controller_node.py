@@ -133,9 +133,6 @@ class RPPController(Node):
     # alphas are specified at this 20 Hz reference rate and are converted to
     # the running rate so their time constants are unchanged.
     CONTROL_HZ = 20.0
-    # Position-derived speed below which radial20 treats the chassis as stopped
-    # for a standstill restart (parked floor measured 6.3 mm/s, 2026-09-05).
-    RADIAL20_RESTART_STATIONARY_MPS = 0.02
     FILTER_ALPHA_REFERENCE_HZ = 20.0
     TELEMETRY_HZ = 50.0
     MAXIMUM_MOVING_SPEED_MPS = 1.00
@@ -10451,33 +10448,6 @@ class RPPController(Node):
             0.0,
             float(self.precision_last_published_translational_speed_mps),
         )
-        # TRACK / TERMINAL_GUIDANCE pass the tracking command straight
-        # through, and that command is the speed published LAST cycle. From
-        # standstill inside the terminal zone (resume after a pause, E-stop
-        # release, a short leg) it is 0, so the regulator outputs 0, RPP
-        # publishes 0, and the goal times out without moving (2026-09-30:
-        # P0002/P0009/P0012 failed 15 s after RTK auto-resume at 111/42/97 mm).
-        # Seed with the final-approach floor, which sits above the measured
-        # 0.143 m/s drivetrain breakaway; BRAKE_PROFILE still owns the stop.
-        #
-        # Only while the chassis is STATIONARY. A normal approach is always
-        # moving (approach_speed_cap() slows in proportion to the distance
-        # left, never below approach_min_speed_mps 0.10), so it never takes
-        # this branch and its slow approach is unchanged. f16d7b0 seeded on
-        # "last command below the floor" and so altered every normal stop
-        # (operator-reported drag/skid). Keying on a literal-zero command is
-        # not enough either: after a stop the acceleration ramp restarts at
-        # ~0.01 m/s, and passing that through stalls below breakaway. Keep
-        # requesting until the wheels move; publish_velocity_ned() still caps
-        # the output at the approach profile (0.10 m/s near the point).
-        if (
-            self.radial_stop_regulator.state
-            in (RadialStopState.TRACK, RadialStopState.TERMINAL_GUIDANCE)
-            and along_remaining > 0.0
-            and tracking_speed_command < self.deceleration_floor_speed
-            and position_derived_speed < self.RADIAL20_RESTART_STATIONARY_MPS
-        ):
-            tracking_speed_command = self.deceleration_floor_speed
         yaw_rate = (
             float(self.current_yaw_rate_radps)
             if math.isfinite(self.current_yaw_rate_radps)

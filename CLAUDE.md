@@ -1239,7 +1239,7 @@ the relay, the radial20 fix and point_history, although the last two are not
 field-tested yet. **Deployed on the Jetson: `8bed9c5` since 2026-10-01 12:09 IST**
 (verified on the Jetson after restart: all 9 nodes up, `px4_link_ok`,
 `/mavros/battery` 2.0 Hz, estimator relay 1 Hz, 0 errors after the first 20 s;
-it carries the stationary-only radial20 seed, `fe1b6ff`, and SHARINI's 22 V /
+it carried the stationary-only radial20 seed, `fe1b6ff` (reverted 2026-10-01), and SHARINI's 22 V /
 20 s battery policy, `5602d83`). Before that `d2828a0` ran from 2026-09-30
 19:45 IST, with the over-broad `f16d7b0` seed. Recovery, the battery pause, E-stop Release &
 Resume and the power-cycle popup were exercised on the rover on 2026-09-30.
@@ -1362,33 +1362,28 @@ comparing any bag/ULog timing.
     signal" can mean "velocity estimate invalid".**
   - MANUAL/Hold changes the same evening were the RC mode switch (slot 4 then
     back to 1), not the software.
-- **radial20 deadlock after stopping inside the 0.75 m terminal zone (FIXED
-  in source 2026-09-30, not field-tested).**
-  - `_step_radial20_terminal_for_cycle` fed the regulator the *last published*
+- **radial20 deadlock after stopping inside the 0.75 m terminal zone: OPEN.
+  The fix was REVERTED on 2026-10-01 (operator decision); RPP is back to the
+  pre-`f16d7b0` code.**
+  - `_step_radial20_terminal_for_cycle` feeds the regulator the *last published*
     speed. After any stop (RTK pause, E-stop release, resume, short leg) that
-    is 0, so TRACK/TERMINAL_GUIDANCE passed 0 through, RPP published 0 again,
-    and the point failed at `terminal_timeout` after 15 s without moving
-    (P0002/9/12 at 111/42/97 mm).
-  - Now seeded with `deceleration_floor_speed` (0.15 m/s, above the 0.143 m/s
-    breakaway), **only while the chassis is stationary**: TRACK/TERMINAL_GUIDANCE,
-    and position-derived speed < 0.02 m/s. It keeps requesting until the
-    wheels move, and `publish_velocity_ned` still caps at the approach profile.
-    A normal approach (always >= 0.10 m/s) never takes this branch, so the
-    **proportional slow approach is unchanged; the operator says that stop is
-    correct, do not alter it.**
-  - ⚠ **The first version (`f16d7b0`, deployed 19:45) seeded whenever the last
-    command was < 0.15.** A normal approach publishes down to 0.10 m/s
-    (`approach_speed_cap`, `approach_min_speed_mps: 0.10`), so it altered
-    every stop: it raised the braking speed and moved the brake point. The
-    operator reported drag/skid at the stop.
-  - ⚠ `46e859e` (literal-0 command only) is also wrong. After a stop the
-    acceleration ramp restarts at ~0.01 m/s, the seed releases on the next
-    cycle, and the rover stalls below breakaway.
-  - Fixed in the follow-up commit. Closed-loop tests (regulator + ramp +
-    approach cap + chassis breakaway) separate all three versions. **Not
-    deployed, not field-tested.**
-  - The `/rpp/debug` label `ALIGNMENT` during those windows was misleading:
-    the radial20 branch ran and returned first.
+    is 0, so TRACK/TERMINAL_GUIDANCE pass 0 through, RPP publishes 0 again,
+    and the point fails at `terminal_timeout` after 15 s without moving
+    (P0002/9/12 at 111/42/97 mm). **This is the current behaviour again.** The
+    operator accepts it: "if it stops, that is not a problem now".
+  - Three attempts were reverted together (`f16d7b0`, `46e859e`, `fe1b6ff`),
+    along with `test_radial20_resume_from_standstill.py`:
+    - `f16d7b0` seeded whenever the command was < 0.15 m/s. That altered every
+      normal stop, and the operator saw drag/skid.
+    - `46e859e` seeded only on a literal-0 command, and would stall on the
+      acceleration ramp.
+    - `fe1b6ff` seeded only while the chassis was stationary. In
+      `mission.csv_20261001_145628` (3 points) it fired 0 times, so it did
+      not cause that run's 27-37 mm cross-track misses.
+  - Do not re-add a seed without the operator asking; the closed-loop tests are
+    in git history (`fe1b6ff`).
+  - The `/rpp/debug` label `ALIGNMENT` during those windows is misleading:
+    the radial20 branch runs and returns first.
 - **`/mission_manager/status` was ~97 KB at 4.5 Hz (65% of the bag).**
   - `point_results`, `point_accuracy_snapshots`, `point_survey_snapshots` and
     `last_termination_report` now go on the latched

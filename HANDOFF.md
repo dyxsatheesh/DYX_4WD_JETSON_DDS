@@ -124,7 +124,7 @@ Turn `DYX_REALTIME_METRICS` back off afterwards.
 |---|---|---|
 | `c797f8f` | MAVROS: respawn + patched overlay (upstream `97a14ae1` + `6ea0636e`); Mission Manager `px4_link_ok` gate ("PX4 link lost" instead of "spray not ready") | Patch **seen working**: a duplicate `176` ACK was logged, not fatal. Respawn **seen working** after the Pixhawk rebooted |
 | `066e786` | `estimator_status_relay`: the raw ~400 Hz MAVLink stream moved out of `rover_backend` | Backend 83% -> ~70% CPU. The rest is rclpy wake-up overhead (odom + `/rpp/debug` at 50 Hz) |
-| `f16d7b0` | **radial20 standstill deadlock**: pausing inside 0.75 m of a point used to fail the point 15 s later without moving | Operator: the restart works, **but there was drag/skid at every normal stop afterwards.** The seed also fired during the normal 0.10-0.15 m/s final approach. `46e859e` would stall on the acceleration ramp. **Final: seed only while the chassis is stationary** (latest commit, NOT deployed; closed-loop tests only) |
+| `f16d7b0` | **radial20 standstill deadlock**: pausing inside 0.75 m of a point used to fail the point 15 s later without moving | Operator: the restart works, **but there was drag/skid at every normal stop afterwards.** The seed also fired during the normal 0.10-0.15 m/s final approach. `46e859e` would stall on the acceleration ramp. Final version: seed only while the chassis is stationary (`fe1b6ff`). **All three were REVERTED on 2026-10-01 (operator decision)**, so RPP is pre-`f16d7b0` again and the deadlock is back by choice. |
 | `d2828a0` | Per-point history moved to the latched `/mission_manager/point_history`; status went from ~97 KB to 3.4 KB | Verified live (3.4 KB, topic up). **Recovery merge not field-tested** |
 | frontend `b628853` | Recovery popup: **Release E-stop & Resume** | Needs the new APK |
 | frontend `ecda663` | `PX4 LINK LOST` toast | Needs the new APK |
@@ -134,16 +134,10 @@ Turn `DYX_REALTIME_METRICS` back off afterwards.
 1. **Install the APK** on the tablet, then test:
    - Power-cycle mid-mission -> the popup shows **Release E-stop & Resume** -> it resumes from the right point.
    - The PX4 LINK LOST toast does NOT appear during normal running.
-2. **Field-test the narrowed radial20 fix (already deployed 2026-10-01 12:09).** First check that
-   normal stops are back to the pre-`f16d7b0` behaviour: a smooth slow-down,
-   no drag/skid. Compare the stop profile in the bag (`/rpp/debug`
-   `command_speed_mps` over the last 0.3 m) against `mission.csv_20260930_185447`,
-   which is pre-fix, and against a post-`f16d7b0` bag if one exists. Then run the
-   pause test. It needs no RTK trouble:
-   - Tablet **PAUSE** when the rover is < 0.5 m from a point, wait 5 s, **RESUME**.
-   - PASS if the rover creeps in (about 0.15 m/s), stops, and the point completes.
-   - FAIL if the point fails with `RADIAL20_TERMINAL_TIMEOUT` 15 s later. Then check `/rpp/terminal_certificate` for `zero_latched` / `state` after resume.
-   - Also try: E-stop then release near a point; a mission with two points < 0.75 m apart.
+2. **radial20 fix REVERTED (2026-10-01, operator decision).** RPP is back to the
+   pre-`f16d7b0` code. Pausing inside 0.75 m of a point fails that point after
+   15 s (`RADIAL20_TERMINAL_TIMEOUT`). The operator accepts that for now. Do not
+   field-test or re-add the seed unless asked.
 3. **Check the bag size** of that run: `/mission_manager/status` should now be a few MB, not 200 MB. `/mission_manager/point_history` should hold one message per point.
 4. **Receiver firmware upgrade** (operator, rover parked). Reasonable maintenance, **not** an evidence-backed fix for the FLOAT / fusion-stop problem (§3: the firmware link was overstated). Do §3's ChannelStatus capture first.
    - Before: back up the receiver config from its web UI.
