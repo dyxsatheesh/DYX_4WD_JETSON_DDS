@@ -136,7 +136,11 @@ Key behaviors of `cmd_vel_bridge` (`src/jetson_4wd_control/jetson_4wd_control/cm
   went out 1–3 times (measured 25_09 stage_9). The bridge also asks PX4 for
   `LOCAL_POSITION_NED` at 50 Hz (`local_position_rate_hz`) on every MAVROS
   connection; the PX4 default on this link measured 28–30 Hz.
-- **No yaw is commanded at all.** Confirmed 2026-09-01 by decoding every
+- ⚠ **SUPERSEDED (2026-09-11 / 09-18, SHARINI): the build now sends explicit
+  yaw and yaw-rate** (`type_mask 0x1c7`; verified in the 2026-09-30 bag, see
+  `docs/2026-10-01_Sharini_Changes_Summary.md` §3). The next bullet describes
+  2026-09-01 and is kept for history.
+- **(History) No yaw is commanded at all.** Confirmed 2026-09-01 by decoding every
   `/mavros/setpoint_raw/local` message in seven bags: `type_mask = 3527
   (0xdc7)` sets **both `IGNORE_YAW` and `IGNORE_YAW_RATE`**, and the `yaw` /
   `yaw_rate` fields are identically zero. The contract is VX/VY only, and PX4
@@ -364,6 +368,13 @@ inferred. Bags in `bags_jet/Sep_01/P1_logs/`; ulogs in
 `~/Documents/QGroundControl Daily/Logs/4WD/speed_0.4/`.
 
 ### The OFFBOARD contract is velocity-only — there is no yaw command
+
+> ⚠ **SUPERSEDED for the current build (2026-10-01).** SHARINI enabled explicit
+> yaw on 2026-09-11 (`9d98d6f`) and added yaw-rate on 2026-09-18 (`102d103`).
+> In the 2026-09-30 bag, 2006 of the first 4000 setpoints use `type_mask 0x1c7`
+> with yaw up to ±1.74 rad and yaw-rate up to 0.75 rad/s. This section is the
+> 2026-09-01..04 velocity-only contract, kept for history. See
+> `docs/2026-10-01_Sharini_Changes_Summary.md` §3.
 
 `/mavros/setpoint_raw/local` carries `type_mask = 3527 (0xdc7)`, which sets
 **both `IGNORE_YAW` and `IGNORE_YAW_RATE`**; the `yaw` and `yaw_rate` fields
@@ -634,6 +645,12 @@ readings were **wrong** and are recorded here so they are not re-derived.
 
 ### The lookahead that actually governs is time-based, not `line_tracking_lookahead_m`
 
+> ⚠ **Does not describe the current build.** This assumed
+> `precision_guidance_enabled: true`. SHARINI set it to **False** on
+> 2026-09-21 (`cbad059`) and `rover.launch.py` still has `False` (checked
+> 2026-10-01), so straight legs steer with `line_guidance()` on the fixed path
+> tangent and its own lookahead.
+
 `precision_guidance_enabled: true`, so `guidance.py:11` computes
 
 ```
@@ -650,6 +667,13 @@ Note the gain term would *lengthen* the lookahead as error grows, so raising
 `precision_xtrack_lookahead_gain` is not a fix for poor convergence.
 
 ### The OFFBOARD contract has no heading authority — this is the structural one
+
+> ⚠ **SUPERSEDED for the current build (2026-10-01).** SHARINI enabled explicit
+> yaw on 2026-09-11 (`9d98d6f`) and added yaw-rate on 2026-09-18 (`102d103`).
+> In the 2026-09-30 bag, 2006 of the first 4000 setpoints use `type_mask 0x1c7`
+> with yaw up to ±1.74 rad and yaw-rate up to 0.75 rad/s. This section is the
+> 2026-09-01..04 velocity-only contract, kept for history. See
+> `docs/2026-10-01_Sharini_Changes_Summary.md` §3.
 
 `cmd_vel_bridge` sends `type_mask = 3527` (`IGNORE_YAW | IGNORE_YAW_RATE`) with
 `msg.yaw = 0.0` and `msg.yaw_rate = 0.0` (`cmd_vel_bridge.py:59, 308`). PX4
@@ -1455,6 +1479,23 @@ comparing any bag/ULog timing.
   (2) the same-base daytime bundles of 2026-09-30 16:50-17:13 (fix % and NrSV
   versus dusk); (3) SBF ChannelStatus (4013) on the temporary USB1 stream: per
   satellite, tracked / used in PVT, with a reason.
+
+## SHARINI's changes, 2026-09-10 -> 2026-10-01
+
+Full detail, with how each item was checked: **`docs/2026-10-01_Sharini_Changes_Summary.md`**.
+She commits as `SHARINI` and `ShariniSenthil` (`git log -i --author=sharini`).
+
+| Area | Commits | One-line summary |
+|---|---|---|
+| Battery | `9268a87` `1e587d9` `1097940` `ef14c9a` `5602d83` | Percentage derived from voltage (26.5 V = 100%, 22.0 V = 10%). Critical = **22.00 V held 20 s** -> **PAUSE** (not stop), `battery.mission_lockout`, START/RESUME/NEXT/SKIP return **409 `BATTERY_CRITICAL_LOCKOUT`**. While pending the tablet shows 11% / LOW. Bridge requests `BATTERY_STATUS` at 2 Hz |
+| Power-cycle recovery | `b6eb272` | Checkpoint `mission_recovery.json`; boot flow CHECKING -> PX4_SAFE (waits disarmed) -> PREPARING -> RESTORING -> READY/ERROR; in-progress point restored as PENDING; PAUSED with `POWER_CYCLE_RECOVERY`; nothing resumes by itself |
+| Yaw transport | `9d98d6f` `102d103` | **Explicit yaw + yaw-rate sent to PX4** (`type_mask 0x1c7`). Older "no yaw is commanded" text is history |
+| Pivot / steering | `d1d982a` `c39578d` `084b7b4` `d38b87b` `cbad059` `d5c9bd0` | Stronger pivot, moving-yaw params, `precision_guidance_enabled False` (straight legs use `line_guidance()`), deceleration 0.20 m; several values were retuned by others afterwards |
+| Trajectory | `61a3aa7` | 4 m row-end extension (off in the 2026-09-30 run: `Extension mode : DISABLE`) |
+
+⚠ `084b7b4` committed two rosbag folders (about 59 MB of `.db3`) into git.
+⚠ The battery docstrings still say 23.80 V / "five seconds"; the constants
+(22.00 V, 20 s) are authoritative.
 
 ## Repo status (2026-08-31)
 
