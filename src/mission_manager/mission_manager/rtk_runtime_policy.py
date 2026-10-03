@@ -1,13 +1,18 @@
-"""ROS-free runtime RTK policy for a RUNNING mission (operator-approved 2026-09-26).
+"""ROS-free runtime RTK policy for a RUNNING mission (operator-approved 2026-09-26;
+FLOAT confirmation window and 0.5 s resume hold operator-approved 2026-10-03).
 
 GPSRAW ``fix_type``: 6 = RTK FIXED, 5 = RTK FLOAT, 4 = DGPS, 3 = 3D, 2 = 2D,
 0/1 = no fix (7/8, static/PPP, are treated like a loss: only 6 is FIXED).
 
 While RUNNING
   * fresh FIXED                         -> continue
-  * fresh FLOAT, no spray in progress   -> stop at once, auto-resumable pause
-  * fresh FLOAT, spray in progress      -> let the press finish, then pause
-  * anything else, or GPS status stale  -> stop, manual resume (RTK_LOST)
+  * fresh FLOAT for < ``float_confirm_sec`` -> keep going (a blip never pauses)
+  * fresh FLOAT held ``float_confirm_sec``, no spray in progress
+                                        -> stop, auto-resumable pause
+  * the same, spray in progress         -> let the press finish, then pause
+  * anything else, or GPS status stale  -> stop at once, manual resume (RTK_LOST)
+
+``float_confirm_sec = 0`` restores the old stop-on-first-FLOAT behaviour.
 
 While paused for FLOAT
   * FIXED held continuously for ``fixed_hold_sec``        -> auto-resume
@@ -42,6 +47,7 @@ FIX_RTK_FLOAT = 5
 
 class RtkRunningAction(str, Enum):
     CONTINUE = "continue"
+    CONFIRMING_FLOAT = "confirming_float"
     DEFER_FLOAT_UNTIL_SPRAY_DONE = "defer_float_until_spray_done"
     PAUSE_FLOAT = "pause_float"
     PAUSE_LOST = "pause_lost"
@@ -56,11 +62,14 @@ class FloatPauseAction(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class RtkRuntimeConfig:
-    fixed_hold_sec: float = 3.0
+    fixed_hold_sec: float = 0.5
     float_manual_after_sec: float = 120.0
     gps_stale_sec: float = 10.0
+    float_confirm_sec: float = 1.0
 
     def __post_init__(self) -> None:
+        if not math.isfinite(self.float_confirm_sec) or self.float_confirm_sec < 0.0:
+            raise ValueError("float_confirm_sec must be finite and >= 0")
         for name in ("fixed_hold_sec", "float_manual_after_sec", "gps_stale_sec"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0.0:
@@ -77,6 +86,7 @@ class RtkRuntimePolicy:
         self.reset()
 
     def reset(self) -> None:
+        self.float_seen_since: Optional[float] = None
         self.float_pause_started_at: Optional[float] = None
         self.fixed_since: Optional[float] = None
         self.spray_deferral_active = False
@@ -94,16 +104,23 @@ class RtkRuntimePolicy:
     ) -> RtkRunningAction:
         fresh = self._fresh(gps_age_sec)
         if fresh and fix_type == FIX_RTK_FIXED:
+            self.float_seen_since = None
             self.spray_deferral_active = False
             return RtkRunningAction.CONTINUE
         if fresh and fix_type == FIX_RTK_FLOAT:
+            if self.float_seen_since is None:
+                self.float_seen_since = float(now_sec)
+            if now_sec - self.float_seen_since < self.config.float_confirm_sec:
+                return RtkRunningAction.CONFIRMING_FLOAT
             if spray_in_progress:
                 self.spray_deferral_active = True
                 return RtkRunningAction.DEFER_FLOAT_UNTIL_SPRAY_DONE
             self.spray_deferral_active = False
+            self.float_seen_since = None
             self.float_pause_started_at = float(now_sec)
             self.fixed_since = None
             return RtkRunningAction.PAUSE_FLOAT
+        self.float_seen_since = None
         self.spray_deferral_active = False
         return RtkRunningAction.PAUSE_LOST
 
@@ -132,6 +149,15 @@ class RtkRuntimePolicy:
         if now_sec - self.float_pause_started_at >= self.config.float_manual_after_sec:
             return FloatPauseAction.ESCALATE_TIMEOUT
         return FloatPauseAction.HOLD
+
+    def clear_float_confirmation(self) -> None:
+        """Forget a FLOAT not yet confirmed (the mission stopped RUNNING)."""
+        self.float_seen_since = None
+
+    def float_confirming_sec(self, now_sec: float) -> float:
+        if self.float_seen_since is None:
+            return 0.0
+        return max(0.0, now_sec - self.float_seen_since)
 
     def fixed_held_sec(self, now_sec: float) -> float:
         if self.fixed_since is None:

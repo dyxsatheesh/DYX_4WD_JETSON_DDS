@@ -574,6 +574,7 @@ class RoverBackendRosNode(Node):
         self._mission_execution_mode = "MANUAL"
         self._mission_marking_tool = "LASER"
         self._obstacle_status: dict[str, Any] = {}
+        self._rtk_policy_status: dict[str, Any] = {}
         # True from /trajectory_generator/prepare acceptance until the complete
         # multipart trajectory has been accepted by mission_manager. While this
         # is true, an intermediate mission_manager EMPTY snapshot must not make
@@ -652,6 +653,12 @@ class RoverBackendRosNode(Node):
         self._obstacle_config_pub = self.create_publisher(
             String,
             "/obstacle/config",
+            command_qos,
+        )
+        # Not retained: mission_manager saves the RTK pause settings itself.
+        self._rtk_policy_config_pub = self.create_publisher(
+            String,
+            "/mission_manager/rtk_policy_config",
             command_qos,
         )
         # Not retained: spray_controller saves the values to its own file.
@@ -2147,6 +2154,35 @@ class RoverBackendRosNode(Node):
         with self._runtime_lock:
             return dict(self._obstacle_status)
 
+    def get_rtk_policy_status(self) -> dict[str, Any]:
+        with self._runtime_lock:
+            return dict(self._rtk_policy_status)
+
+    def set_rtk_policy_config(self, changes: dict[str, Any]) -> dict[str, Any]:
+        """Send RTK pause settings to mission_manager (validates, saves) and wait."""
+        request_id = uuid.uuid4().hex
+        message = String()
+        message.data = json.dumps(
+            {**changes, "request_id": request_id},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self._rtk_policy_config_pub.publish(message)
+        deadline = time.monotonic() + self.SPRAY_CONFIG_ACK_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            status = self.get_rtk_policy_status()
+            if str(status.get("config_request_id") or "") == request_id:
+                if str(status.get("config_result") or "").upper() == "ACCEPTED":
+                    return status
+                raise RuntimeError(
+                    "RTK pause settings rejected: "
+                    f"{status.get('config_reason') or 'unknown reason'}"
+                )
+            time.sleep(0.05)
+        raise RuntimeError(
+            "Timed out waiting for mission_manager to acknowledge the RTK pause settings"
+        )
+
     def set_obstacle_config(self, changes: dict[str, Any]) -> dict[str, Any]:
         """Send changes to obstacle_monitor (it validates and saves) and wait."""
 
@@ -3112,6 +3148,11 @@ class RoverBackendRosNode(Node):
             return
 
         voice_announcer.on_mission_status(payload)
+
+        rtk_policy = payload.get("rtk_policy")
+        if isinstance(rtk_policy, dict):
+            with self._runtime_lock:
+                self._rtk_policy_status = dict(rtk_policy)
 
         state_name = str(payload.get("state", "EMPTY")).strip().upper()
 
@@ -5061,6 +5102,13 @@ class RosBridgeRuntime:
 
     def get_obstacle_status(self) -> dict[str, Any]:
         return self.node.get_obstacle_status()
+
+    def get_rtk_policy_status(self) -> dict[str, Any]:
+        return self.node.get_rtk_policy_status()
+
+    def set_rtk_policy_config(self, changes: dict[str, Any]) -> dict[str, Any]:
+        with self._operation_lock:
+            return self.node.set_rtk_policy_config(changes)
 
     def set_obstacle_config(self, changes: dict[str, Any]) -> dict[str, Any]:
         with self._operation_lock:

@@ -122,9 +122,16 @@ class MissionManager(Node):
 
     FCU_STATE_STALE_SEC = 3.0
     GPS_FIX_STALE_SEC = 10.0
-    # RTK FLOAT auto-pause: FIXED must hold this long before auto-resume, and a
-    # FLOAT pause not auto-resumed within the second value needs manual Resume.
-    RTK_FLOAT_FIXED_HOLD_SEC = 3.0
+    # RTK FLOAT auto-pause (operator-approved 2026-10-03): FLOAT must last
+    # RTK_FLOAT_CONFIRM_SEC before the mission pauses, and FIXED must hold
+    # RTK_FLOAT_FIXED_HOLD_SEC before auto-resume. Both are factory defaults;
+    # the operator can change them (POST /api/rtk/policy), which saves them to
+    # rtk_policy_settings_path. A FLOAT pause not auto-resumed within
+    # RTK_FLOAT_MANUAL_AFTER_SEC needs a manual Resume.
+    RTK_FLOAT_CONFIRM_SEC = 1.0
+    RTK_FLOAT_FIXED_HOLD_SEC = 0.5
+    RTK_FLOAT_CONFIRM_RANGE_SEC = (0.0, 5.0)
+    RTK_FLOAT_FIXED_HOLD_RANGE_SEC = (0.5, 10.0)
     RTK_FLOAT_MANUAL_AFTER_SEC = 120.0
     RTK_STATUS_STALE_SEC = 15.0
     MAX_RTK_CORRECTION_AGE_SEC = 20.0
@@ -256,6 +263,9 @@ class MissionManager(Node):
         self.declare_parameter(
             "mission_defaults_path", "~/.ros/dyx_mission_defaults.json"
         )
+        self.declare_parameter(
+            "rtk_policy_settings_path", "~/.ros/dyx_rtk_policy_settings.json"
+        )
         # NEXT in LASER mode waits for spray_controller to report the laser
         # OFF (PX4-acknowledged) before motion is re-enabled.
         self.declare_parameter("laser_off_confirm_timeout_sec", 3.0)
@@ -336,6 +346,9 @@ class MissionManager(Node):
         )
         self.mission_defaults_path = os.path.expanduser(
             str(self.get_parameter("mission_defaults_path").value)
+        )
+        self.rtk_policy_settings_path = os.path.expanduser(
+            str(self.get_parameter("rtk_policy_settings_path").value)
         )
         self.laser_off_confirm_timeout_sec = float(
             self.get_parameter("laser_off_confirm_timeout_sec").value
@@ -545,6 +558,13 @@ class MissionManager(Node):
             self._marking_tool_callback,
             # Volatile: a restart must come back to the saved default, not
             # to a replayed per-mission choice.
+            command_qos,
+        )
+        # Volatile: the saved file, not a replayed message, survives restarts.
+        self.create_subscription(
+            String,
+            "/mission_manager/rtk_policy_config",
+            self._rtk_policy_config_callback,
             command_qos,
         )
         self.create_subscription(
@@ -854,17 +874,21 @@ class MissionManager(Node):
         self._obstacle_status_rx_monotonic: Optional[float] = None
         self._obstacle_sensor_warned = False
 
-        # Runtime RTK policy (operator-approved 2026-09-26): FLOAT stops the
-        # rover and auto-resumes after FIXED holds 3 s; anything below FLOAT,
-        # stale GPS status, or FLOAT lasting 120 s needs a manual Resume.
+        # Runtime RTK policy: FLOAT lasting float_confirm_sec stops the rover
+        # and auto-resumes after FIXED holds fixed_hold_sec; anything below
+        # FLOAT, stale GPS status, or FLOAT lasting 120 s needs a manual Resume.
         self._rtk_float_warning_active = False
+        self._rtk_float_confirm_logged = False
+        self._rtk_policy_source = "default"
+        self._rtk_policy_config_request_id = ""
+        self._rtk_policy_config_result = ""
+        self._rtk_policy_config_reason = ""
         self._rtk_policy = RtkRuntimePolicy(
-            RtkRuntimeConfig(
-                fixed_hold_sec=self.RTK_FLOAT_FIXED_HOLD_SEC,
-                float_manual_after_sec=self.RTK_FLOAT_MANUAL_AFTER_SEC,
-                gps_stale_sec=self.GPS_FIX_STALE_SEC,
+            self._rtk_runtime_config(
+                self.RTK_FLOAT_CONFIRM_SEC, self.RTK_FLOAT_FIXED_HOLD_SEC
             )
         )
+        self._load_saved_rtk_policy()
 
         self._backend_heartbeat_healthy = False
 
@@ -1720,6 +1744,147 @@ class MissionManager(Node):
             os.fsync(handle.fileno())
         os.replace(temporary, self.mission_defaults_path)
 
+    # ==============================================================
+    # RTK FLOAT pause settings (operator-adjustable, saved on the rover)
+    # ==============================================================
+    def _rtk_runtime_config(
+        self, float_confirm_sec: float, fixed_hold_sec: float
+    ) -> RtkRuntimeConfig:
+        return RtkRuntimeConfig(
+            fixed_hold_sec=fixed_hold_sec,
+            float_manual_after_sec=self.RTK_FLOAT_MANUAL_AFTER_SEC,
+            gps_stale_sec=self.GPS_FIX_STALE_SEC,
+            float_confirm_sec=float_confirm_sec,
+        )
+
+    def _validated_rtk_policy_value(self, value: Any, name: str) -> float:
+        low, high = (
+            self.RTK_FLOAT_CONFIRM_RANGE_SEC
+            if name == "float_confirm_sec"
+            else self.RTK_FLOAT_FIXED_HOLD_RANGE_SEC
+        )
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be a number")
+        number = float(value)
+        if not math.isfinite(number) or not low <= number <= high:
+            raise ValueError(f"{name} must be between {low:g} and {high:g} s")
+        return number
+
+    def _load_saved_rtk_policy(self) -> None:
+        """Apply saved RTK pause settings; keep the defaults if none or invalid."""
+        try:
+            if not os.path.exists(self.rtk_policy_settings_path):
+                return
+            with open(self.rtk_policy_settings_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            config = self._rtk_runtime_config(
+                self._validated_rtk_policy_value(
+                    payload.get("float_confirm_sec"), "float_confirm_sec"
+                ),
+                self._validated_rtk_policy_value(
+                    payload.get("fixed_hold_sec"), "fixed_hold_sec"
+                ),
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                f"Ignoring saved RTK pause settings {self.rtk_policy_settings_path}: "
+                f"{exc}; using float_confirm_sec={self.RTK_FLOAT_CONFIRM_SEC} "
+                f"fixed_hold_sec={self.RTK_FLOAT_FIXED_HOLD_SEC}"
+            )
+            return
+        self._rtk_policy.config = config
+        self._rtk_policy_source = "saved"
+
+    def _write_saved_rtk_policy(self, config: RtkRuntimeConfig) -> None:
+        payload = {
+            "version": 1,
+            "float_confirm_sec": config.float_confirm_sec,
+            "fixed_hold_sec": config.fixed_hold_sec,
+            "updated_unix_ns": time.time_ns(),
+        }
+        directory = os.path.dirname(self.rtk_policy_settings_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        temporary = self.rtk_policy_settings_path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self.rtk_policy_settings_path)
+
+    def _rtk_policy_config_callback(self, message: String) -> None:
+        """Validate, save and apply new RTK pause settings; ack in status.
+
+        Payload: {"request_id": str, "float_confirm_sec"?: s, "fixed_hold_sec"?: s}.
+        A field left out keeps its current value. Changes apply immediately,
+        including to a FLOAT pause or confirmation already in progress.
+        """
+        try:
+            payload = json.loads(message.data or "")
+        except (TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict):
+            self.get_logger().warn("Ignoring malformed RTK pause settings message")
+            return
+        request_id = str(payload.get("request_id") or "")[:64]
+        with self._lock:
+            current = self._rtk_policy.config
+            try:
+                unknown = sorted(
+                    set(payload) - {"request_id", "float_confirm_sec", "fixed_hold_sec"}
+                )
+                if unknown:
+                    raise ValueError(f"unknown setting(s): {', '.join(unknown)}")
+                if "float_confirm_sec" not in payload and "fixed_hold_sec" not in payload:
+                    raise ValueError("no settings to change")
+                config = self._rtk_runtime_config(
+                    self._validated_rtk_policy_value(
+                        payload["float_confirm_sec"], "float_confirm_sec"
+                    )
+                    if "float_confirm_sec" in payload
+                    else current.float_confirm_sec,
+                    self._validated_rtk_policy_value(
+                        payload["fixed_hold_sec"], "fixed_hold_sec"
+                    )
+                    if "fixed_hold_sec" in payload
+                    else current.fixed_hold_sec,
+                )
+                self._write_saved_rtk_policy(config)
+            except Exception as exc:
+                self._rtk_policy_config_request_id = request_id
+                self._rtk_policy_config_result = "REJECTED"
+                self._rtk_policy_config_reason = str(exc)
+                self.get_logger().warn(f"Rejected RTK pause settings: {exc}")
+                self._publish_status(force=True)
+                return
+            self._rtk_policy.config = config
+            self._rtk_policy_source = "saved"
+            self._rtk_policy_config_request_id = request_id
+            self._rtk_policy_config_result = "ACCEPTED"
+            self._rtk_policy_config_reason = ""
+            self.get_logger().info(
+                "RTK pause settings saved: "
+                f"float_confirm_sec={config.float_confirm_sec:g} "
+                f"fixed_hold_sec={config.fixed_hold_sec:g}"
+            )
+            self._publish_status(force=True)
+
+    def _rtk_policy_status(self) -> dict[str, Any]:
+        config = self._rtk_policy.config
+        return {
+            "float_confirm_sec": config.float_confirm_sec,
+            "fixed_hold_sec": config.fixed_hold_sec,
+            "float_manual_after_sec": config.float_manual_after_sec,
+            "float_confirm_range_sec": list(self.RTK_FLOAT_CONFIRM_RANGE_SEC),
+            "fixed_hold_range_sec": list(self.RTK_FLOAT_FIXED_HOLD_RANGE_SEC),
+            "default_float_confirm_sec": self.RTK_FLOAT_CONFIRM_SEC,
+            "default_fixed_hold_sec": self.RTK_FLOAT_FIXED_HOLD_SEC,
+            "source": self._rtk_policy_source,
+            "config_request_id": self._rtk_policy_config_request_id,
+            "config_result": self._rtk_policy_config_result,
+            "config_reason": self._rtk_policy_config_reason,
+        }
+
     def _marking_tool_callback(self, message: String) -> None:
         tool = str(message.data or "").strip().upper()
         if tool not in self.MARKING_TOOLS:
@@ -2480,8 +2645,10 @@ class MissionManager(Node):
         """Runtime RTK policy while RUNNING (operator-approved 2026-09-26).
 
           * fresh fix_type 6 (FIXED): continue;
-          * fresh fix_type 5 (FLOAT): stop at once and pause as RTK_FLOAT,
-            which auto-resumes once FIXED holds RTK_FLOAT_FIXED_HOLD_SEC
+          * fresh fix_type 5 (FLOAT): keep going while it is shorter than
+            float_confirm_sec (a blip never stops the rover; marking still
+            needs raw RTK FIXED). Once confirmed, stop and pause as
+            RTK_FLOAT, which auto-resumes once FIXED holds fixed_hold_sec
             (_monitor_rtk_float_pause); if a spray press is already in
             progress it finishes first and the pause follows;
           * DGPS / 3D / 2D / no fix, or GPSRAW stale: stop and pause as
@@ -2493,6 +2660,8 @@ class MissionManager(Node):
         """
         if self._state != "RUNNING":
             self._rtk_float_warning_active = False
+            # A FLOAT window must restart from zero after any pause/resume.
+            self._rtk_policy.clear_float_confirmation()
             return
 
         was_deferring = self._rtk_policy.spray_deferral_active
@@ -2504,8 +2673,19 @@ class MissionManager(Node):
         )
 
         if action is RtkRunningAction.CONTINUE:
+            self._rtk_float_confirm_logged = False
             return
 
+        if action is RtkRunningAction.CONFIRMING_FLOAT:
+            if not self._rtk_float_confirm_logged:
+                self._rtk_float_confirm_logged = True
+                self.get_logger().warn(
+                    "RTK FLOAT (fix_type=5); still moving, pausing only if it "
+                    f"lasts {self._rtk_policy.config.float_confirm_sec:.1f} s"
+                )
+            return
+
+        self._rtk_float_confirm_logged = False
         if action is RtkRunningAction.DEFER_FLOAT_UNTIL_SPRAY_DONE:
             if not was_deferring:
                 self._last_message = (
@@ -2524,8 +2704,10 @@ class MissionManager(Node):
             self._reset_arrival_state()
             self._disable_motion_preserve_estop()
             self._last_message = (
-                "RTK FLOAT (fix_type=5); rover stopped. Mission will auto-resume "
-                f"after RTK FIXED holds {self.RTK_FLOAT_FIXED_HOLD_SEC:.0f} s"
+                "RTK FLOAT (fix_type=5) for "
+                f"{self._rtk_policy.config.float_confirm_sec:.1f} s; rover stopped. "
+                "Mission will auto-resume after RTK FIXED holds "
+                f"{self._rtk_policy.config.fixed_hold_sec:.1f} s"
             )
             self._emit_system_event("RTK_FLOAT", self._last_message)
             self._publish_status(force=True)
@@ -2556,7 +2738,7 @@ class MissionManager(Node):
             if held > 0.0:
                 self._last_message = (
                     f"RTK FIXED for {held:.1f}/"
-                    f"{self.RTK_FLOAT_FIXED_HOLD_SEC:.0f} s; auto-resume pending"
+                    f"{self._rtk_policy.config.fixed_hold_sec:.1f} s; auto-resume pending"
                 )
             return
 
@@ -2575,7 +2757,7 @@ class MissionManager(Node):
         self._escalate_rtk_float_to_manual(
             "RTK_FLOAT_TIMEOUT",
             f"RTK FLOAT for {self.RTK_FLOAT_MANUAL_AFTER_SEC:.0f} s without "
-            f"{self.RTK_FLOAT_FIXED_HOLD_SEC:.0f} s of FIXED; manual Resume required",
+            f"{self._rtk_policy.config.fixed_hold_sec:.1f} s of FIXED; manual Resume required",
         )
 
     def _escalate_rtk_float_to_manual(self, pause_reason: str, message: str) -> None:
@@ -4844,7 +5026,14 @@ class MissionManager(Node):
             "rtk_fixed_hold_sec": round(
                 self._rtk_policy.fixed_held_sec(time.monotonic()), 2
             ),
-            "rtk_fixed_hold_required_sec": self.RTK_FLOAT_FIXED_HOLD_SEC,
+            "rtk_fixed_hold_required_sec": self._rtk_policy.config.fixed_hold_sec,
+            "rtk_float_confirm_required_sec": self._rtk_policy.config.float_confirm_sec,
+            "rtk_float_confirming_sec": (
+                round(self._rtk_policy.float_confirming_sec(time.monotonic()), 2)
+                if self._state == "RUNNING"
+                else 0.0
+            ),
+            "rtk_policy": self._rtk_policy_status(),
             "rtk_float_paused_sec": (
                 round(self._rtk_policy.float_paused_sec(time.monotonic()), 1)
                 if self._state == "PAUSED" and self._pause_reason == "RTK_FLOAT"

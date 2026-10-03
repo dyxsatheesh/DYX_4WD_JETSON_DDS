@@ -1,12 +1,19 @@
-"""Runtime RTK policy (operator-approved 2026-09-26).
+"""Runtime RTK policy (operator-approved 2026-09-26, changed 2026-10-03).
 
-FLOAT stops the rover and auto-resumes once FIXED holds 3 s; DGPS / 3D /
+FLOAT stops the rover only once it has lasted float_confirm_sec (default 1 s),
+and auto-resumes once FIXED holds fixed_hold_sec (default 0.5 s); DGPS / 3D /
 lower fixes, stale GPS status, or FLOAT lasting 120 s need a manual Resume;
-a spray press already in progress finishes before the FLOAT pause.
+a spray press already in progress finishes before the FLOAT pause. Both times
+are operator settings saved on the rover.
+
+The mechanism tests pin the pre-2026-10-03 values (no confirmation window,
+3 s hold) through LEGACY so their timings stay meaningful; the new defaults
+and the settings path have their own tests below.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 from pathlib import Path
@@ -32,8 +39,11 @@ MissionManager = harness.MissionManager
 
 
 # ----------------------------------------------------------- pure policy
-def policy():
-    return RtkRuntimePolicy(RtkRuntimeConfig())
+LEGACY = dict(fixed_hold_sec=3.0, float_confirm_sec=0.0)
+
+
+def policy(**overrides):
+    return RtkRuntimePolicy(RtkRuntimeConfig(**{**LEGACY, **overrides}))
 
 
 def test_config_validation():
@@ -41,6 +51,67 @@ def test_config_validation():
         RtkRuntimeConfig(fixed_hold_sec=0.0)
     with pytest.raises(ValueError):
         RtkRuntimeConfig(fixed_hold_sec=5.0, float_manual_after_sec=4.0)
+    with pytest.raises(ValueError):
+        RtkRuntimeConfig(float_confirm_sec=-0.1)
+    with pytest.raises(ValueError):
+        RtkRuntimeConfig(float_confirm_sec=float("nan"))
+
+
+def test_new_defaults_are_one_second_confirm_and_half_second_hold():
+    config = RtkRuntimeConfig()
+    assert (config.float_confirm_sec, config.fixed_hold_sec) == (1.0, 0.5)
+    assert MissionManager.RTK_FLOAT_CONFIRM_SEC == 1.0
+    assert MissionManager.RTK_FLOAT_FIXED_HOLD_SEC == 0.5
+
+
+def test_float_blip_shorter_than_the_window_never_pauses():
+    p = RtkRuntimePolicy(RtkRuntimeConfig())
+    assert p.running(0.0, 5, 0.1, False) is RtkRunningAction.CONFIRMING_FLOAT
+    assert p.running(0.95, 5, 0.1, False) is RtkRunningAction.CONFIRMING_FLOAT
+    assert p.float_confirming_sec(0.95) == pytest.approx(0.95)
+    assert p.running(0.99, 6, 0.1, False) is RtkRunningAction.CONTINUE
+    assert p.float_confirming_sec(0.99) == 0.0
+    # A new FLOAT starts a fresh window: the earlier 0.95 s does not count.
+    assert p.running(1.5, 5, 0.1, False) is RtkRunningAction.CONFIRMING_FLOAT
+    assert p.running(2.4, 5, 0.1, False) is RtkRunningAction.CONFIRMING_FLOAT
+    assert p.running(2.5, 5, 0.1, False) is RtkRunningAction.PAUSE_FLOAT
+
+
+def test_float_lasting_the_window_pauses_and_half_second_fixed_resumes():
+    p = RtkRuntimePolicy(RtkRuntimeConfig())
+    assert p.running(0.0, 5, 0.1, False) is RtkRunningAction.CONFIRMING_FLOAT
+    assert p.running(1.0, 5, 0.1, False) is RtkRunningAction.PAUSE_FLOAT
+    assert p.float_paused(1.1, 6, 0.1) is FloatPauseAction.HOLD
+    assert p.float_paused(1.59, 6, 0.1) is FloatPauseAction.HOLD
+    assert p.float_paused(1.6, 6, 0.1) is FloatPauseAction.AUTO_RESUME
+
+
+@pytest.mark.parametrize("worse", [4, 3, 0])
+def test_worse_than_float_still_pauses_at_once_even_inside_the_window(worse):
+    p = RtkRuntimePolicy(RtkRuntimeConfig())
+    assert p.running(0.0, 5, 0.1, False) is RtkRunningAction.CONFIRMING_FLOAT
+    assert p.running(0.2, worse, 0.1, False) is RtkRunningAction.PAUSE_LOST
+    assert p.float_confirming_sec(0.2) == 0.0
+
+
+def test_stale_gps_inside_the_window_pauses_as_lost():
+    p = RtkRuntimePolicy(RtkRuntimeConfig())
+    p.running(0.0, 5, 0.1, False)
+    assert p.running(0.5, 5, 11.0, False) is RtkRunningAction.PAUSE_LOST
+
+
+def test_spray_in_progress_is_deferred_only_after_confirmation():
+    p = RtkRuntimePolicy(RtkRuntimeConfig())
+    assert p.running(0.0, 5, 0.1, True) is RtkRunningAction.CONFIRMING_FLOAT
+    assert p.running(1.0, 5, 0.1, True) is (
+        RtkRunningAction.DEFER_FLOAT_UNTIL_SPRAY_DONE
+    )
+    assert p.running(1.2, 5, 0.1, False) is RtkRunningAction.PAUSE_FLOAT
+
+
+def test_zero_window_restores_stop_on_first_float():
+    p = RtkRuntimePolicy(RtkRuntimeConfig(float_confirm_sec=0.0))
+    assert p.running(0.0, 5, 0.1, False) is RtkRunningAction.PAUSE_FLOAT
 
 
 @pytest.mark.parametrize(
@@ -122,16 +193,17 @@ class Logger:
     error = info = warn
 
 
-def build(clock, *, state="RUNNING", fix=6, mode="OFFBOARD", armed=True):
+def build(clock, *, state="RUNNING", fix=6, mode="OFFBOARD", armed=True, config=None):
     manager, events = harness.build_manager(state=state, mode=mode, armed=armed)
     manager._rtk_policy = RtkRuntimePolicy(
         RtkRuntimeConfig(
-            fixed_hold_sec=MissionManager.RTK_FLOAT_FIXED_HOLD_SEC,
             float_manual_after_sec=MissionManager.RTK_FLOAT_MANUAL_AFTER_SEC,
             gps_stale_sec=MissionManager.GPS_FIX_STALE_SEC,
+            **(LEGACY if config is None else config),
         )
     )
     manager._rtk_float_warning_active = False
+    manager._rtk_float_confirm_logged = False
     manager._gps_fix_type = fix
     manager._last_gps_fix_rx_monotonic = clock.t
     manager._last_fcu_rx_monotonic = clock.t
@@ -340,3 +412,172 @@ def test_node_float_pause_never_advertises_manual_resume(clock):
     fix(m, clock, 6, advance=1.0)
     tick(m)
     assert m._resume_available is False
+
+
+# ------------------------------------------------- node: new defaults
+DEFAULTS = dict(
+    float_confirm_sec=MissionManager.RTK_FLOAT_CONFIRM_SEC,
+    fixed_hold_sec=MissionManager.RTK_FLOAT_FIXED_HOLD_SEC,
+)
+
+
+def test_node_float_blip_keeps_the_mission_running(clock):
+    m, events = build(clock, config=DEFAULTS)
+    fix(m, clock, 5)
+    tick(m)
+    fix(m, clock, 5, advance=0.9)
+    tick(m)
+    assert m._state == "RUNNING" and m._pause_reason is None
+    assert "disable_motion" not in events and event_names(events) == []
+    fix(m, clock, 6, advance=0.05)
+    tick(m)
+    fix(m, clock, 5, advance=0.5)        # new blip, fresh window
+    tick(m)
+    fix(m, clock, 5, advance=0.9)
+    tick(m)
+    assert m._state == "RUNNING"
+
+
+def test_node_float_for_one_second_pauses_and_resumes_after_half_second(clock):
+    m, events = build(clock, config=DEFAULTS)
+    fix(m, clock, 5)
+    tick(m)
+    fix(m, clock, 5, advance=1.0)
+    tick(m)
+    assert (m._state, m._pause_reason) == ("PAUSED", "RTK_FLOAT")
+    assert event_names(events) == ["RTK_FLOAT"]
+    fix(m, clock, 6, advance=0.1)
+    tick(m)
+    fix(m, clock, 6, advance=0.45)
+    tick(m)
+    assert m._state == "PAUSED"
+    fix(m, clock, 6, advance=0.05)       # 0.5 s held
+    tick(m)
+    assert (m._state, m._pause_reason) == ("RUNNING", None)
+    assert harness.px4_calls(events) == []
+
+
+def test_node_dgps_inside_the_window_still_needs_manual_resume(clock):
+    m, _ = build(clock, config=DEFAULTS)
+    fix(m, clock, 5)
+    tick(m)
+    fix(m, clock, 4, advance=0.3)
+    tick(m)
+    assert (m._state, m._pause_reason) == ("PAUSED", "RTK_LOST")
+
+
+# ------------------------------------------------- node: saved settings
+def settings_manager(clock, tmp_path):
+    m, events = build(clock, config=DEFAULTS)
+    m.rtk_policy_settings_path = str(tmp_path / "rtk_policy.json")
+    m._rtk_policy_source = "default"
+    m._rtk_policy_config_request_id = ""
+    m._rtk_policy_config_result = ""
+    m._rtk_policy_config_reason = ""
+    return m, events
+
+
+class Msg:
+    def __init__(self, payload):
+        self.data = payload if isinstance(payload, str) else json.dumps(payload)
+
+
+def send(m, payload):
+    MissionManager._rtk_policy_config_callback(m, Msg(payload))
+    return MissionManager._rtk_policy_status(m)
+
+
+def test_settings_are_validated_saved_and_applied_live(clock, tmp_path):
+    m, _ = settings_manager(clock, tmp_path)
+    status = send(m, {"request_id": "a", "float_confirm_sec": 2.0, "fixed_hold_sec": 1.5})
+    assert (status["config_request_id"], status["config_result"]) == ("a", "ACCEPTED")
+    assert (status["float_confirm_sec"], status["fixed_hold_sec"]) == (2.0, 1.5)
+    assert status["source"] == "saved"
+    saved = json.loads((tmp_path / "rtk_policy.json").read_text())
+    assert (saved["float_confirm_sec"], saved["fixed_hold_sec"]) == (2.0, 1.5)
+    # A partial update keeps the other value.
+    status = send(m, {"request_id": "b", "fixed_hold_sec": 0.5})
+    assert (status["float_confirm_sec"], status["fixed_hold_sec"]) == (2.0, 0.5)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"float_confirm_sec": 5.1},
+        {"float_confirm_sec": -0.1},
+        {"fixed_hold_sec": 0.4},
+        {"fixed_hold_sec": 10.5},
+        {"fixed_hold_sec": True},
+        {"fixed_hold_sec": "1"},
+        {"fixed_hold_sec": float("nan")},
+        {"other": 1},
+        {},
+    ],
+)
+def test_out_of_range_settings_are_rejected_and_nothing_changes(clock, tmp_path, payload):
+    m, _ = settings_manager(clock, tmp_path)
+    status = send(m, {"request_id": "x", **payload})
+    assert (status["config_request_id"], status["config_result"]) == ("x", "REJECTED")
+    assert (status["float_confirm_sec"], status["fixed_hold_sec"]) == (1.0, 0.5)
+    assert not (tmp_path / "rtk_policy.json").exists()
+
+
+def test_range_ends_are_accepted(clock, tmp_path):
+    m, _ = settings_manager(clock, tmp_path)
+    low = send(m, {"float_confirm_sec": 0.0, "fixed_hold_sec": 10.0})
+    high = send(m, {"float_confirm_sec": 5.0, "fixed_hold_sec": 0.5})
+    assert low["config_result"] == high["config_result"] == "ACCEPTED"
+
+
+def test_saved_settings_load_at_start_and_bad_file_keeps_defaults(clock, tmp_path):
+    m, _ = settings_manager(clock, tmp_path)
+    (tmp_path / "rtk_policy.json").write_text(
+        json.dumps({"version": 1, "float_confirm_sec": 3.0, "fixed_hold_sec": 2.0})
+    )
+    MissionManager._load_saved_rtk_policy(m)
+    config = m._rtk_policy.config
+    assert (config.float_confirm_sec, config.fixed_hold_sec) == (3.0, 2.0)
+    assert m._rtk_policy_source == "saved"
+
+    m2, _ = settings_manager(clock, tmp_path)
+    (tmp_path / "rtk_policy.json").write_text(
+        json.dumps({"float_confirm_sec": 99, "fixed_hold_sec": 2.0})
+    )
+    MissionManager._load_saved_rtk_policy(m2)
+    config = m2._rtk_policy.config
+    assert (config.float_confirm_sec, config.fixed_hold_sec) == (1.0, 0.5)
+    assert m2._rtk_policy_source == "default"
+
+
+def test_new_settings_apply_to_a_float_pause_in_progress(clock, tmp_path):
+    m, _ = settings_manager(clock, tmp_path)
+    fix(m, clock, 5)
+    tick(m)
+    fix(m, clock, 5, advance=1.0)
+    tick(m)
+    assert m._pause_reason == "RTK_FLOAT"
+    send(m, {"fixed_hold_sec": 2.0})
+    fix(m, clock, 6, advance=0.1)
+    tick(m)
+    fix(m, clock, 6, advance=1.0)
+    tick(m)
+    assert m._state == "PAUSED"
+    fix(m, clock, 6, advance=1.0)        # 2.0 s held
+    tick(m)
+    assert m._state == "RUNNING"
+
+
+def test_node_float_window_restarts_after_the_mission_leaves_running(clock):
+    m, _ = build(clock, config=DEFAULTS)
+    fix(m, clock, 5)
+    tick(m)                              # window starts
+    m._state = "PAUSED"                  # e.g. operator pause
+    fix(m, clock, 5, advance=0.5)
+    tick(m)
+    m._state = "RUNNING"                 # resumed (on FIXED in real life)
+    fix(m, clock, 5, advance=2.0)
+    tick(m)
+    assert m._state == "RUNNING"         # fresh window, not 2.5 s old
+    fix(m, clock, 5, advance=1.0)
+    tick(m)
+    assert (m._state, m._pause_reason) == ("PAUSED", "RTK_FLOAT")
