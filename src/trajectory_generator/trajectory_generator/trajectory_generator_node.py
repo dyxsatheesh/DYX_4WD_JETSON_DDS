@@ -120,10 +120,10 @@ class TrajectoryGenerator(Node):
     POINT_TYPE_DUMMY_ALIGNMENT = 1
     POINT_TYPE_MARKING = 2
 
-    # Production extension rule.
-    # The trajectory generator intentionally owns these values so an older
-    # frontend/metadata file cannot silently restore the legacy 2.0 m / 3.5 m
-    # behaviour. Backend defaults are patched to the same values below.
+    # Production row-transition trigger remains fixed at 3.0 m.
+    # The actual extension distance is mission-specific: for ENABLE missions
+    # the backend validates and stores the operator-selected frontend value.
+    # EXTENSION_DISTANCE_M remains only as a legacy/default fallback.
     EXTENSION_TRIGGER_DISTANCE_M = 3.0
     EXTENSION_DISTANCE_M = 4.0
 
@@ -1020,13 +1020,21 @@ class TrajectoryGenerator(Node):
 
                 self.extension_mode = str(metadata["extension_mode"]).strip().upper()
 
+                # Keep the row-transition detection rule fixed. Only the
+                # extension length is operator-selectable.
                 self.row_transition_threshold_m = self.EXTENSION_TRIGGER_DISTANCE_M
 
-                self.dummy_point_distance_m = (
-                    self.EXTENSION_DISTANCE_M
-                    if self.extension_mode == "ENABLE"
-                    else None
-                )
+                if self.extension_mode == "ENABLE":
+                    requested_dummy_distance = metadata.get(
+                        "dummy_point_distance_m"
+                    )
+                    self.dummy_point_distance_m = (
+                        float(requested_dummy_distance)
+                        if requested_dummy_distance is not None
+                        else self.EXTENSION_DISTANCE_M
+                    )
+                else:
+                    self.dummy_point_distance_m = None
 
                 self.mission_id = str(metadata["mission_id"])
 

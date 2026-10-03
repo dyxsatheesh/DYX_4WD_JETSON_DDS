@@ -252,6 +252,35 @@ def test_successful_prepare_binds_topology_to_current_mission():
     assert node.ready is False
 
 
+def test_prepare_uses_frontend_selected_extension_distance():
+    node = _fake_generator()
+
+    metadata = {
+        "mission_id": "mission-dynamic-extension",
+        "checksum_sha256": "e" * 64,
+        "extension_mode": "ENABLE",
+        "dummy_point_distance_m": 7.25,
+    }
+
+    node._load_mission_source = lambda: (
+        metadata,
+        "local",
+        [
+            (0.0, 0.0),
+            (0.0, 2.0),
+            (1.0, 2.0),
+            (1.0, 0.0),
+        ],
+    )
+
+    response = _run_prepare(node)
+
+    assert response.success is True
+    assert node.extension_mode == "ENABLE"
+    assert node.dummy_point_distance_m == pytest.approx(7.25)
+    assert node.row_transition_threshold_m == pytest.approx(3.0)
+
+
 def test_failed_load_clears_previous_mission_identity_and_topology():
     node = _fake_generator()
 
