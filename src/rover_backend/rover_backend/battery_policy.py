@@ -12,10 +12,10 @@ BATTERY_LOW_PERCENT = 30
 BATTERY_PRECRITICAL_PERCENT = 11
 BATTERY_CRITICAL_PERCENT = 10
 
-BATTERY_CRITICAL_DEBOUNCE_SEC = 20.0
+BATTERY_CRITICAL_DEBOUNCE_SEC = 30.0
 # BATTERY_STATUS is requested at 2 Hz. A 1.5 s freshness limit tolerates a
 # small scheduling delay while preventing stale telemetry from completing
-# the five-second critical window.
+# the 30-second critical window.
 BATTERY_CRITICAL_SAMPLE_FRESH_SEC = 1.5
 
 
@@ -111,7 +111,7 @@ def battery_mission_locked(
 
 
 class BatteryCriticalDebounce:
-    """Confirm <=22.00 V continuously for exactly five seconds.
+    """Confirm <=22.00 V continuously for exactly 30 seconds.
 
     A valid voltage above 22.00 V cancels both a pending and a confirmed
     critical condition. Invalid/stale telemetry cannot create a critical lock.

@@ -530,8 +530,8 @@ class RoverBackendRosNode(Node):
         self._terminal_cleanup_lock = threading.Lock()
         self._terminal_cleanup_keys: set[str] = set()
 
-        # Battery criticality is backend-owned. <=23.80 V remains LOW/11%
-        # during the exact 5.0 s confirmation window, then becomes CRITICAL/10%.
+        # Battery criticality is backend-owned. <=22.00 V remains LOW/11%
+        # during the exact 30.0 s confirmation window, then becomes CRITICAL/10%.
         self._battery_debounce_lock = threading.Lock()
         self._battery_critical_debounce = BatteryCriticalDebounce()
         self._battery_critical_timer: threading.Timer | None = None

@@ -313,14 +313,23 @@ achieves a real stop.
   field-tested)** — `mission_manager/rtk_runtime_policy.py`, wired in
   `_monitor_runtime_rtk()` / `_monitor_rtk_float_pause()`. Before this, FLOAT
   was warning-only and the rover kept driving **and marking** on a FLOAT
-  position. Now: fresh FLOAT (fix_type 5) → stop at once, pause reason
-  `RTK_FLOAT`, **auto-resume** after FIXED holds 3 s continuously (never
+  position. Now: fresh FLOAT (fix_type 5) → stop, pause reason
+  `RTK_FLOAT`, **auto-resume** after FIXED holds continuously (never
   changes PX4 mode or arms; requires PX4 still OFFBOARD+armed, E-stop released,
   motion health OK, else manual). DGPS/3D/2D/no fix or GPSRAW stale 10 s →
   `RTK_LOST`, **manual** Resume (also if it happens during a FLOAT pause).
   FLOAT pause not auto-resumed within 120 s → `RTK_FLOAT_TIMEOUT`, manual. A
   spray press already in progress finishes before the FLOAT pause. The
   tablet only knows `RTK_LOST`, so a FLOAT pause shows "RESUME BLOCKED".
+  ⚠ **Changed 2026-10-03 (operator-approved, not field-tested):** FLOAT must
+  last **`float_confirm_sec` = 1.0 s** before the pause (a shorter blip keeps
+  driving; marking still needs the raw-GNSS RTK-FIXED gate), and the
+  auto-resume hold is **`fixed_hold_sec` = 0.5 s** (was 3 s). Anything worse
+  than FLOAT still pauses at once. Both are operator settings:
+  `GET/POST /api/rtk/policy` (ranges 0–5 s and 0.5–10 s; 0 = old
+  stop-on-first-FLOAT) → `/mission_manager/rtk_policy_config` → saved in
+  `~/.ros/dyx_rtk_policy_settings.json` (`rtk_policy_settings_path`), applied
+  live, shown as `rtk_policy` in `/mission_manager/status`.
 
 ## Live-captured params (2026-08-31 evening, matches HEAD `7ac712b`)
 
@@ -1256,9 +1265,10 @@ The radial20 fix and point_history are **not field-tested**.
   - Before this, ros_bridge only spoke them (voice).
   - They now share the ordered point-event queue with `event_kind: "SYSTEM"`.
 - **Battery critical** (SHARINI `ef14c9a` supersedes my `3ee0070` filter):
-  - `BatteryCriticalDebounce`: ≤ **22.00 V held for 20 s** (SHARINI `5602d83`,
-    2026-10-01; was 23.80 V / 5 s), with samples no older than 1.5 s. The
-    docstrings in `battery_policy.py` still say 23.80 V / "five seconds"; the
+  - `BatteryCriticalDebounce`: ≤ **22.00 V held for 30 s** (⚠ changed
+    2026-10-03 from 20 s, **not field-tested**; 20 s was SHARINI `5602d83`,
+    2026-10-01; before that 23.80 V / 5 s), with samples no older than 1.5 s.
+    The `battery_policy.py` docstrings now match (22.00 V / 30 s); the
     constants are `BATTERY_CRITICAL_VOLTAGE_V` and `BATTERY_CRITICAL_DEBOUNCE_SEC`.
     Not checked whether it is deployed on the Jetson.
   - The action is **PAUSE** via `/mission_manager/pause_battery`
@@ -1699,3 +1709,253 @@ sudo iptables -t mangle -L DYX_HOTSPOT_QOS -n -v            # client-internet ca
   entry points, `.srv` files or `package.xml` change), then
   `sudo systemctl restart dyx-rover`. Check first that the rover is idle and
   disarmed (`/mission_manager/status`).
+
+## 2026-10-02 — mosaic-H RTK satellite-count investigation (agent handoff)
+
+This section supersedes older receiver port, firmware, and injection-route
+assumptions above. These are session observations, not guarantees of the next
+session's state: read the live backend and receiver before acting.
+
+### Hardware, access, and user constraints
+
+- **Septentrio mosaic-H is the PRIMARY and only receiver**, serial `3804732`.
+  The UM982 swap is **cancelled**; do not apply UM982 parameters.
+- Jetson: `ssh flash@192.168.3.101`, workspace `/home/flash/rover_ws`.
+- **Never identify devices by ttyACM number**; numbering changes and a device
+  may be the Pixhawk. Stable receiver paths:
+  - USB1 console: `/dev/serial/by-id/usb-Septentrio_Septentrio_USB_Device_3804732-if02`
+  - USB2 correction input: `/dev/serial/by-id/usb-Septentrio_Septentrio_USB_Device_3804732-if04`
+- ASCII console commands end with actual CRLF (`\r\n`). USB1 was read with
+  pyserial at 115200; do not open the FCU serial device alongside MAVROS.
+- Parked, disarmed, no mission for correction/configuration experiments.
+  Stop RTK through the backend before touching USB2; restart afterwards.
+- **Never send `lif,error`**: it clears the log. `lif,DiffCorrError` is a
+  read-only query. No FCU/MAVROS parameter changes for this investigation.
+- Ask before upgrades/irreversible steps and before saving receiver config
+  to Boot. The user authorized the restoration and two Boot saves in this
+  session; this is not blanket authorization for future saves. Temporary
+  diagnostic streams must be restored and never saved to Boot.
+
+### Firmware, restoration, and confirmed band-plan issue
+
+- Before upgrade: firmware **4.14.0**, 2023-05-22, rev `gdf7d81`, GNSS6.14.7.
+  The user upgraded it between checks. Direct `lif,Identification` afterwards
+  verified **4.15.1**, 2025-10-09, rev `gb35f16`, GNSS **2025.03.4**.
+  Firmware as the cause of the RTK problem remains **unproven**.
+- Original verified backup on Jetson:
+  `/home/flash/rover_ws/receiver_backups/mosaich_20261002_122351/`.
+  Includes Current/Boot exports, output/input settings, signal/satellite
+  usage, attitude/offsets, error logs and checksums. Some text captures store
+  literal escaped CRLF; normalize these before parsing. Config exports can
+  contain access credentials: do not print/share them wholesale.
+- Post-upgrade settings required restoration: COM3 baud921600, full Stream1
+  SBF at `msec100`, USB2 RTCMv3 input/no output, Rover PVT, dual-antenna
+  Float+Fixed attitude, Aux1 manual 0.730/0/0, antenna offsets zero, PVT
+  elevation mask5. PX4 GPS reception resumed after restoring these settings.
+- **Original tracking mask included BDSB3I. On mosaic-H, enabling BDSB3I
+  selects the alternate RF band plan, excluding Galileo E5b/BeiDou B2I.**
+  Listing all signals as enabled does NOT mean simultaneous RF availability.
+  Before correction, direct SBF showed GAL E1 but no E5b, BDS B1I/B3I but no
+  B2I. User approved removing **BDSB3I from SignalTracking only**; subsequent
+  captures showed E5b and B2I tracking. BDSB3I may still appear in SignalUsage;
+  that is distinct from enabling it in SignalTracking.
+- Saved tracking mask after explicit user approval:
+  `GPSL1CA+GPSL2PY+GPSL2C+GLOL1CA+GLOL2CA+GALE1BC+GALE5b+GEOL1+BDSB1I+BDSB2I+QZSL1CA+QZSL2C+QZSL1CB`.
+  `GALL1BC` in older exports is named `GALE1BC` in current firmware.
+- Jetson audit directories under `receiver_backups/`:
+  `boot_save_20261002_135853`, `band_fix_20261002_141316`,
+  `band_boot_save_20261002_141917`. Current/Boot were verified after saving.
+- Reference: [Septentrio hardware manual, band plans](https://www.septentrio.com/system/files/support/mosaic_hardware_manual_v1.11.0.pdf#page=10).
+
+### Correction on/off/on capture and its limitations
+
+Evidence directory: `receiver_backups/rtcm_ab_20261002_151546/`, available
+locally and under `/home/flash/rover_ws/` on Jetson. Local `report.md` contains
+the detailed analysis. Raw `.sbf` and `.jsonl` files retain the observations;
+`result.json` confirms cleanup. This was 30s corrections-on, 90s stopped,
+180s restarted, with fresh disarmed/mission-disabled guards throughout.
+
+- Initial interval: **FIXED 30/30 epochs, 11 SV**; corrections entered USB2.
+  Main antenna tracked GPS3, GLO5, GAL6, BDS10 (excluding SBAS); PVT used
+  GPS3+GLO4+GAL4=11. BDS remained tracked but was not used.
+- Once corrections aged out: standalone/SBAS used **20–22 SV**. NrSV counts
+  satellites used by the solution, not all tracked channels. A count drop at
+  RTK entry does not alone prove valid corrections were rejected.
+- Restart interval: 78 SBAS, 93 FLOAT, 10 DGNSS epochs; FLOAT NrSV6–11,
+  median9. A later one-shot recovered FIXED11, age1.2s, RxError0.
+- **Comparison was confounded by a changed correction source**: after
+  restart, DiffCorrIn reported COM3, USB2 counters stopped advancing, and
+  backend profile was `MP23960a`, `direct_inject=false`, `mavros_px4`.
+  The diagnostic script did not edit profiles. Whether an operator changed
+  them or a prior change took effect on restart was not established.
+- Initial stream carried1005, later stream1006; their decoded base ECEF
+  coordinates differed by **10.802m**, despite both station IDs being0.
+  Do not compare absolute positions or attribute before/after effects to
+  firmware using these different references.
+- All **310 captured RTCM frames** passed CRC24Q. All four MSM4
+  constellations were present. This does not prove observation validity or
+  absence of upstream losses.
+- BDS initial stream advertised8 SV, but only **C09/C10 had B2I cells**.
+  Rover main-antenna B2I tracking was zero in all initial/off epochs; after
+  restart it was zero in121/181 epochs, one SV in26, two SV in34. BDS was
+  unused in every RTK FLOAT epoch. Limited common second-band observations
+  are proven; the cause of poor B2I tracking and later non-use is unresolved.
+- Galileo E1/E5b contributed throughout the initial FIXED and later FLOAT
+  epochs; wholesale GAL rejection was not reproduced. Initial E14 was
+  tracked but absent from base corrections; E27 was common but unused, with
+  no proven explanation from this capture.
+- **17/40 later GLO MSM4 messages contained invalid observation sentinels in
+  all11 cells** (187 cells total), despite valid CRCs. GLO was absent from
+  early FLOAT solutions and later recovered.
+- First RTCM after backend restart arrived about77s into that phase; later
+  all constellations suffered a **30s receive gap**. Receiver age reached20s
+  in FLOAT and then DGNSS. Intermittent correction delivery is confirmed;
+  network/caster/PX4 origin is not isolated.
+- DiffCorrError changed from empty to six `0 MBit anomaly` records.
+  Exact semantics/causal role remain unproven. RxError was0 throughout.
+- Cleanup verified: backend running, Stream2/3 off, Current/Boot unchanged
+  from pre-experiment. Stream1 remained COM3 at100ms. No Boot save or FCU
+  parameter change during this comparison.
+
+### Latest check after user changed mountpoint back to MP23960
+
+Last read-only check this session (2026-10-02), approximately20s/10 samples:
+
+| Item | Observed |
+|---|---|
+| Active caster/mountpoint | `caster.emlid.com`, **MP23960** (previously MP23960a) |
+| Injection route | NTRIP → Jetson → MAVROS/PX4 → receiver **COM3** |
+| Backend | RUNNING/HEALTHY, `direct_inject=false`, `injection_mode=mavros_px4` |
+| Direct receiver solution | **RTK FIXED in all10 samples, 11 SV** |
+| Used constellations | GPS4 + GLO3 + GAL4; BDS0 |
+| BDS tracking | 11 SV, including2 tracking B2I |
+| Receiver MeanCorrAge | **2.2–2.3s**, versus0.8s in preceding MP23960a check |
+| Reported accuracy | Horizontal0.015m; vertical0.030–0.035m (not surveyed truth) |
+| Errors | RxError0, PVT Error0; backend CRC/delivery errors0 |
+| Receiver input evidence | COM3 accepted messages3256→3364; USB2 unchanged1891 |
+| Error log | Same six old MBit entries; no new entries |
+| PX4/backend GNSS | fix_type6, 11 SV |
+| Output to PX4 | Stream1 COM3 `msec100` =10Hz; diagnostic streams off |
+
+**Do not equate backend `correction_age_sec` with receiver MeanCorrAge.**
+Backend age was approximately milliseconds while receiver age was2.2–2.3s.
+This short check does not prove long-term stability or fix BeiDou non-use.
+
+Commands used over USB1, all read-only one-shot/query commands:
+
+```text
+exeSBFOnce,USB1,PVTGeodetic+ReceiverStatus+InputLink+ChannelStatus
+lif,DiffCorrError
+getSBFOutput,all
+```
+
+Also query authenticated `GET /api/rtk/status` before/after. Authentication
+is `POST /api/auth/login`; obtain credentials privately from Jetson
+`src/rover_backend/config/backend.env`, never print them or persist tokens.
+Decode SBF with `scripts/gps_dump_sbf_report.py`. Important distinct enums:
+DiffCorrIn Source2=COM3, Source5=USB2; InputLink CD3=COM3, CD34=USB2.
+For ChannelStatus use Antenna0 for main-antenna counts, tracking code3,
+PVT usage code2. SignalInfo in PVT represents used signals; BaseVector
+SignalInfo represents correction availability, not identical evidence.
+
+### USB direct injection method — verified supported, NOT applied
+
+User asked how to switch without rebuild/Git pull; deployed route and
+service source confirm this is an existing persistent backend setting:
+
+1. Verify parked/disarmed/no mission, back up active profile fields privately.
+2. Authenticated `POST /api/rtk/stop`; confirm manager STOPPED/child stopped.
+3. `PATCH /api/rtk/profiles/1` (re-read active profile ID first on future runs):
+
+```json
+{
+  "direct_inject": true,
+  "direct_serial_device": "/dev/serial/by-id/usb-Septentrio_Septentrio_USB_Device_3804732-if04",
+  "direct_serial_baud": 230400
+}
+```
+
+4. `POST /api/rtk/start`; verify backend mode and increasing receiver USB2
+   input counters. Preserve the chosen mountpoint unless explicitly changing
+   it. No rebuild, Git pull, full-stack restart, FCU parameter change or
+   receiver Boot save is needed; USB2 already accepts RTCMv3/no output.
+5. Receiver COM3 continues sending position/heading to PX4 at10Hz.
+
+This switch was **not performed** in the recorded session. LoRa source
+settings and NTRIP profile direct-injection settings are separate: the LoRa
+settings may point at USB2 even while the active NTRIP profile uses PX4.
+Always inspect the effective route and receiver counters.
+
+Next investigation: hold one mountpoint/base reference/route constant;
+capture upstream RTCM and receiver DiffCorrIn together to locate losses,
+and inspect main/aux B2I C/N0 and lock history. Do not blame firmware or
+change more configuration based only on low NrSV. Never relax PX4 satellite
+acceptance thresholds to conceal the GNSS issue.
+
+### 2026-10-02 16:00 IST update — USB2 switch APPLIED
+
+Supersedes the preceding “NOT applied” status and earlier COM3 injection
+snapshots. First attempt was refused because live MAVROS reported armed
+MANUAL; no settings changed then. On the user's renewed instruction, fresh
+ROS state confirmed disarmed/connected, mission EMPTY/disabled before each
+mutation. Backend stopped, active NTRIP profile1 patched to direct_inject=true,
+receiver by-id `3804732-if04`, baud230400, then backend restarted. Mountpoint
+**MP23960** unchanged. No rebuild/pull, FCU parameter change, receiver config
+change or Boot save. Profile persists in the backend.
+
+- Backend verified `injection_mode=direct_serial`, healthy, initial CRC and
+  delivery error counters0.
+- Direct receiver USB2 accepted RTCM count1916→2024 over the verification;
+  COM3 RTCM count remained10146. The active correction route is now
+  **NTRIP → Jetson → mosaic-H USB2**. COM3 remains the receiver output to PX4.
+- Immediate post-switch samples FLOAT8→FLOAT6→**FIXED6**. Final receiver
+  correction age1.1–1.2s, RxError0, reported horizontal accuracy0.065m.
+  Final used signals were GLO L1/L2 + GAL E1/E5b; GPS/BDS were absent from
+  the used-signal mask. PX4 also reported fix_type6, satellites6. Do not
+  describe the satellite problem as solved or attribute the decline to the
+  route switch alone; this was a short reconvergence observation.
+- Jetson audit: `/home/flash/rover_ws/receiver_backups/usb_switch_20261002_155959/`
+  (`before.json`, `after.json`, `final.json`, `verification.sbf`). Snapshots
+  are private; do not print full profiles. The switch script was temporary
+  `/tmp/apply_mosaic_usb.py` and is not a production stack component.
+
+### 2026-10-03 — next-day read and restoration of Oct2 Current
+
+At12:11 IST live FW remained4.15.1, USB2 direct injection/MP23960 healthy.
+Ten samples were FIXED11: GPS4+GLO2+GAL3+BDS2 (C09/C10). Main tracking:
+GPS6+GLO4+GAL7+BDS11+SBAS6=34. BDS B2I tracked on2; correction age1.7–1.8s.
+Current and Boot both differed from Oct2: Aux1 baseline0.735 instead of0.730;
+QZSL1CB tracking removed; GPSL2C added to second SignalUsage mask; satellite
+usage expanded to J01–J10; RTCMv3Formatting output mask explicitly included
+GEOL1. RxError8 returned (documented bit3 SOFTWARE warning/error latch),
+ExtError0, DiffCorrError log empty. Do not clear with lif,error.
+
+User then explicitly requested yesterday's final configuration in Current.
+Fresh disarmed/connected, mission EMPTY/disabled guard passed. Restored the
+five differing settings via USB1; no backend route change or Boot save.
+Final normalized `lcf,Current` set-command list **exactly matched** Oct2
+`rtcm_ab_20261002_151546/current_after.txt`; Boot remained today's earlier
+configuration. Thus reboot will reload the Oct3 Boot settings unless the user
+separately authorizes saving restored Current.
+
+RTCMv3Formatting detail: `all` includes GEOL1 and is NOT the default mask.
+Read-only `lmd,setRTCMv3Formatting` exposes DEFVAL; its default signal mask
+excludes GEOL1. Applying that explicit default removed the last export diff.
+This is receiver RTCM output formatting, distinct from incoming corrections.
+Post-restore samples: FIXED10, GPS3+GLO2+GAL3+BDS2; BDS10 tracked,2 used;
+correction age1.8s, RxError8. BeiDou still used with yesterday's settings;
+no isolated causal explanation of its earlier non-use is established.
+Evidence on Jetson under receiver_backups/: `daily_readonly_20261003_121126/`
+and `restore_oct2_20261003_122047/` (before/after exports, raw verification,
+MIB default response, result.json). Config exports are private.
+
+### 2026-10-03 12:25 IST — restored Current saved to Boot
+
+User explicitly authorized `save to boot`. Fresh disarmed/connected,
+mission EMPTY/disabled guard passed; Current was checked against the Oct2
+restoration target before sending `exeCopyConfigFile,Current,Boot`.
+Receiver acknowledged; rereads verified Current unchanged, Boot=Current,
+and Boot's normalized set-command list=Oct2 target. This supersedes the
+preceding note that reboot would load today's earlier configuration.
+Jetson audit: `receiver_backups/boot_save_20261003_122520/`, including
+before/after Current/Boot, command reply and result.json. No reboot issued.

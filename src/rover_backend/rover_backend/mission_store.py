@@ -291,7 +291,7 @@ class MissionStore:
             return mode, None
 
         # ENABLE uses the frontend value when supplied.
-        # Otherwise, it uses the configured 3.5 m fallback.
+        # Otherwise, it uses the configured 4.0 m fallback.
         if dummy_point_distance_m in {
             None,
             "",

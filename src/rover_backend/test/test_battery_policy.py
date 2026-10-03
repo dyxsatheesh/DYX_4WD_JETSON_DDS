@@ -28,15 +28,15 @@ def test_voltage_maps_to_smooth_whole_percentage():
     assert battery_percentage_from_voltage(22.00) == 10
 
 
-def test_exact_five_second_critical_confirmation():
-    assert BATTERY_CRITICAL_DEBOUNCE_SEC == 20.0
+def test_exact_thirty_second_critical_confirmation():
+    assert BATTERY_CRITICAL_DEBOUNCE_SEC == 30.0
     debounce = BatteryCriticalDebounce()
 
-    # 2 Hz stream: 0.5-second samples across the five-second window.
-    for step in range(40):
+    # 2 Hz stream: 0.5-second samples across the 30-second window.
+    for step in range(60):
         assert debounce.observe(22.00, step * 0.5) is False
 
-    assert debounce.observe(22.00, 20.0) is True
+    assert debounce.observe(22.00, 30.0) is True
 
 
 def test_pending_critical_stays_eleven_percent_low():
@@ -63,22 +63,22 @@ def test_recovery_above_22_cancels_pending_or_confirmed():
     assert debounce.observe(22.01, 2.0) is False
     assert debounce.pending is False
 
-    for step in range(41):
+    for step in range(61):
         debounce.observe(21.90, 10.0 + step * 0.5)
 
     assert debounce.confirmed is True
 
-    assert debounce.observe(22.01, 30.1) is False
+    assert debounce.observe(22.01, 40.1) is False
     assert debounce.confirmed is False
 
 
-def test_stale_low_stream_does_not_complete_twenty_seconds():
+def test_stale_low_stream_does_not_complete_thirty_seconds():
     debounce = BatteryCriticalDebounce()
 
     debounce.observe(21.90, 0.0)
     debounce.observe(21.90, 0.5)
 
-    assert debounce.confirm_if_due(20.0) is False
+    assert debounce.confirm_if_due(30.0) is False
     assert debounce.pending is False
 
 

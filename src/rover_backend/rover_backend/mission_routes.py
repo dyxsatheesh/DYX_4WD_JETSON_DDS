@@ -290,12 +290,15 @@ async def upload_mission(
 
     ENABLE:
         The trajectory generator automatically checks each consecutive
-        marking-point transition. When the distance is below the configured
-        2.0 m row-transition threshold, it creates one navigation-only dummy
-        point behind the next marking point using the next-row direction.
+        marking-point transition. When the distance is below its 3.0 m
+        row-transition threshold, the transfer is sideways (45-135 deg) and
+        the following row reverses (>= 135 deg), it creates one
+        navigation-only dummy point 4.0 m past the current row end along the
+        incoming row direction.
 
-        dummy_point_distance_m is supplied by the frontend when the operator
-        changes it. When omitted, the configured production fallback is used.
+        dummy_point_distance_m is validated and stored in the mission
+        metadata, but the trajectory generator currently uses its own fixed
+        4.0 m (EXTENSION_DISTANCE_M) and 3.0 m (EXTENSION_TRIGGER_DISTANCE_M).
 
     DISABLE:
         No dummy points are generated. Only uploaded CSV points are marking
