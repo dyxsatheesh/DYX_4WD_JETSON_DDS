@@ -359,8 +359,8 @@ def generate_launch_description() -> LaunchDescription:
                         # param1 -> Actuator Set 1 -> AUX5.
                         # PWM = 1600 + 400 * value with
                         # PWM_AUX_MIN5/MAX5 = 1200/2000 (2026-10-05).
-                        # Press: 1400 us, the spray position.
-                        "press_value": -0.5,
+                        # Press: 1500 us, the spray position.
+                        "press_value": -0.25,
                         # Release: 1200 us, the rest position. Must equal
                         # PWM_AUX_DIS5 (and FAIL5) = 1200: PX4
                         # outputs DIS5 while disarmed and the last
