@@ -143,8 +143,22 @@ arming:
 ]
 ```
 
-Decision codes: `ADDED`, `SKIPPED_GAP`, `SKIPPED_ANGLE`, `SKIPPED_LAST_ROW`,
-`SKIPPED_OPERATOR`, `DISABLED`.
+Decision codes: `ADDED`, `SKIPPED_GAP`, `DISABLED` (phase 2), and
+`SKIPPED_OPERATOR` (phase 3). Only row ends are listed (one entry per row).
+
+Dropped while building phase 2 (2026-10-05):
+- `SKIPPED_ANGLE` (a short hop that is not a row end): the first hop into
+  every new row is also a 90 deg turn from the hop before it, so real
+  near-misses cannot be told apart and the list would be flooded.
+- `SKIPPED_LAST_ROW`: the last pair has no following row and is simply
+  not listed.
+- The first pair of the mission is listed only when ADDED: the rule judges
+  it against a synthetic incoming direction, so a long first row would
+  read as a skipped row end.
+
+`decisions` are served by `GET /api/mission/extension` only when their
+revision equals the stored settings revision (`decisions_current`); mission
+status carries `extension_decisions_revision` so tablets know when to refetch.
 
 Extend `trajectory_path` (additive field, old tablets ignore it) with
 `extension_indices` and `extension_revision`, so the placed path can be drawn with
