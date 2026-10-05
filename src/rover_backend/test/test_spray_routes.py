@@ -203,7 +203,7 @@ def test_status_and_config_keep_existing_success_config_wrapper(spray_api) -> No
 
     response = client.post(
         "/api/spray/config",
-        json={"press_pwm_us": 1900, "release_pwm_us": 1000},
+        json={"press_pwm_us": 1900, "release_pwm_us": 1300},
     )
     assert response.status_code == 200
     assert response.json()["success"] is True

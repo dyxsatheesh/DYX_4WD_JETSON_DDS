@@ -478,7 +478,7 @@ class RoverBackendRosNode(Node):
 
     # These must match the configured AUX5 output endpoints in PX4.
     # Must match PWM_AUX_MIN5/MAX5 on the FCU.
-    SPRAY_PWM_MIN_US = 900.0
+    SPRAY_PWM_MIN_US = 1200.0
     SPRAY_PWM_MAX_US = 2000.0
     # Laser on AUX6 (PWM_AUX_FUNC6=302). Must match PWM_AUX_MIN6/MAX6.
     LASER_PWM_MIN_US = 1000.0
