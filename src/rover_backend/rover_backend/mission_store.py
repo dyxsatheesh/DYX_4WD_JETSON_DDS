@@ -72,6 +72,7 @@ class ValidatedMission:
     points: tuple[MissionPoint, ...]
     extension_mode: str
     dummy_point_distance_m: float | None
+    dummy_point_distance_source: str | None
     original_filename: str
 
 
@@ -101,6 +102,12 @@ class MissionStore:
 
     MINIMUM_DUMMY_DISTANCE_M = 0.10
     MAXIMUM_DUMMY_DISTANCE_M = 20.0
+
+    # Only a tablet that shows the row-extension dialog sends this marker.
+    # Every earlier tablet build sends a hard-coded 3.5 m that the trajectory
+    # generator used to ignore, so an unmarked distance is not honoured.
+    OPERATOR_DISTANCE_SOURCE = "OPERATOR"
+    DEFAULT_DISTANCE_SOURCE = "DEFAULT"
 
     MINIMUM_MARKING_POINTS = 2
 
@@ -152,6 +159,7 @@ class MissionStore:
             filename="mission.csv",
             extension_mode=extension_mode,
             dummy_point_distance_m=metadata_value.get("dummy_point_distance_m"),
+            dummy_point_distance_source=metadata_value.get("dummy_point_distance_source"),
         )
         try:
             total_points = int(metadata_value.get("total_points"))
@@ -160,6 +168,7 @@ class MissionStore:
         if total_points != len(validated.points):
             raise MissionValidationError("Archived mission point count verification failed.")
         metadata_value["points"] = self._validated_point_metadata(validated)
+        self._apply_effective_extension(metadata_value, validated)
         metadata_value["mission_id"] = str(metadata_value.get("mission_id") or mission_id)
         return dict(metadata_value), mission_bytes
 
@@ -281,22 +290,26 @@ class MissionStore:
         self,
         extension_mode: str,
         dummy_point_distance_m: Any,
-    ) -> tuple[str, float | None]:
+        dummy_point_distance_source: Any = None,
+    ) -> tuple[str, float | None, str | None]:
         mode = str(extension_mode or "").strip().upper()
 
         if mode not in self.VALID_EXTENSION_MODES:
             raise MissionValidationError("extension_mode must be " "ENABLE or DISABLE.")
 
         if mode == "DISABLE":
-            return mode, None
+            return mode, None, None
 
-        # ENABLE uses the frontend value when supplied.
-        # Otherwise, it uses the configured 4.0 m fallback.
-        if dummy_point_distance_m in {
+        source = str(dummy_point_distance_source or "").strip().upper()
+
+        # ENABLE uses the frontend value only when the operator entered it
+        # (source OPERATOR). Otherwise, it uses the configured 4.0 m fallback.
+        if source != self.OPERATOR_DISTANCE_SOURCE or dummy_point_distance_m in {
             None,
             "",
         }:
             dummy_distance = float(settings.default_dummy_point_distance_m)
+            source = self.DEFAULT_DISTANCE_SOURCE
 
         else:
             try:
@@ -326,7 +339,23 @@ class MissionStore:
                 f"{self.MAXIMUM_DUMMY_DISTANCE_M:.2f} m."
             )
 
-        return mode, dummy_distance
+        return mode, dummy_distance, source
+
+    @staticmethod
+    def _apply_effective_extension(
+        metadata_value: dict[str, Any],
+        validated: ValidatedMission,
+    ) -> None:
+        """Report the extension distance the trajectory generator will use.
+
+        Metadata stored before the source marker existed may carry an
+        old tablet's 3.5 m, which the generator replaces with 4.0 m.
+        """
+
+        metadata_value["dummy_point_distance_m"] = validated.dummy_point_distance_m
+        metadata_value["dummy_point_distance_source"] = (
+            validated.dummy_point_distance_source
+        )
 
     # ==========================================================
     # CSV validation
@@ -339,6 +368,7 @@ class MissionStore:
         filename: str,
         extension_mode: str,
         dummy_point_distance_m: Any = None,
+        dummy_point_distance_source: Any = None,
     ) -> ValidatedMission:
         """Validate one frontend-uploaded mission CSV."""
 
@@ -374,9 +404,10 @@ class MissionStore:
         if not csv_text.strip():
             raise MissionValidationError("The uploaded CSV contains no data.")
 
-        mode, dummy_distance = self._validate_extension_settings(
+        mode, dummy_distance, dummy_source = self._validate_extension_settings(
             extension_mode,
             dummy_point_distance_m,
+            dummy_point_distance_source,
         )
 
         # Prevent a single malformed field from consuming
@@ -556,6 +587,7 @@ class MissionStore:
             points=tuple(points),
             extension_mode=mode,
             dummy_point_distance_m=(dummy_distance),
+            dummy_point_distance_source=dummy_source,
             original_filename=(safe_filename),
         )
 
@@ -709,6 +741,7 @@ class MissionStore:
         filename: str,
         extension_mode: str,
         dummy_point_distance_m: Any = None,
+        dummy_point_distance_source: Any = None,
     ) -> dict[str, Any]:
         """Validate and atomically replace the active mission."""
 
@@ -717,6 +750,7 @@ class MissionStore:
             filename=filename,
             extension_mode=extension_mode,
             dummy_point_distance_m=(dummy_point_distance_m),
+            dummy_point_distance_source=dummy_point_distance_source,
         )
 
         checksum = self._sha256(validated.stored_bytes)
@@ -734,6 +768,7 @@ class MissionStore:
             "coordinate_mode": (validated.coordinate_mode),
             "extension_mode": (validated.extension_mode),
             "dummy_point_distance_m": (validated.dummy_point_distance_m),
+            "dummy_point_distance_source": (validated.dummy_point_distance_source),
             "row_transition_threshold_m": (settings.row_transition_threshold_m),
             "total_points": len(validated.points),
             # Preserve only coordinates that this backend parsed and
@@ -870,6 +905,9 @@ class MissionStore:
                 filename=self.mission_file.name,
                 extension_mode=extension_mode,
                 dummy_point_distance_m=(dummy_distance),
+                dummy_point_distance_source=metadata_value.get(
+                    "dummy_point_distance_source"
+                ),
             )
 
             metadata_total = metadata_value.get("total_points")
@@ -900,6 +938,7 @@ class MissionStore:
             # Enrich schema-v1 metadata in memory so restored/live reports
             # still receive canonical backend-validated targets.
             metadata_value["points"] = validated_point_metadata
+            self._apply_effective_extension(metadata_value, validated)
 
             return dict(metadata_value)
 

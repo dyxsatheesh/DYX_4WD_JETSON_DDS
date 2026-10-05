@@ -52,3 +52,69 @@ def test_archive_rejects_path_traversal_ids(tmp_path, monkeypatch):
         assert "not found" in str(error).lower() or "invalid" in str(error).lower()
     else:
         raise AssertionError("path traversal mission ID was accepted")
+
+
+_CSV = b"latitude,longitude\n13.1,80.2\n13.2,80.3\n"
+
+
+def test_operator_marked_extension_distance_is_kept(tmp_path, monkeypatch):
+    store = _store(tmp_path, monkeypatch)
+    uploaded = store.save(
+        raw_bytes=_CSV,
+        filename="field.csv",
+        extension_mode="ENABLE",
+        dummy_point_distance_m=6.5,
+        dummy_point_distance_source="operator",
+    )
+
+    assert uploaded["dummy_point_distance_m"] == 6.5
+    assert uploaded["dummy_point_distance_source"] == "OPERATOR"
+    assert store.load_metadata()["dummy_point_distance_m"] == 6.5
+
+
+def test_unmarked_extension_distance_uses_default(tmp_path, monkeypatch):
+    # Earlier tablet builds always send 3.5 m without a source.
+    store = _store(tmp_path, monkeypatch)
+    uploaded = store.save(
+        raw_bytes=_CSV,
+        filename="field.csv",
+        extension_mode="ENABLE",
+        dummy_point_distance_m=3.5,
+    )
+
+    assert uploaded["dummy_point_distance_m"] == 4.0
+    assert uploaded["dummy_point_distance_source"] == "DEFAULT"
+
+
+def test_stored_legacy_metadata_reports_default_distance(tmp_path, monkeypatch):
+    import json
+
+    store = _store(tmp_path, monkeypatch)
+    store.save(
+        raw_bytes=_CSV,
+        filename="field.csv",
+        extension_mode="ENABLE",
+    )
+    stored = json.loads(store.metadata_file.read_text())
+    stored["dummy_point_distance_m"] = 3.5
+    stored.pop("dummy_point_distance_source")
+    store.metadata_file.write_text(json.dumps(stored))
+
+    loaded = store.load_metadata()
+
+    assert loaded["dummy_point_distance_m"] == 4.0
+    assert loaded["dummy_point_distance_source"] == "DEFAULT"
+
+
+def test_disabled_extension_has_no_distance(tmp_path, monkeypatch):
+    store = _store(tmp_path, monkeypatch)
+    uploaded = store.save(
+        raw_bytes=_CSV,
+        filename="field.csv",
+        extension_mode="DISABLE",
+        dummy_point_distance_m=6.5,
+        dummy_point_distance_source="OPERATOR",
+    )
+
+    assert uploaded["dummy_point_distance_m"] is None
+    assert uploaded["dummy_point_distance_source"] is None

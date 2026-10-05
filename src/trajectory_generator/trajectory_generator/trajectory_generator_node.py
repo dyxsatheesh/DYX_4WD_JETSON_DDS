@@ -121,11 +121,13 @@ class TrajectoryGenerator(Node):
     POINT_TYPE_MARKING = 2
 
     # Production row-transition trigger remains fixed at 3.0 m.
-    # The actual extension distance is mission-specific: for ENABLE missions
-    # the backend validates and stores the operator-selected frontend value.
-    # EXTENSION_DISTANCE_M remains only as a legacy/default fallback.
+    # The extension distance is mission-specific only when the operator
+    # entered it (metadata dummy_point_distance_source == OPERATOR). Earlier
+    # tablet builds stored a hard-coded 3.5 m without that marker; those
+    # missions keep EXTENSION_DISTANCE_M.
     EXTENSION_TRIGGER_DISTANCE_M = 3.0
     EXTENSION_DISTANCE_M = 4.0
+    OPERATOR_DISTANCE_SOURCE = "OPERATOR"
 
     # Extension is a row-end manoeuvre, not a generic short-segment rule.
     # The short transfer must be sideways relative to the incoming row and
@@ -1025,12 +1027,14 @@ class TrajectoryGenerator(Node):
                 self.row_transition_threshold_m = self.EXTENSION_TRIGGER_DISTANCE_M
 
                 if self.extension_mode == "ENABLE":
-                    requested_dummy_distance = metadata.get(
-                        "dummy_point_distance_m"
+                    distance_source = (
+                        str(metadata.get("dummy_point_distance_source") or "")
+                        .strip()
+                        .upper()
                     )
                     self.dummy_point_distance_m = (
-                        float(requested_dummy_distance)
-                        if requested_dummy_distance is not None
+                        float(metadata["dummy_point_distance_m"])
+                        if distance_source == self.OPERATOR_DISTANCE_SOURCE
                         else self.EXTENSION_DISTANCE_M
                     )
                 else:

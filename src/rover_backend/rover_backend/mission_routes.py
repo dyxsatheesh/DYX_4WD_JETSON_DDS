@@ -280,6 +280,7 @@ async def upload_mission(
     file: UploadFile = File(...),
     extension_mode: str = Form(...),
     dummy_point_distance_m: float | None = Form(None),
+    extension_distance_source: str | None = Form(None),
     _session: AuthenticatedSession = Depends(require_auth),
     _mutation: None = Depends(_serialize_mission_mutation),
 ) -> dict[str, Any]:
@@ -293,12 +294,15 @@ async def upload_mission(
         marking-point transition. When the distance is below its 3.0 m
         row-transition threshold, the transfer is sideways (45-135 deg) and
         the following row reverses (>= 135 deg), it creates one
-        navigation-only dummy point 4.0 m past the current row end along the
-        incoming row direction.
+        navigation-only dummy point dummy_point_distance_m past the current
+        row end along the incoming row direction. The 3.0 m threshold is
+        fixed (EXTENSION_TRIGGER_DISTANCE_M).
 
-        dummy_point_distance_m is validated and stored in the mission
-        metadata, but the trajectory generator currently uses its own fixed
-        4.0 m (EXTENSION_DISTANCE_M) and 3.0 m (EXTENSION_TRIGGER_DISTANCE_M).
+        dummy_point_distance_m (0.10-20.00 m) is used only when
+        extension_distance_source is OPERATOR, which the tablet's
+        row-extension dialog sends. Without it the mission uses 4.0 m:
+        earlier tablet builds send a hard-coded 3.5 m that was never meant
+        to reach the rover.
 
     DISABLE:
         No dummy points are generated. Only uploaded CSV points are marking
@@ -327,6 +331,7 @@ async def upload_mission(
             filename=(file.filename or "mission.csv"),
             extension_mode=extension_mode,
             dummy_point_distance_m=(dummy_point_distance_m),
+            dummy_point_distance_source=extension_distance_source,
         )
     except MissionValidationError as error:
         raise HTTPException(

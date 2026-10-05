@@ -62,6 +62,9 @@ def _fake_generator():
     node.EXTENSION_DISTANCE_M = (
         TrajectoryGenerator.EXTENSION_DISTANCE_M
     )
+    node.OPERATOR_DISTANCE_SOURCE = (
+        TrajectoryGenerator.OPERATOR_DISTANCE_SOURCE
+    )
     node.ROW_TRANSFER_MIN_ANGLE_DEG = (
         TrajectoryGenerator.ROW_TRANSFER_MIN_ANGLE_DEG
     )
@@ -260,6 +263,7 @@ def test_prepare_uses_frontend_selected_extension_distance():
         "checksum_sha256": "e" * 64,
         "extension_mode": "ENABLE",
         "dummy_point_distance_m": 7.25,
+        "dummy_point_distance_source": "OPERATOR",
     }
 
     node._load_mission_source = lambda: (
@@ -279,6 +283,35 @@ def test_prepare_uses_frontend_selected_extension_distance():
     assert node.extension_mode == "ENABLE"
     assert node.dummy_point_distance_m == pytest.approx(7.25)
     assert node.row_transition_threshold_m == pytest.approx(3.0)
+
+
+def test_prepare_ignores_unmarked_legacy_extension_distance():
+    # Tablet builds before the row-extension dialog stored a hard-coded
+    # 3.5 m with no source marker; the rover keeps its 4.0 m for those.
+    node = _fake_generator()
+
+    metadata = {
+        "mission_id": "mission-legacy-extension",
+        "checksum_sha256": "f" * 64,
+        "extension_mode": "ENABLE",
+        "dummy_point_distance_m": 3.5,
+    }
+
+    node._load_mission_source = lambda: (
+        metadata,
+        "local",
+        [
+            (0.0, 0.0),
+            (0.0, 2.0),
+            (1.0, 2.0),
+            (1.0, 0.0),
+        ],
+    )
+
+    response = _run_prepare(node)
+
+    assert response.success is True
+    assert node.dummy_point_distance_m == pytest.approx(4.0)
 
 
 def test_failed_load_clears_previous_mission_identity_and_topology():
