@@ -364,6 +364,7 @@ class RoverState:
                 "filename": None,
                 "checksum_sha256": None,
                 "coordinate_mode": None,
+                "extension": None,
                 "extension_mode": None,
                 "dummy_point_distance_m": None,
                 "row_transition_threshold_m": None,
@@ -915,13 +916,17 @@ class RoverState:
         filename: str,
         checksum_sha256: str,
         coordinate_mode: str,
-        extension_mode: str,
-        dummy_point_distance_m: float | None,
-        row_transition_threshold_m: float,
+        extension: Any,
         total_points: int,
         uploaded_at: str,
     ) -> None:
-        """Set shared state after a valid CSV has been stored."""
+        """Set shared state after a valid CSV has been stored.
+
+        ``extension`` is an extension_settings.ExtensionSettings; the flat
+        legacy fields are derived from it so they can never disagree.
+        """
+
+        extension_fields = extension.metadata_fields()
 
         total_points = max(
             0,
@@ -935,9 +940,14 @@ class RoverState:
             filename=filename,
             checksum_sha256=(checksum_sha256),
             coordinate_mode=(coordinate_mode),
-            extension_mode=(extension_mode),
-            dummy_point_distance_m=(_safe_float(dummy_point_distance_m)),
-            row_transition_threshold_m=(_safe_float(row_transition_threshold_m)),
+            extension=extension_fields["extension"],
+            extension_mode=extension_fields["extension_mode"],
+            dummy_point_distance_m=(
+                _safe_float(extension_fields["dummy_point_distance_m"])
+            ),
+            row_transition_threshold_m=(
+                _safe_float(extension_fields["row_transition_threshold_m"])
+            ),
             state="LOADED",
             ready=False,
             loaded=True,
@@ -1168,6 +1178,7 @@ class RoverState:
                     "filename",
                     "checksum_sha256",
                     "coordinate_mode",
+                    "extension",
                     "extension_mode",
                     "dummy_point_distance_m",
                     "row_transition_threshold_m",
@@ -1187,6 +1198,7 @@ class RoverState:
                 "filename": None,
                 "checksum_sha256": None,
                 "coordinate_mode": None,
+                "extension": None,
                 "extension_mode": None,
                 "dummy_point_distance_m": None,
                 "row_transition_threshold_m": None,

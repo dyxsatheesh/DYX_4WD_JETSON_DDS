@@ -221,7 +221,6 @@ class Settings:
     mission_report_file: Path
 
     maximum_upload_bytes: int
-    extension_trigger_distance_m: float
 
     telemetry_broadcast_hz: float
     realtime_metrics_enabled: bool
@@ -300,16 +299,6 @@ class Settings:
     def maximum_marking_points(self) -> int:
         """Maximum number of marking points accepted in one mission."""
         return 10000
-
-    @property
-    def row_transition_threshold_m(self) -> float:
-        """Distance threshold used to detect short row transitions."""
-        return self.extension_trigger_distance_m
-
-    @property
-    def default_dummy_point_distance_m(self) -> float:
-        """Default navigation-only dummy-point distance."""
-        return 4.0
 
     @property
     def trajectory_prepare_timeout_seconds(self) -> float:
@@ -452,11 +441,6 @@ def load_settings() -> Settings:
             5 * 1024 * 1024,
             minimum=1_024,
             maximum=50 * 1024 * 1024,
-        ),
-        extension_trigger_distance_m=_read_float(
-            "DYX_EXTENSION_TRIGGER_DISTANCE_M",
-            3.0,
-            minimum=0.1,
         ),
         telemetry_broadcast_hz=_read_float(
             "DYX_TELEMETRY_BROADCAST_HZ",

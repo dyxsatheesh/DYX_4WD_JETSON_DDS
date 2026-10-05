@@ -65,6 +65,7 @@ def _fake_generator():
     node.OPERATOR_DISTANCE_SOURCE = (
         TrajectoryGenerator.OPERATOR_DISTANCE_SOURCE
     )
+    node.VALID_EXTENSION_MODES = TrajectoryGenerator.VALID_EXTENSION_MODES
     node.ROW_TRANSFER_MIN_ANGLE_DEG = (
         TrajectoryGenerator.ROW_TRANSFER_MIN_ANGLE_DEG
     )
@@ -89,11 +90,13 @@ def _fake_generator():
     node.source_topology = None
     node.source_topology_mission_id = None
     node.source_topology_checksum = None
+    node.source_topology_extension_revision = None
     node.source_topology_compile_ms = None
 
     node.extension_mode = None
     node.dummy_point_distance_m = None
     node.row_transition_threshold_m = None
+    node.extension_revision = None
 
     node.mission_id = None
     node.mission_checksum = None
@@ -160,6 +163,7 @@ def _fake_generator():
     node.get_logger = lambda: _Logger()
 
     _bind(node, "_source_topology_is_current")
+    _bind(node, "_extension_from_metadata")
     _bind(node, "_trajectory_phase")
     _bind(node, "_build_status_payload")
     _bind(node, "_log_waiting")
@@ -312,6 +316,150 @@ def test_prepare_ignores_unmarked_legacy_extension_distance():
 
     assert response.success is True
     assert node.dummy_point_distance_m == pytest.approx(4.0)
+
+
+# Row 1 runs north, a 2.5 m sideways hop east, row 2 runs back south.
+_SERPENTINE = [
+    (0.0, 0.0),
+    (0.0, 5.0),
+    (2.5, 5.0),
+    (2.5, 0.0),
+]
+
+
+def _extension_mission(mission_id, extension):
+    metadata = {
+        "mission_id": mission_id,
+        "checksum_sha256": "c" * 64,
+        "extension_mode": "ENABLE" if extension["enabled"] else "DISABLE",
+        "extension": extension,
+    }
+    return metadata, "local", list(_SERPENTINE)
+
+
+def _dummy_decisions(node):
+    return [segment.use_dummy for segment in node.source_topology.segments]
+
+
+def test_prepare_reads_extension_settings_object():
+    node = _fake_generator()
+    node._load_mission_source = lambda: _extension_mission(
+        "mission-object",
+        {
+            "schema": "dyx4wd/extension@1",
+            "enabled": True,
+            "distance_m": 6.5,
+            "trigger_distance_m": 2.75,
+            "source": "OPERATOR",
+            "revision": 3,
+        },
+    )
+
+    assert _run_prepare(node).success is True
+    assert node.extension_mode == "ENABLE"
+    assert node.dummy_point_distance_m == pytest.approx(6.5)
+    assert node.row_transition_threshold_m == pytest.approx(2.75)
+    assert node.extension_revision == 3
+    assert node.source_topology_extension_revision == 3
+
+
+def test_trigger_distance_decides_which_row_ends_extend():
+    def decisions(trigger):
+        node = _fake_generator()
+        node._load_mission_source = lambda: _extension_mission(
+            "mission-trigger",
+            {
+                "enabled": True,
+                "distance_m": 4.0,
+                "trigger_distance_m": trigger,
+                "source": "OPERATOR",
+                "revision": 1,
+            },
+        )
+        assert _run_prepare(node).success is True
+        return _dummy_decisions(node)
+
+    # The 2.5 m hop qualifies under a 3.0 m trigger and not under 2.0 m.
+    assert decisions(3.0) == [False, True, False]
+    assert decisions(2.0) == [False, False, False]
+
+
+def test_disabled_extension_compiles_like_a_never_enabled_mission():
+    def compile_with(metadata):
+        node = _fake_generator()
+        node._load_mission_source = lambda: (
+            metadata,
+            "local",
+            list(_SERPENTINE),
+        )
+        assert _run_prepare(node).success is True
+        return node
+
+    disabled_again = compile_with(
+        {
+            "mission_id": "mission-off",
+            "checksum_sha256": "d" * 64,
+            "extension_mode": "DISABLE",
+            "extension": {
+                "enabled": False,
+                "distance_m": None,
+                "trigger_distance_m": None,
+                "source": None,
+                "revision": 5,
+            },
+        }
+    )
+    never_enabled = compile_with(
+        {
+            "mission_id": "mission-off",
+            "checksum_sha256": "d" * 64,
+            "extension_mode": "DISABLE",
+        }
+    )
+
+    assert disabled_again.dummy_point_distance_m is None
+    assert never_enabled.dummy_point_distance_m is None
+    assert disabled_again.extension_mode == never_enabled.extension_mode == "DISABLE"
+    assert _dummy_decisions(disabled_again) == _dummy_decisions(never_enabled)
+    assert _dummy_decisions(disabled_again) == [False, False, False]
+
+
+def test_binding_check_rejects_extension_revision_mismatch():
+    node = _fake_generator()
+    node._load_mission_source = lambda: _extension_mission(
+        "mission-revision",
+        {
+            "enabled": True,
+            "distance_m": 4.0,
+            "trigger_distance_m": 3.0,
+            "source": "OPERATOR",
+            "revision": 1,
+        },
+    )
+
+    assert _run_prepare(node).success is True
+    assert node._source_topology_is_current() is True
+
+    node.extension_revision = 2
+
+    assert node._source_topology_is_current() is False
+
+
+def test_prepare_rejects_invalid_extension_object():
+    node = _fake_generator()
+    node._load_mission_source = lambda: _extension_mission(
+        "mission-bad",
+        {
+            "enabled": True,
+            "distance_m": float("nan"),
+            "trigger_distance_m": 3.0,
+            "source": "OPERATOR",
+            "revision": 1,
+        },
+    )
+
+    assert _run_prepare(node).success is False
+    assert node.source_topology is None
 
 
 def test_failed_load_clears_previous_mission_identity_and_topology():

@@ -10,8 +10,6 @@ def _store(tmp_path, monkeypatch):
     settings = SimpleNamespace(
         maximum_upload_bytes=5 * 1024 * 1024,
         maximum_marking_points=10_000,
-        default_dummy_point_distance_m=4.0,
-        row_transition_threshold_m=3.0,
         mission_runtime_file=runtime / "mission_runtime.json",
         mission_recovery_file=runtime / "mission_recovery.json",
     )

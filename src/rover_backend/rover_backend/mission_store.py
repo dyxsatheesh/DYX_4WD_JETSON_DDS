@@ -12,7 +12,7 @@ Responsibilities:
 - Preserve the uploaded marking-point order.
 - Support GPS latitude/longitude or local x/y coordinates.
 - Support ENABLE or DISABLE extension mode.
-- Store the frontend-selected dummy-point distance.
+- Store the versioned row-extension settings (extension_settings.py).
 - Atomically replace the active mission CSV.
 - Store only mission settings and summary information in JSON.
 - Restore mission state after a backend restart.
@@ -39,13 +39,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from rover_backend import extension_settings
 from rover_backend.config import settings
+from rover_backend.extension_settings import ExtensionSettings
+from rover_backend.extension_settings import ExtensionSettingsError
 from rover_backend.state import rover_state
 from rover_backend.state import utc_now_iso
 
 
 class MissionValidationError(ValueError):
     """Raised when an uploaded mission is invalid."""
+
+
+class MissionRevisionConflict(MissionValidationError):
+    """The stored extension revision differs from the one the client edited."""
+
+    def __init__(self, current_revision: int) -> None:
+        super().__init__(
+            "The extension settings were changed by another client "
+            f"(revision {current_revision}). Reload them and try again."
+        )
+        self.current_revision = current_revision
 
 
 @dataclass(
@@ -70,9 +84,7 @@ class ValidatedMission:
     stored_bytes: bytes
     coordinate_mode: str
     points: tuple[MissionPoint, ...]
-    extension_mode: str
-    dummy_point_distance_m: float | None
-    dummy_point_distance_source: str | None
+    extension: ExtensionSettings
     original_filename: str
 
 
@@ -94,20 +106,6 @@ class MissionStore:
         "gps_lon",
         "gps_longitude",
     )
-
-    VALID_EXTENSION_MODES = {
-        "ENABLE",
-        "DISABLE",
-    }
-
-    MINIMUM_DUMMY_DISTANCE_M = 0.10
-    MAXIMUM_DUMMY_DISTANCE_M = 20.0
-
-    # Only a tablet that shows the row-extension dialog sends this marker.
-    # Every earlier tablet build sends a hard-coded 3.5 m that the trajectory
-    # generator used to ignore, so an unmarked distance is not honoured.
-    OPERATOR_DISTANCE_SOURCE = "OPERATOR"
-    DEFAULT_DISTANCE_SOURCE = "DEFAULT"
 
     MINIMUM_MARKING_POINTS = 2
 
@@ -153,13 +151,10 @@ class MissionStore:
         expected_checksum = str(metadata_value.get("checksum_sha256", "")).strip()
         if not expected_checksum or expected_checksum != self._sha256(mission_bytes):
             raise MissionValidationError("Archived mission checksum verification failed.")
-        extension_mode = str(metadata_value.get("extension_mode", "")).strip().upper()
         validated = self.validate(
             raw_bytes=mission_bytes,
             filename="mission.csv",
-            extension_mode=extension_mode,
-            dummy_point_distance_m=metadata_value.get("dummy_point_distance_m"),
-            dummy_point_distance_source=metadata_value.get("dummy_point_distance_source"),
+            extension=self._extension_from_metadata(metadata_value),
         )
         try:
             total_points = int(metadata_value.get("total_points"))
@@ -286,76 +281,47 @@ class MissionStore:
     # Extension validation
     # ==========================================================
 
-    def _validate_extension_settings(
-        self,
-        extension_mode: str,
+    @staticmethod
+    def _extension_from_request(
+        *,
+        extension_mode: Any,
         dummy_point_distance_m: Any,
-        dummy_point_distance_source: Any = None,
-    ) -> tuple[str, float | None, str | None]:
-        mode = str(extension_mode or "").strip().upper()
-
-        if mode not in self.VALID_EXTENSION_MODES:
-            raise MissionValidationError("extension_mode must be " "ENABLE or DISABLE.")
-
-        if mode == "DISABLE":
-            return mode, None, None
-
-        source = str(dummy_point_distance_source or "").strip().upper()
-
-        # ENABLE uses the frontend value only when the operator entered it
-        # (source OPERATOR). Otherwise, it uses the configured 4.0 m fallback.
-        if source != self.OPERATOR_DISTANCE_SOURCE or dummy_point_distance_m in {
-            None,
-            "",
-        }:
-            dummy_distance = float(settings.default_dummy_point_distance_m)
-            source = self.DEFAULT_DISTANCE_SOURCE
-
-        else:
-            try:
-                dummy_distance = float(dummy_point_distance_m)
-
-            except (
-                TypeError,
-                ValueError,
-            ) as error:
-                raise MissionValidationError(
-                    "dummy_point_distance_m " "must be numeric."
-                ) from error
-
-        if not math.isfinite(dummy_distance):
-            raise MissionValidationError("dummy_point_distance_m " "must be finite.")
-
-        if not (
-            self.MINIMUM_DUMMY_DISTANCE_M
-            <= dummy_distance
-            <= self.MAXIMUM_DUMMY_DISTANCE_M
-        ):
-            raise MissionValidationError(
-                "dummy_point_distance_m must be "
-                f"between "
-                f"{self.MINIMUM_DUMMY_DISTANCE_M:.2f} m "
-                "and "
-                f"{self.MAXIMUM_DUMMY_DISTANCE_M:.2f} m."
+        dummy_point_distance_source: Any,
+        trigger_distance_m: Any,
+        revision: int,
+    ) -> ExtensionSettings:
+        try:
+            return extension_settings.from_request(
+                enabled=extension_settings.parse_mode(extension_mode),
+                distance_m=dummy_point_distance_m,
+                trigger_distance_m=trigger_distance_m,
+                source=dummy_point_distance_source,
+                revision=revision,
             )
+        except ExtensionSettingsError as error:
+            raise MissionValidationError(str(error)) from error
 
-        return mode, dummy_distance, source
+    @staticmethod
+    def _extension_from_metadata(
+        metadata_value: dict[str, Any],
+    ) -> ExtensionSettings:
+        try:
+            return extension_settings.from_metadata(metadata_value)
+        except ExtensionSettingsError as error:
+            raise MissionValidationError(str(error)) from error
 
     @staticmethod
     def _apply_effective_extension(
         metadata_value: dict[str, Any],
         validated: ValidatedMission,
     ) -> None:
-        """Report the extension distance the trajectory generator will use.
+        """Report the extension settings the trajectory generator will use.
 
-        Metadata stored before the source marker existed may carry an
-        old tablet's 3.5 m, which the generator replaces with 4.0 m.
+        Metadata stored before the settings object existed is converted in
+        memory: an unmarked distance (an old tablet's 3.5 m) reads as 4.0 m.
         """
 
-        metadata_value["dummy_point_distance_m"] = validated.dummy_point_distance_m
-        metadata_value["dummy_point_distance_source"] = (
-            validated.dummy_point_distance_source
-        )
+        metadata_value.update(validated.extension.metadata_fields())
 
     # ==========================================================
     # CSV validation
@@ -366,9 +332,7 @@ class MissionStore:
         *,
         raw_bytes: bytes,
         filename: str,
-        extension_mode: str,
-        dummy_point_distance_m: Any = None,
-        dummy_point_distance_source: Any = None,
+        extension: ExtensionSettings,
     ) -> ValidatedMission:
         """Validate one frontend-uploaded mission CSV."""
 
@@ -403,12 +367,6 @@ class MissionStore:
 
         if not csv_text.strip():
             raise MissionValidationError("The uploaded CSV contains no data.")
-
-        mode, dummy_distance, dummy_source = self._validate_extension_settings(
-            extension_mode,
-            dummy_point_distance_m,
-            dummy_point_distance_source,
-        )
 
         # Prevent a single malformed field from consuming
         # excessive memory in Python's CSV parser.
@@ -585,9 +543,7 @@ class MissionStore:
             stored_bytes=stored_bytes,
             coordinate_mode=coordinate_mode,
             points=tuple(points),
-            extension_mode=mode,
-            dummy_point_distance_m=(dummy_distance),
-            dummy_point_distance_source=dummy_source,
+            extension=extension,
             original_filename=(safe_filename),
         )
 
@@ -742,15 +698,20 @@ class MissionStore:
         extension_mode: str,
         dummy_point_distance_m: Any = None,
         dummy_point_distance_source: Any = None,
+        trigger_distance_m: Any = None,
     ) -> dict[str, Any]:
         """Validate and atomically replace the active mission."""
 
         validated = self.validate(
             raw_bytes=raw_bytes,
             filename=filename,
-            extension_mode=extension_mode,
-            dummy_point_distance_m=(dummy_point_distance_m),
-            dummy_point_distance_source=dummy_point_distance_source,
+            extension=self._extension_from_request(
+                extension_mode=extension_mode,
+                dummy_point_distance_m=dummy_point_distance_m,
+                dummy_point_distance_source=dummy_point_distance_source,
+                trigger_distance_m=trigger_distance_m,
+                revision=1,
+            ),
         )
 
         checksum = self._sha256(validated.stored_bytes)
@@ -766,10 +727,7 @@ class MissionStore:
             "original_filename": (validated.original_filename),
             "checksum_sha256": checksum,
             "coordinate_mode": (validated.coordinate_mode),
-            "extension_mode": (validated.extension_mode),
-            "dummy_point_distance_m": (validated.dummy_point_distance_m),
-            "dummy_point_distance_source": (validated.dummy_point_distance_source),
-            "row_transition_threshold_m": (settings.row_transition_threshold_m),
+            **validated.extension.metadata_fields(),
             "total_points": len(validated.points),
             # Preserve only coordinates that this backend parsed and
             # validated.  Arbitrary frontend CSV columns are never copied
@@ -820,9 +778,7 @@ class MissionStore:
             filename=self.mission_file.name,
             checksum_sha256=checksum,
             coordinate_mode=(validated.coordinate_mode),
-            extension_mode=(validated.extension_mode),
-            dummy_point_distance_m=(validated.dummy_point_distance_m),
-            row_transition_threshold_m=(settings.row_transition_threshold_m),
+            extension=validated.extension,
             total_points=len(validated.points),
             uploaded_at=uploaded_at,
         )
@@ -887,27 +843,10 @@ class MissionStore:
                     "Stored mission checksum " "verification failed."
                 )
 
-            extension_mode = (
-                str(
-                    metadata_value.get(
-                        "extension_mode",
-                        "",
-                    )
-                )
-                .strip()
-                .upper()
-            )
-
-            dummy_distance = metadata_value.get("dummy_point_distance_m")
-
             validated = self.validate(
                 raw_bytes=mission_bytes,
                 filename=self.mission_file.name,
-                extension_mode=extension_mode,
-                dummy_point_distance_m=(dummy_distance),
-                dummy_point_distance_source=metadata_value.get(
-                    "dummy_point_distance_source"
-                ),
+                extension=self._extension_from_metadata(metadata_value),
             )
 
             metadata_total = metadata_value.get("total_points")
@@ -942,6 +881,57 @@ class MissionStore:
 
             return dict(metadata_value)
 
+    def update_extension(
+        self,
+        *,
+        enabled: bool,
+        distance_m: Any,
+        trigger_distance_m: Any,
+        source: Any,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        """Replace the active mission's extension settings in place.
+
+        The CSV and mission_id are kept; the revision goes up by one. The
+        caller must refuse this while the mission is active and must
+        re-prepare the trajectory afterwards.
+        """
+
+        with self._lock:
+            metadata = self.load_metadata()
+            if metadata is None:
+                raise MissionValidationError("No mission is loaded.")
+
+            current = self._extension_from_metadata(metadata)
+            if expected_revision != current.revision:
+                raise MissionRevisionConflict(current.revision)
+
+            try:
+                updated = extension_settings.from_request(
+                    enabled=enabled,
+                    distance_m=distance_m,
+                    trigger_distance_m=trigger_distance_m,
+                    source=source,
+                    revision=current.revision + 1,
+                )
+            except ExtensionSettingsError as error:
+                raise MissionValidationError(str(error)) from error
+
+            metadata.update(updated.metadata_fields())
+            self._atomic_write_json(self.metadata_file, metadata)
+
+        rover_state.load_mission(
+            mission_id=str(metadata["mission_id"]),
+            filename=str(metadata["active_filename"]),
+            checksum_sha256=str(metadata["checksum_sha256"]),
+            coordinate_mode=str(metadata["coordinate_mode"]),
+            extension=updated,
+            total_points=int(metadata["total_points"]),
+            uploaded_at=str(metadata["uploaded_at"]),
+        )
+
+        return dict(metadata)
+
     def restore_state(
         self,
     ) -> dict[str, Any] | None:
@@ -962,9 +952,7 @@ class MissionStore:
             filename=str(metadata["active_filename"]),
             checksum_sha256=str(metadata["checksum_sha256"]),
             coordinate_mode=str(metadata["coordinate_mode"]),
-            extension_mode=str(metadata["extension_mode"]),
-            dummy_point_distance_m=(metadata.get("dummy_point_distance_m")),
-            row_transition_threshold_m=float(metadata["row_transition_threshold_m"]),
+            extension=self._extension_from_metadata(metadata),
             total_points=int(metadata["total_points"]),
             uploaded_at=str(metadata["uploaded_at"]),
         )
@@ -1074,6 +1062,7 @@ class MissionStore:
                         "coordinate_mode": metadata.get("coordinate_mode"),
                         "extension_mode": metadata.get("extension_mode"),
                         "dummy_point_distance_m": metadata.get("dummy_point_distance_m"),
+                        "extension": metadata.get("extension"),
                         "total_points": metadata.get("total_points", 0),
                         "uploaded_at": metadata.get("uploaded_at"),
                         "archived_at": metadata.get("archived_at"),
@@ -1109,14 +1098,7 @@ class MissionStore:
             filename=str(active_metadata["active_filename"]),
             checksum_sha256=str(active_metadata["checksum_sha256"]),
             coordinate_mode=str(active_metadata["coordinate_mode"]),
-            extension_mode=str(active_metadata["extension_mode"]),
-            dummy_point_distance_m=active_metadata.get("dummy_point_distance_m"),
-            row_transition_threshold_m=float(
-                active_metadata.get(
-                    "row_transition_threshold_m",
-                    settings.row_transition_threshold_m,
-                )
-            ),
+            extension=self._extension_from_metadata(active_metadata),
             total_points=int(active_metadata["total_points"]),
             uploaded_at=str(active_metadata.get("uploaded_at") or utc_now_iso()),
         )

@@ -43,9 +43,11 @@ from rover_backend.auth import AuthenticatedSession
 from rover_backend.auth import require_auth
 from rover_backend.battery_policy import BATTERY_CRITICAL_PERCENT
 from rover_backend.battery_policy import battery_mission_locked
+from rover_backend import extension_settings
 from rover_backend.config import settings
 from rover_backend.mission_report import MissionReportError
 from rover_backend.mission_report import mission_report_store
+from rover_backend.mission_store import MissionRevisionConflict
 from rover_backend.mission_store import MissionValidationError
 from rover_backend.mission_store import mission_store
 from rover_backend.ros_bridge import RosServiceOutcomeUnknownError
@@ -124,6 +126,19 @@ class ExecutionModeRequest(BaseModel):
 
 class MarkingToolRequest(BaseModel):
     marking_tool: str
+
+
+class ExtensionUpdateRequest(BaseModel):
+    """Operator-entered row-extension settings for the loaded mission.
+
+    Omitted lengths take the defaults. expected_revision is the revision the
+    client last read; a different stored revision is refused.
+    """
+
+    enabled: bool
+    distance_m: float | None = None
+    trigger_distance_m: float | None = None
+    expected_revision: int
 
 
 class MissionIdRequest(BaseModel):
@@ -281,6 +296,7 @@ async def upload_mission(
     extension_mode: str = Form(...),
     dummy_point_distance_m: float | None = Form(None),
     extension_distance_source: str | None = Form(None),
+    trigger_distance_m: float | None = Form(None),
     _session: AuthenticatedSession = Depends(require_auth),
     _mutation: None = Depends(_serialize_mission_mutation),
 ) -> dict[str, Any]:
@@ -291,18 +307,20 @@ async def upload_mission(
 
     ENABLE:
         The trajectory generator automatically checks each consecutive
-        marking-point transition. When the distance is below its 3.0 m
-        row-transition threshold, the transfer is sideways (45-135 deg) and
-        the following row reverses (>= 135 deg), it creates one
-        navigation-only dummy point dummy_point_distance_m past the current
-        row end along the incoming row direction. The 3.0 m threshold is
-        fixed (EXTENSION_TRIGGER_DISTANCE_M).
+        marking-point transition. When the distance is below
+        trigger_distance_m, the transfer is sideways (45-135 deg) and the
+        following row reverses (>= 135 deg), it creates one navigation-only
+        dummy point dummy_point_distance_m past the current row end along
+        the incoming row direction.
 
-        dummy_point_distance_m (0.10-20.00 m) is used only when
-        extension_distance_source is OPERATOR, which the tablet's
-        row-extension dialog sends. Without it the mission uses 4.0 m:
-        earlier tablet builds send a hard-coded 3.5 m that was never meant
-        to reach the rover.
+        dummy_point_distance_m (1.0-20.0 m) and trigger_distance_m
+        (1.0-5.0 m) are used only when extension_distance_source is
+        OPERATOR, which the tablet's row-extension dialog sends. Without it
+        the mission uses 4.0 m / 3.0 m: earlier tablet builds send a
+        hard-coded 3.5 m that was never meant to reach the rover.
+
+        Change the settings later with PUT /api/mission/extension instead
+        of uploading the CSV again.
 
     DISABLE:
         No dummy points are generated. Only uploaded CSV points are marking
@@ -332,6 +350,7 @@ async def upload_mission(
             extension_mode=extension_mode,
             dummy_point_distance_m=(dummy_point_distance_m),
             dummy_point_distance_source=extension_distance_source,
+            trigger_distance_m=trigger_distance_m,
         )
     except MissionValidationError as error:
         raise HTTPException(
@@ -530,6 +549,141 @@ async def restore_mission(
         "restore": metadata,
         "mission": _mission_state(),
     }
+
+
+def _extension_error(
+    status_code: int,
+    code: str,
+    message: str,
+    **extra: Any,
+) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"success": False, "code": code, "message": message, **extra},
+    )
+
+
+@mission_router.get("/extension")
+async def get_mission_extension(
+    _session: AuthenticatedSession = Depends(require_auth),
+) -> dict[str, Any]:
+    """Row-extension settings of the loaded mission, with their limits."""
+
+    try:
+        metadata = await run_in_threadpool(mission_store.load_metadata)
+    except MissionValidationError as error:
+        raise _extension_error(409, "MISSION_INVALID", str(error)) from error
+
+    return {
+        "success": True,
+        "mission_id": metadata.get("mission_id") if metadata else None,
+        "extension": metadata.get("extension") if metadata else None,
+        "bounds": extension_settings.bounds(),
+    }
+
+
+@mission_router.put("/extension")
+async def update_mission_extension(
+    request: ExtensionUpdateRequest,
+    _session: AuthenticatedSession = Depends(require_auth),
+    _mutation: None = Depends(_serialize_mission_mutation),
+) -> dict[str, Any]:
+    """Change the loaded mission's row extension and prepare it again.
+
+    Keeps the CSV and mission_id and bumps the settings revision. Everything
+    built from the previous settings is dropped: the pushed trajectory is
+    cleared, the operator's Load approval is withdrawn, and the trajectory
+    is prepared again from the new settings. Refused while the mission is
+    running, paused or waiting for power-cycle recovery.
+    """
+
+    try:
+        _require_not_active(operation="change the row extension")
+    except HTTPException as error:
+        raise _extension_error(409, "MISSION_ACTIVE", str(error.detail)) from error
+
+    mission = _mission_state()
+    if mission.get("recovery_required") or settings.mission_recovery_file.is_file():
+        raise _extension_error(
+            409,
+            "RECOVERY_PENDING",
+            "Cannot change the row extension while a power-cycle recovery "
+            "is pending. Resume or stop the recovered mission first.",
+        )
+
+    try:
+        metadata = await run_in_threadpool(mission_store.load_metadata)
+    except MissionValidationError as error:
+        raise _extension_error(409, "MISSION_INVALID", str(error)) from error
+    if metadata is None:
+        raise _extension_error(409, "NO_MISSION", "Upload a mission first.")
+
+    try:
+        metadata = await run_in_threadpool(
+            lambda: mission_store.update_extension(
+                enabled=request.enabled,
+                distance_m=request.distance_m,
+                trigger_distance_m=request.trigger_distance_m,
+                source=extension_settings.SOURCE_OPERATOR,
+                expected_revision=request.expected_revision,
+            )
+        )
+    except MissionRevisionConflict as error:
+        raise _extension_error(
+            409,
+            "REVISION_CONFLICT",
+            str(error),
+            current_revision=error.current_revision,
+        ) from error
+    except MissionValidationError as error:
+        raise _extension_error(422, "INVALID_EXTENSION", str(error)) from error
+    except OSError as error:
+        raise _extension_error(
+            500,
+            "STORE_FAILED",
+            f"The extension settings could not be stored safely: {error}",
+        ) from error
+
+    trajectory_snapshot.invalidate("extension_changed")
+    rover_state.update("mission", accepted_for_start=False)
+
+    response = {
+        "success": True,
+        "operation": "extension",
+        "extension": metadata.get("extension"),
+        "bounds": extension_settings.bounds(),
+    }
+    try:
+        _require_ros_bridge()
+        await run_in_threadpool(ros_bridge.prepare_trajectory)
+    except HTTPException:
+        rover_state.set_mission_state(
+            "LOADED",
+            message=(
+                "Row extension saved; trajectory preparation is waiting "
+                "for the ROS bridge"
+            ),
+            error=None,
+        )
+        raise _extension_error(
+            503,
+            "PREPARE_UNAVAILABLE",
+            "The row extension was saved, but the ROS bridge is not "
+            "running, so the trajectory could not be prepared.",
+            extension_saved=True,
+            extension=metadata.get("extension"),
+        )
+    except RuntimeError as error:
+        raise _extension_error(
+            422,
+            "PREPARE_FAILED",
+            str(error),
+            extension_saved=True,
+            extension=metadata.get("extension"),
+        ) from error
+
+    response["mission"] = _mission_state()
+    return response
 
 
 @mission_router.get("/history")

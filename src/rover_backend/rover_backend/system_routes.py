@@ -257,6 +257,7 @@ def build_mission_status_payload() -> dict[str, Any]:
         "filename": mission.get("filename"),
         "checksum_sha256": mission.get("checksum_sha256"),
         "coordinate_mode": mission.get("coordinate_mode"),
+        "extension": mission.get("extension"),
         "extension_mode": mission.get("extension_mode"),
         "dummy_point_distance_m": mission.get("dummy_point_distance_m"),
         "row_transition_threshold_m": mission.get("row_transition_threshold_m"),

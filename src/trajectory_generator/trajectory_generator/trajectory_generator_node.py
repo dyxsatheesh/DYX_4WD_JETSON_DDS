@@ -120,11 +120,12 @@ class TrajectoryGenerator(Node):
     POINT_TYPE_DUMMY_ALIGNMENT = 1
     POINT_TYPE_MARKING = 2
 
-    # Production row-transition trigger remains fixed at 3.0 m.
-    # The extension distance is mission-specific only when the operator
-    # entered it (metadata dummy_point_distance_source == OPERATOR). Earlier
-    # tablet builds stored a hard-coded 3.5 m without that marker; those
-    # missions keep EXTENSION_DISTANCE_M.
+    # Row-extension settings come from the mission metadata ``extension``
+    # object (rover_backend/extension_settings.py), which the backend has
+    # already bounded. Metadata written before that object falls back to
+    # these defaults: the distance is honoured only when marked OPERATOR
+    # (earlier tablet builds stored a hard-coded 3.5 m without the marker),
+    # and the trigger was always 3.0 m.
     EXTENSION_TRIGGER_DISTANCE_M = 3.0
     EXTENSION_DISTANCE_M = 4.0
     OPERATOR_DISTANCE_SOURCE = "OPERATOR"
@@ -604,6 +605,8 @@ class TrajectoryGenerator(Node):
         self.source_topology: MissionTopology | None = None
         self.source_topology_mission_id: str | None = None
         self.source_topology_checksum: str | None = None
+        self.source_topology_extension_revision: int | None = None
+        self.extension_revision: int | None = None
         self.source_topology_compile_ms: float | None = None
 
         # Monotonic latency evidence for the current PREPARE transaction,
@@ -995,6 +998,7 @@ class TrajectoryGenerator(Node):
             self.source_topology = None
             self.source_topology_mission_id = None
             self.source_topology_checksum = None
+            self.source_topology_extension_revision = None
             self.source_topology_compile_ms = None
 
             # Do not allow a failed replacement PREPARE to report the
@@ -1004,6 +1008,7 @@ class TrajectoryGenerator(Node):
             self.extension_mode = None
             self.dummy_point_distance_m = None
             self.row_transition_threshold_m = None
+            self.extension_revision = None
             self.mission_id = None
             self.mission_checksum = None
 
@@ -1020,25 +1025,12 @@ class TrajectoryGenerator(Node):
 
                 self.raw_marking_points = raw_points
 
-                self.extension_mode = str(metadata["extension_mode"]).strip().upper()
-
-                # Keep the row-transition detection rule fixed. Only the
-                # extension length is operator-selectable.
-                self.row_transition_threshold_m = self.EXTENSION_TRIGGER_DISTANCE_M
-
-                if self.extension_mode == "ENABLE":
-                    distance_source = (
-                        str(metadata.get("dummy_point_distance_source") or "")
-                        .strip()
-                        .upper()
-                    )
-                    self.dummy_point_distance_m = (
-                        float(metadata["dummy_point_distance_m"])
-                        if distance_source == self.OPERATOR_DISTANCE_SOURCE
-                        else self.EXTENSION_DISTANCE_M
-                    )
-                else:
-                    self.dummy_point_distance_m = None
+                (
+                    self.extension_mode,
+                    self.dummy_point_distance_m,
+                    self.row_transition_threshold_m,
+                    self.extension_revision,
+                ) = self._extension_from_metadata(metadata)
 
                 self.mission_id = str(metadata["mission_id"])
 
@@ -1089,6 +1081,7 @@ class TrajectoryGenerator(Node):
                 # Part 2B must reject this topology if either identity differs.
                 self.source_topology_mission_id = self.mission_id
                 self.source_topology_checksum = self.mission_checksum
+                self.source_topology_extension_revision = self.extension_revision
 
                 source_dummy_count = sum(
                     1
@@ -1202,6 +1195,56 @@ class TrajectoryGenerator(Node):
         data: bytes,
     ) -> str:
         return hashlib.sha256(data).hexdigest()
+
+    def _extension_from_metadata(
+        self,
+        metadata: dict[str, Any],
+    ) -> tuple[str, float | None, float, int]:
+        """Return (mode, dummy distance, trigger distance, revision).
+
+        Disabled missions return no distance; the trigger is still returned
+        because the topology compiler requires one (it is unused then).
+        """
+
+        def positive(value: Any, name: str) -> float:
+            if isinstance(value, bool):
+                raise ValueError(f"{name} is invalid")
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{name} is invalid") from error
+            if not math.isfinite(number) or number <= 0.0:
+                raise ValueError(f"{name} must be finite and > 0")
+            return number
+
+        stored = metadata.get("extension")
+        if stored is None:
+            mode = str(metadata.get("extension_mode", "")).strip().upper()
+            if mode not in self.VALID_EXTENSION_MODES:
+                raise ValueError("Mission extension mode must be ENABLE or DISABLE")
+            if mode != "ENABLE":
+                return mode, None, self.EXTENSION_TRIGGER_DISTANCE_M, 0
+            source = str(metadata.get("dummy_point_distance_source") or "")
+            distance = (
+                positive(metadata.get("dummy_point_distance_m"), "Dummy-point distance")
+                if source.strip().upper() == self.OPERATOR_DISTANCE_SOURCE
+                else self.EXTENSION_DISTANCE_M
+            )
+            return mode, distance, self.EXTENSION_TRIGGER_DISTANCE_M, 0
+
+        if not isinstance(stored, dict) or not isinstance(stored.get("enabled"), bool):
+            raise ValueError("Mission extension settings are invalid")
+        revision = stored.get("revision")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("Mission extension revision is invalid")
+        if not stored["enabled"]:
+            return "DISABLE", None, self.EXTENSION_TRIGGER_DISTANCE_M, revision
+        return (
+            "ENABLE",
+            positive(stored.get("distance_m"), "Extension distance"),
+            positive(stored.get("trigger_distance_m"), "Trigger distance"),
+            revision,
+        )
 
     def _load_mission_source(
         self,
@@ -2483,6 +2526,7 @@ class TrajectoryGenerator(Node):
                     if source_current
                     else None
                 ),
+                "extension_revision": self.extension_revision,
                 "source_topology_segment_count": (
                     len(source_topology.segments)
                     if source_topology is not None
@@ -2604,14 +2648,16 @@ class TrajectoryGenerator(Node):
     def _source_topology_is_current(self) -> bool:
         """Return whether source topology belongs to the current mission.
 
-        Identity is mission_id plus the SHA-256 of the mission.csv bytes. It
-        does not cover the other compile inputs (coordinate/extension mode
-        from metadata, node parameters, class constants). That is sufficient
-        because topology never outlives its PREPARE transaction: every
-        PREPARE reloads and recompiles, the only reuse is re-placement after
-        an FCU session change inside the same transaction, and parameters
-        are fixed for the node's lifetime. If topology or placement is ever
-        cached across PREPAREs or processes, add a compile-input signature.
+        Identity is mission_id, the SHA-256 of the mission.csv bytes, and the
+        extension settings revision (the backend can change the extension
+        without a new upload: PUT /api/mission/extension). It does not cover
+        the other compile inputs (coordinate mode, node parameters, class
+        constants). That is sufficient because topology never outlives its
+        PREPARE transaction: every PREPARE reloads and recompiles, the only
+        reuse is re-placement after an FCU session change inside the same
+        transaction, and parameters are fixed for the node's lifetime. If
+        topology or placement is ever cached across PREPAREs or processes,
+        add a compile-input signature.
 
         Source topology is diagnostics and lifecycle state only. The placed
         path's dummy decisions come from compile_metric_topology() on the
@@ -2625,6 +2671,7 @@ class TrajectoryGenerator(Node):
             and self.source_topology_checksum is not None
             and self.source_topology_mission_id == self.mission_id
             and self.source_topology_checksum == self.mission_checksum
+            and self.source_topology_extension_revision == self.extension_revision
         )
 
     def _trajectory_phase(self) -> str:
@@ -2709,6 +2756,7 @@ class TrajectoryGenerator(Node):
         self.source_topology = None
         self.source_topology_mission_id = None
         self.source_topology_checksum = None
+        self.source_topology_extension_revision = None
         self.source_topology_compile_ms = None
 
         self.placement_timing = {}
@@ -2718,6 +2766,7 @@ class TrajectoryGenerator(Node):
         self.extension_mode = None
         self.dummy_point_distance_m = None
         self.row_transition_threshold_m = None
+        self.extension_revision = None
 
         self.mission_id = None
         self.mission_checksum = None
