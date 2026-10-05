@@ -136,3 +136,50 @@ def project_geodetic_to_px4_enu(
     return transform_ned_to_enu(
         project_geodetic_to_px4_ned(origin, latitude_deg, longitude_deg)
     )
+
+
+def reproject_px4_enu_to_geodetic(
+    origin: GeographicOrigin,
+    east_m: float,
+    north_m: float,
+) -> tuple[float, float]:
+    """Inverse of project_geodetic_to_px4_enu: PX4 MapProjection::reproject().
+
+    Same formula as rover_backend.ros_bridge._px4_enu_to_geodetic. Returns
+    (latitude_deg, longitude_deg).
+    """
+
+    _validate_coordinate(
+        latitude_deg=origin.latitude_deg,
+        longitude_deg=origin.longitude_deg,
+        label="Origin",
+    )
+    if not math.isfinite(east_m) or not math.isfinite(north_m):
+        raise ValueError("ENU point must contain finite values")
+
+    reference_latitude = math.radians(origin.latitude_deg)
+    reference_longitude = math.radians(origin.longitude_deg)
+
+    x_rad = north_m / PX4_EARTH_RADIUS_M
+    y_rad = east_m / PX4_EARTH_RADIUS_M
+    central_angle = math.hypot(x_rad, y_rad)
+
+    if central_angle <= 1.0e-15:
+        return origin.latitude_deg, origin.longitude_deg
+
+    sin_c = math.sin(central_angle)
+    cos_c = math.cos(central_angle)
+    sin_reference = math.sin(reference_latitude)
+    cos_reference = math.cos(reference_latitude)
+
+    latitude = math.asin(
+        cos_c * sin_reference
+        + (x_rad * sin_c * cos_reference) / central_angle
+    )
+    longitude = reference_longitude + math.atan2(
+        y_rad * sin_c,
+        central_angle * cos_reference * cos_c
+        - x_rad * sin_reference * sin_c,
+    )
+
+    return math.degrees(latitude), math.degrees(longitude)

@@ -311,3 +311,85 @@ def test_unsupported_source_coordinate_mode_is_rejected():
             extension_mode="DISABLE",
             **COMMON,
         )
+
+
+# ── Row-end decisions (Upgrade Extension phase 2) ─────────────────────────
+
+from trajectory_generator.topology import row_end_decisions  # noqa: E402
+
+_ANGLES = {
+    "row_transfer_min_angle_deg": 45.0,
+    "row_transfer_max_angle_deg": 135.0,
+    "row_reversal_min_angle_deg": 135.0,
+}
+
+
+def _decisions(points, *, mode="ENABLE", trigger=3.0, distance=4.0):
+    topology = compile_metric_topology(
+        points,
+        extension_mode=mode,
+        row_transition_threshold_m=trigger,
+        minimum_segment_length_m=0.001,
+        **_ANGLES,
+    )
+    return topology, row_end_decisions(
+        topology,
+        extension_mode=mode,
+        row_transition_threshold_m=trigger,
+        dummy_point_distance_m=distance if mode == "ENABLE" else None,
+        **_ANGLES,
+    )
+
+
+# Three rows 1 m apart, marks every 1 m along each 3 m row (serpentine).
+_THREE_ROWS = [
+    (0.0, 0.0), (0.0, 1.0), (0.0, 2.0), (0.0, 3.0),
+    (1.0, 3.0), (1.0, 2.0), (1.0, 1.0), (1.0, 0.0),
+    (2.0, 0.0), (2.0, 1.0), (2.0, 2.0), (2.0, 3.0),
+]
+
+
+def test_row_end_decisions_report_one_entry_per_row_end():
+    topology, decisions = _decisions(_THREE_ROWS)
+
+    assert [(d.from_index, d.decision) for d in decisions] == [(3, "ADDED"), (7, "ADDED")]
+    # ADDED matches the compiled path exactly.
+    added = {d.from_index for d in decisions if d.decision == "ADDED"}
+    assert added == {s.index for s in topology.segments if s.use_dummy}
+
+
+def test_added_point_is_distance_past_the_row_end_along_the_row():
+    _, decisions = _decisions(_THREE_ROWS, distance=4.0)
+
+    assert decisions[0].point == pytest.approx((0.0, 7.0))   # P4 (0,3) + 4 m north
+    assert decisions[1].point == pytest.approx((1.0, -4.0))  # P8 (1,0) + 4 m south
+
+
+def test_row_end_over_the_trigger_is_skipped_for_gap():
+    _, decisions = _decisions(_THREE_ROWS, trigger=0.5)
+
+    assert [d.decision for d in decisions] == ["SKIPPED_GAP", "SKIPPED_GAP"]
+    assert all(d.point is None for d in decisions)
+
+
+def test_disabled_reports_row_ends_without_points():
+    _, decisions = _decisions(_THREE_ROWS, mode="DISABLE")
+
+    assert [d.decision for d in decisions] == ["DISABLED", "DISABLED"]
+    assert all(d.point is None for d in decisions)
+
+
+def test_first_pair_is_reported_only_when_added():
+    # P1->P2 is a 3 m row; the rule judges it against a synthetic incoming
+    # direction, so it must not read as a skipped row end.
+    points = [(0.0, 0.0), (0.0, 3.0), (1.0, 3.0), (1.0, 0.0)]
+    _, decisions = _decisions(points)
+
+    assert [(d.from_index, d.decision) for d in decisions] == [(1, "ADDED")]
+
+
+def test_hops_along_a_row_are_not_reported():
+    points = [(0.0, float(i)) for i in range(10)]
+    _, decisions = _decisions(points)
+
+    assert decisions == ()

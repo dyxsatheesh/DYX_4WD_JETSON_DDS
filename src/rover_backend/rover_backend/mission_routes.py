@@ -574,11 +574,24 @@ async def get_mission_extension(
     except MissionValidationError as error:
         raise _extension_error(409, "MISSION_INVALID", str(error)) from error
 
+    extension = metadata.get("extension") if metadata else None
+    mission = _mission_state()
+    decisions_revision = mission.get("extension_decisions_revision")
+    current = (
+        extension is not None
+        and mission.get("mission_id") == metadata.get("mission_id")
+        and decisions_revision == extension.get("revision")
+    )
     return {
         "success": True,
         "mission_id": metadata.get("mission_id") if metadata else None,
-        "extension": metadata.get("extension") if metadata else None,
+        "extension": extension,
         "bounds": extension_settings.bounds(),
+        # Only decisions computed from the stored revision are returned;
+        # while the rover is still preparing a change the list is empty and
+        # decisions_current is false.
+        "decisions_current": current,
+        "decisions": list(mission.get("extension_decisions") or []) if current else [],
     }
 
 

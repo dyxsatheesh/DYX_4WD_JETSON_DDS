@@ -91,6 +91,7 @@ def _fake_generator():
     node.source_topology_mission_id = None
     node.source_topology_checksum = None
     node.source_topology_extension_revision = None
+    node.extension_decisions = []
     node.source_topology_compile_ms = None
 
     node.extension_mode = None
@@ -164,6 +165,7 @@ def _fake_generator():
 
     _bind(node, "_source_topology_is_current")
     _bind(node, "_extension_from_metadata")
+    _bind(node, "_extension_decisions_for")
     _bind(node, "_trajectory_phase")
     _bind(node, "_build_status_payload")
     _bind(node, "_log_waiting")
@@ -422,6 +424,84 @@ def test_disabled_extension_compiles_like_a_never_enabled_mission():
     assert disabled_again.extension_mode == never_enabled.extension_mode == "DISABLE"
     assert _dummy_decisions(disabled_again) == _dummy_decisions(never_enabled)
     assert _dummy_decisions(disabled_again) == [False, False, False]
+
+
+def test_prepare_publishes_row_end_decisions_with_revision():
+    node = _fake_generator()
+    node._load_mission_source = lambda: _extension_mission(
+        "mission-decisions",
+        {
+            "enabled": True,
+            "distance_m": 4.0,
+            "trigger_distance_m": 3.0,
+            "source": "OPERATOR",
+            "revision": 7,
+        },
+    )
+
+    assert _run_prepare(node).success is True
+
+    assert node.extension_decisions == [
+        {
+            "from_point": "P0002",
+            "to_point": "P0003",
+            "gap_m": 2.5,
+            "transfer_deg": 90.0,
+            "reversal_deg": 180.0,
+            "decision": "ADDED",
+            "point": {"x": 0.0, "y": 9.0},
+            "revision": 7,
+        }
+    ]
+    payload = node._build_status_payload(state="PREPARING", message="")
+    assert payload["extension_decisions"] == node.extension_decisions
+
+
+def test_gps_decision_point_is_reported_as_lat_lon():
+    from trajectory_generator.localization_frame import GeographicOrigin
+    from trajectory_generator.localization_frame import project_geodetic_to_px4_enu
+
+    node = _fake_generator()
+    origin = (13.0827, 80.2707)
+    # Same serpentine as _SERPENTINE, expressed as lat/lon around origin.
+    metres_per_degree = 6_371_000.0 * 3.141592653589793 / 180.0
+    points = [
+        (origin[0] + north / metres_per_degree, origin[1] + east / (metres_per_degree * 0.97401))
+        for east, north in _SERPENTINE
+    ]
+    node._load_mission_source = lambda: (
+        {
+            "mission_id": "mission-gps",
+            "checksum_sha256": "e" * 64,
+            "extension_mode": "ENABLE",
+            "extension": {
+                "enabled": True,
+                "distance_m": 4.0,
+                "trigger_distance_m": 3.0,
+                "source": "OPERATOR",
+                "revision": 1,
+            },
+        },
+        "gps",
+        points,
+    )
+
+    assert _run_prepare(node).success is True
+
+    (decision,) = node.extension_decisions
+    assert decision["decision"] == "ADDED"
+    enu = project_geodetic_to_px4_enu(
+        GeographicOrigin(latitude_deg=points[0][0], longitude_deg=points[0][1]),
+        decision["point"]["lat"],
+        decision["point"]["lon"],
+    )
+    row_end = project_geodetic_to_px4_enu(
+        GeographicOrigin(latitude_deg=points[0][0], longitude_deg=points[0][1]),
+        *points[1],
+    )
+    # 4 m past the row end, along the row (north).
+    assert enu.north_m - row_end.north_m == pytest.approx(4.0, abs=0.005)
+    assert enu.east_m - row_end.east_m == pytest.approx(0.0, abs=0.005)
 
 
 def test_binding_check_rejects_extension_revision_mismatch():

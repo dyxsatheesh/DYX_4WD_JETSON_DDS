@@ -120,3 +120,15 @@ def test_invalid_coordinates_are_rejected(
             latitude,
             longitude,
         )
+
+
+def test_reproject_inverts_project_to_sub_millimetre():
+    from trajectory_generator.localization_frame import reproject_px4_enu_to_geodetic
+
+    origin = GeographicOrigin(latitude_deg=13.0827, longitude_deg=80.2707)
+    for latitude, longitude in [(13.0830, 80.2710), (13.0800, 80.2600), (13.0827, 80.2707)]:
+        enu = project_geodetic_to_px4_enu(origin, latitude, longitude)
+        back = reproject_px4_enu_to_geodetic(origin, enu.east_m, enu.north_m)
+        again = project_geodetic_to_px4_enu(origin, *back)
+        assert abs(again.east_m - enu.east_m) < 1e-6
+        assert abs(again.north_m - enu.north_m) < 1e-6

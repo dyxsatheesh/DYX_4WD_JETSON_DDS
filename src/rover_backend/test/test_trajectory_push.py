@@ -608,3 +608,31 @@ def test_blocking_is_lifted_after_a_fresh_message(service):
     assert service._blocked_nav_stamp is None
     service.feed_nav(fx.nav, (50, 0))  # equal to the old blocked stamp, but no longer blocked
     assert service._pending.navigation_path is not None
+
+
+def test_payload_marks_extension_points_and_their_revision(service):
+    fx = Fixture()
+    fx.types[59] = DUMMY  # end of the first leg becomes an extension point
+    fx.types[119] = DUMMY
+    fx.indices[59] = fx.indices[119] = -1
+    fx.signature = make_path_signature(fx.nav, fx.markings, fx.types, fx.indices)
+    status = fx.status()
+    status["extension_revision"] = 4
+    feeds = fx.inputs()
+    feeds["status"] = lambda s: s.feed_status(status)
+    for feed in feeds.values():
+        feed(service)
+
+    payload = paths(service)[0]["payload"]
+    assert payload["extension_indices"] == [59, 119]
+    assert payload["extension_revision"] == 4
+
+
+def test_payload_without_extension_points_has_empty_indices(service):
+    fx = Fixture()
+    for feed in fx.inputs().values():
+        feed(service)
+
+    payload = paths(service)[0]["payload"]
+    assert payload["extension_indices"] == []
+    assert payload["extension_revision"] is None

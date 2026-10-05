@@ -33,6 +33,9 @@ from rover_backend.config import _read_bool
 LOGGER = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+# mission_manager POINT_DUMMY_ALIGNMENT: the navigation-only extension point.
+EXTENSION_POINT_TYPE = 1
 EVENT_PATH = "trajectory_path"
 EVENT_CLEARED = "trajectory_path_cleared"
 
@@ -451,7 +454,7 @@ class TrajectorySnapshotService:
         if self._live is not None and self._live_key == key:
             return []
 
-        payload = self._build_payload_locked(status, nav, signature)
+        payload = self._build_payload_locked(status, nav, signature, types)
         if payload is None:
             return self._reject_locked("snapshot_projection_failed")
         self._live = payload
@@ -467,6 +470,7 @@ class TrajectorySnapshotService:
         status: dict[str, Any],
         nav: Sequence[Point],
         signature: str,
+        types: Sequence[int] = (),
     ) -> dict[str, Any] | None:
         projector = self._projector
         origin = self._origin
@@ -504,6 +508,13 @@ class TrajectorySnapshotService:
             "y": y,
             "lat": lat,
             "lon": lon,
+            # Additive (schema 1): indices into x/y/lat/lon that are row
+            # extension points, and the settings revision they came from.
+            "extension_indices": [
+                index for index, value in enumerate(types)
+                if value == EXTENSION_POINT_TYPE
+            ],
+            "extension_revision": status.get("extension_revision"),
             "built_at": time.time(),
         }
 

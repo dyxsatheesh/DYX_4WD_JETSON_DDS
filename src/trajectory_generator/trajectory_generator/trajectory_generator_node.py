@@ -88,10 +88,12 @@ from std_srvs.srv import Trigger
 
 from trajectory_generator.localization_frame import GeographicOrigin
 from trajectory_generator.localization_frame import project_geodetic_to_px4_ned
+from trajectory_generator.localization_frame import reproject_px4_enu_to_geodetic
 from trajectory_generator.localization_frame import transform_ned_to_enu
 from trajectory_generator.topology import MissionTopology
 from trajectory_generator.topology import compile_metric_topology
 from trajectory_generator.topology import compile_source_topology
+from trajectory_generator.topology import row_end_decisions
 
 
 class TrajectoryGenerator(Node):
@@ -607,6 +609,7 @@ class TrajectoryGenerator(Node):
         self.source_topology_checksum: str | None = None
         self.source_topology_extension_revision: int | None = None
         self.extension_revision: int | None = None
+        self.extension_decisions: list[dict[str, Any]] = []
         self.source_topology_compile_ms: float | None = None
 
         # Monotonic latency evidence for the current PREPARE transaction,
@@ -999,6 +1002,7 @@ class TrajectoryGenerator(Node):
             self.source_topology_mission_id = None
             self.source_topology_checksum = None
             self.source_topology_extension_revision = None
+            self.extension_decisions = []
             self.source_topology_compile_ms = None
 
             # Do not allow a failed replacement PREPARE to report the
@@ -1082,6 +1086,9 @@ class TrajectoryGenerator(Node):
                 self.source_topology_mission_id = self.mission_id
                 self.source_topology_checksum = self.mission_checksum
                 self.source_topology_extension_revision = self.extension_revision
+                self.extension_decisions = self._extension_decisions_for(
+                    self.source_topology
+                )
 
                 source_dummy_count = sum(
                     1
@@ -1195,6 +1202,64 @@ class TrajectoryGenerator(Node):
         data: bytes,
     ) -> str:
         return hashlib.sha256(data).hexdigest()
+
+    def _extension_decisions_for(
+        self,
+        topology: MissionTopology,
+    ) -> list[dict[str, Any]]:
+        """Operator-facing row-end decisions for the compiled source topology.
+
+        Computed in the survey frame, so they exist at COMPILED without the
+        FCU. GPS missions report the extension point as lat/lon (inverse of
+        the P1-anchored survey projection); local missions as x/y.
+        """
+
+        decisions = row_end_decisions(
+            topology,
+            extension_mode=self.extension_mode or "DISABLE",
+            row_transition_threshold_m=self.row_transition_threshold_m,
+            dummy_point_distance_m=self.dummy_point_distance_m,
+            row_transfer_min_angle_deg=self.ROW_TRANSFER_MIN_ANGLE_DEG,
+            row_transfer_max_angle_deg=self.ROW_TRANSFER_MAX_ANGLE_DEG,
+            row_reversal_min_angle_deg=self.ROW_REVERSAL_MIN_ANGLE_DEG,
+        )
+
+        survey_origin = None
+        if self.raw_coordinate_mode == "gps" and self.raw_marking_points:
+            anchor_latitude, anchor_longitude = self.raw_marking_points[0]
+            survey_origin = GeographicOrigin(
+                latitude_deg=anchor_latitude,
+                longitude_deg=anchor_longitude,
+            )
+
+        result: list[dict[str, Any]] = []
+        for decision in decisions:
+            entry: dict[str, Any] = {
+                "from_point": f"P{decision.from_index + 1:04d}",
+                "to_point": f"P{decision.from_index + 2:04d}",
+                "gap_m": round(decision.gap_m, 3),
+                "transfer_deg": round(decision.transfer_angle_deg, 1),
+                "reversal_deg": round(decision.reversal_angle_deg, 1),
+                "decision": decision.decision,
+                "point": None,
+                "revision": self.extension_revision,
+            }
+            if decision.point is not None:
+                east, north = decision.point
+                if survey_origin is not None:
+                    latitude, longitude = reproject_px4_enu_to_geodetic(
+                        survey_origin,
+                        east,
+                        north,
+                    )
+                    entry["point"] = {
+                        "lat": round(latitude, 9),
+                        "lon": round(longitude, 9),
+                    }
+                else:
+                    entry["point"] = {"x": round(east, 3), "y": round(north, 3)}
+            result.append(entry)
+        return result
 
     def _extension_from_metadata(
         self,
@@ -2527,6 +2592,9 @@ class TrajectoryGenerator(Node):
                     else None
                 ),
                 "extension_revision": self.extension_revision,
+                "extension_decisions": (
+                    self.extension_decisions if source_current else []
+                ),
                 "source_topology_segment_count": (
                     len(source_topology.segments)
                     if source_topology is not None
@@ -2757,6 +2825,7 @@ class TrajectoryGenerator(Node):
         self.source_topology_mission_id = None
         self.source_topology_checksum = None
         self.source_topology_extension_revision = None
+        self.extension_decisions = []
         self.source_topology_compile_ms = None
 
         self.placement_timing = {}

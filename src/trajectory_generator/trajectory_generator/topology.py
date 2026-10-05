@@ -256,6 +256,108 @@ def compile_metric_topology(
     )
 
 
+# Row-end decision codes reported to the operator (Upgrade Extension phase 2).
+DECISION_ADDED = "ADDED"
+DECISION_SKIPPED_GAP = "SKIPPED_GAP"
+DECISION_DISABLED = "DISABLED"
+
+
+@dataclass(frozen=True)
+class RowEndDecision:
+    """Why one marking-point pair did or did not get an extension point.
+
+    ``from_index`` is the zero-based index of the row end Pn; the pair is
+    Pn -> Pn+1. ``point`` is the extension point in the topology's metric
+    frame, only for ADDED.
+    """
+
+    from_index: int
+    gap_m: float
+    transfer_angle_deg: float
+    reversal_angle_deg: float
+    decision: str
+    point: Point | None
+
+
+def row_end_decisions(
+    topology: MissionTopology,
+    *,
+    extension_mode: str,
+    row_transition_threshold_m: float,
+    dummy_point_distance_m: float | None,
+    row_transfer_min_angle_deg: float,
+    row_transfer_max_angle_deg: float,
+    row_reversal_min_angle_deg: float,
+) -> tuple[RowEndDecision, ...]:
+    """Explain the extension rule for every pair worth explaining.
+
+    Reported: every row end (sideways hop into a row that runs back), as
+    ADDED, SKIPPED_GAP (hop not shorter than the trigger) or DISABLED.
+    Everything else is omitted, so the list is about one entry per row.
+
+    Two deliberate omissions. The first pair is reported only when ADDED:
+    the rule judges it against a synthetic incoming direction (the reverse
+    of the next hop), so a first row that is merely long would read as a
+    skipped row end. And short hops that are not row ends are not reported:
+    the first hop into every new row is also a 90 deg turn from the hop
+    before it, so they cannot be told apart from a real near-miss.
+
+    ADDED is taken from the compiled topology itself, so this report cannot
+    disagree with the path.
+    """
+
+    mode = str(extension_mode).strip().upper()
+    points = topology.metric_points
+    decisions: list[RowEndDecision] = []
+
+    for segment in topology.segments:
+        (
+            row_end,
+            incoming,
+            transfer_angle,
+            reversal_angle,
+        ) = _evaluate_row_transition(
+            marking_points=points,
+            index=segment.index,
+            row_transfer_min_angle_deg=row_transfer_min_angle_deg,
+            row_transfer_max_angle_deg=row_transfer_max_angle_deg,
+            row_reversal_min_angle_deg=row_reversal_min_angle_deg,
+        )
+        if transfer_angle is None or reversal_angle is None:
+            continue  # last pair: no following row to judge
+
+        point = None
+
+        if segment.use_dummy:
+            decision = DECISION_ADDED
+            assert incoming is not None and dummy_point_distance_m is not None
+            length = math.hypot(incoming[0], incoming[1])
+            start = points[segment.index]
+            point = (
+                start[0] + incoming[0] / length * dummy_point_distance_m,
+                start[1] + incoming[1] / length * dummy_point_distance_m,
+            )
+        elif not row_end or segment.index == 0:
+            continue
+        elif mode != "ENABLE":
+            decision = DECISION_DISABLED
+        else:
+            decision = DECISION_SKIPPED_GAP
+
+        decisions.append(
+            RowEndDecision(
+                from_index=segment.index,
+                gap_m=segment.distance_m,
+                transfer_angle_deg=transfer_angle,
+                reversal_angle_deg=reversal_angle,
+                decision=decision,
+                point=point,
+            )
+        )
+
+    return tuple(decisions)
+
+
 def gps_points_to_survey_local(
     gps_points: Sequence[Sequence[float]],
 ) -> tuple[Point, ...]:

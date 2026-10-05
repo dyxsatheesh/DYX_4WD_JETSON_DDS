@@ -389,3 +389,86 @@ def test_put_prepare_failure_reports_saved_settings(tmp_path):
     assert error.value.detail["code"] == "PREPARE_FAILED"
     assert error.value.detail["extension_saved"] is True
     assert [call[0] for call in calls] == ["update", "invalidate", "prepare"]
+
+
+# ── Phase 2: decisions are only served for the stored revision ────────────
+
+
+def _get_route(metadata, mission):
+    tree = ast.parse((SOURCE / "mission_routes.py").read_text())
+    wanted = {"get_mission_extension", "_extension_error"}
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted
+    ]
+    for node in functions:
+        node.decorator_list = []
+
+    async def run_in_threadpool(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    namespace = {
+        "Any": object,
+        "Depends": lambda dependency: None,
+        "require_auth": None,
+        "AuthenticatedSession": object,
+        "HTTPException": HTTPException,
+        "run_in_threadpool": run_in_threadpool,
+        "mission_store": SimpleNamespace(load_metadata=lambda: metadata),
+        "MissionValidationError": mission_store_module.MissionValidationError,
+        "extension_settings": ext,
+        "_mission_state": lambda: mission,
+    }
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "mission_routes.py", "exec"), namespace)
+    return namespace["get_mission_extension"]
+
+
+_DECISION = {"from_point": "P0004", "decision": "ADDED", "revision": 3}
+
+
+def test_get_returns_decisions_for_the_stored_revision():
+    route = _get_route(
+        {"mission_id": "m1", "extension": {"revision": 3}},
+        {"mission_id": "m1", "extension_decisions_revision": 3, "extension_decisions": [_DECISION]},
+    )
+    response = asyncio.run(route(_session=None))
+    assert response["decisions_current"] is True
+    assert response["decisions"] == [_DECISION]
+    assert response["bounds"]["trigger_distance_m"]["max"] == 5.0
+
+
+def test_get_hides_decisions_from_an_older_revision():
+    route = _get_route(
+        {"mission_id": "m1", "extension": {"revision": 4}},
+        {"mission_id": "m1", "extension_decisions_revision": 3, "extension_decisions": [_DECISION]},
+    )
+    response = asyncio.run(route(_session=None))
+    assert response["decisions_current"] is False
+    assert response["decisions"] == []
+
+
+def test_get_without_mission():
+    route = _get_route(None, {"mission_id": None})
+    response = asyncio.run(route(_session=None))
+    assert response["extension"] is None
+    assert response["decisions"] == []
+
+
+def test_settings_change_clears_previous_decisions(tmp_path, monkeypatch):
+    from rover_backend.state import rover_state
+
+    store = _store(tmp_path, monkeypatch)
+    _upload(store)
+    rover_state.update(
+        "mission",
+        extension_decisions=[_DECISION],
+        extension_decisions_revision=1,
+    )
+
+    _update(store, 1, distance=6.0)
+
+    mission = rover_state.section("mission")
+    assert mission["extension_decisions"] == []
+    assert mission["extension_decisions_revision"] is None
+    assert mission["extension"]["revision"] == 2

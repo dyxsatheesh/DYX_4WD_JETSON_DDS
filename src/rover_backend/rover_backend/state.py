@@ -365,6 +365,8 @@ class RoverState:
                 "checksum_sha256": None,
                 "coordinate_mode": None,
                 "extension": None,
+                "extension_decisions": [],
+                "extension_decisions_revision": None,
                 "extension_mode": None,
                 "dummy_point_distance_m": None,
                 "row_transition_threshold_m": None,
@@ -941,6 +943,10 @@ class RoverState:
             checksum_sha256=(checksum_sha256),
             coordinate_mode=(coordinate_mode),
             extension=extension_fields["extension"],
+            # Decisions belong to a compiled revision; a new mission or new
+            # settings drop them until the generator reports again.
+            extension_decisions=[],
+            extension_decisions_revision=None,
             extension_mode=extension_fields["extension_mode"],
             dummy_point_distance_m=(
                 _safe_float(extension_fields["dummy_point_distance_m"])
@@ -1199,6 +1205,8 @@ class RoverState:
                 "checksum_sha256": None,
                 "coordinate_mode": None,
                 "extension": None,
+                "extension_decisions": [],
+                "extension_decisions_revision": None,
                 "extension_mode": None,
                 "dummy_point_distance_m": None,
                 "row_transition_threshold_m": None,

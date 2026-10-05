@@ -258,6 +258,9 @@ def build_mission_status_payload() -> dict[str, Any]:
         "checksum_sha256": mission.get("checksum_sha256"),
         "coordinate_mode": mission.get("coordinate_mode"),
         "extension": mission.get("extension"),
+        # The decision list itself is served by GET /api/mission/extension;
+        # status carries only its revision so tablets know when to refetch.
+        "extension_decisions_revision": mission.get("extension_decisions_revision"),
         "extension_mode": mission.get("extension_mode"),
         "dummy_point_distance_m": mission.get("dummy_point_distance_m"),
         "row_transition_threshold_m": mission.get("row_transition_threshold_m"),

@@ -2972,6 +2972,21 @@ class RoverBackendRosNode(Node):
                 payload.get("row_transition_threshold_m")
             )
 
+        # Row-end decisions are tagged with the settings revision they were
+        # computed from; the tablet draws them only when that matches the
+        # stored extension revision (Upgrade Extension phase 2).
+        decisions = payload.get("extension_decisions")
+        mission_updates["extension_decisions"] = (
+            decisions if isinstance(decisions, list) else []
+        )
+        decisions_revision = payload.get("extension_revision")
+        mission_updates["extension_decisions_revision"] = (
+            decisions_revision
+            if isinstance(decisions_revision, int)
+            and not isinstance(decisions_revision, bool)
+            else None
+        )
+
         mission_updates["dummy_point_count"] = max(
             0,
             _safe_int(
