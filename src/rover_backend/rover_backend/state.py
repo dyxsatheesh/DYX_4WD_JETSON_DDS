@@ -366,6 +366,7 @@ class RoverState:
                 "coordinate_mode": None,
                 "extension": None,
                 "extension_decisions": [],
+                "extension_unused_skips": [],
                 "extension_decisions_revision": None,
                 "extension_mode": None,
                 "dummy_point_distance_m": None,
@@ -946,6 +947,7 @@ class RoverState:
             # Decisions belong to a compiled revision; a new mission or new
             # settings drop them until the generator reports again.
             extension_decisions=[],
+            extension_unused_skips=[],
             extension_decisions_revision=None,
             extension_mode=extension_fields["extension_mode"],
             dummy_point_distance_m=(
@@ -1206,6 +1208,7 @@ class RoverState:
                 "coordinate_mode": None,
                 "extension": None,
                 "extension_decisions": [],
+                "extension_unused_skips": [],
                 "extension_decisions_revision": None,
                 "extension_mode": None,
                 "dummy_point_distance_m": None,

@@ -85,3 +85,29 @@ def test_mission_identity_and_checksum_must_match():
         wrong_checksum,
         _metadata(),
     ) is None
+
+
+def test_checkpoint_from_another_extension_revision_is_rejected():
+    payload = _payload()
+    payload["extension_revision"] = 2
+    metadata = {**_metadata(), "extension": {"revision": 3}}
+
+    assert validate_power_cycle_recovery_payload(payload, metadata) is None
+
+    payload["extension_revision"] = 3
+    assert validate_power_cycle_recovery_payload(payload, metadata) is not None
+
+
+def test_checkpoint_without_extension_revision_stays_valid():
+    payload = _payload()
+    metadata = {**_metadata(), "extension": {"revision": 3}}
+    assert validate_power_cycle_recovery_payload(payload, metadata) is not None
+
+    payload["extension_revision"] = None
+    assert validate_power_cycle_recovery_payload(payload, metadata) is not None
+
+
+def test_legacy_metadata_counts_as_revision_zero():
+    payload = _payload()
+    payload["extension_revision"] = 0
+    assert validate_power_cycle_recovery_payload(payload, _metadata()) is not None

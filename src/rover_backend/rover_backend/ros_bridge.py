@@ -2979,6 +2979,10 @@ class RoverBackendRosNode(Node):
         mission_updates["extension_decisions"] = (
             decisions if isinstance(decisions, list) else []
         )
+        unused_skips = payload.get("extension_unused_skips")
+        mission_updates["extension_unused_skips"] = (
+            unused_skips if isinstance(unused_skips, list) else []
+        )
         decisions_revision = payload.get("extension_revision")
         mission_updates["extension_decisions_revision"] = (
             decisions_revision
@@ -4254,6 +4258,11 @@ class RoverBackendRosNode(Node):
                 "mission_id": captured_mission_id,
                 "checksum_sha256": str(
                     current_mission.get("checksum_sha256") or ""
+                ),
+                # Recovery must resume on the path these settings produced;
+                # a checkpoint from another revision is rejected.
+                "extension_revision": (
+                    (current_mission.get("extension") or {}).get("revision")
                 ),
                 "runtime": manager_payload,
             }

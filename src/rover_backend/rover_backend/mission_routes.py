@@ -138,7 +138,15 @@ class ExtensionUpdateRequest(BaseModel):
     enabled: bool
     distance_m: float | None = None
     trigger_distance_m: float | None = None
+    skip_row_ends: list[str] | None = None
     expected_revision: int
+
+
+class ExtensionDefaultsRequest(BaseModel):
+    """Starting values the tablet dialog opens with."""
+
+    distance_m: float
+    trigger_distance_m: float
 
 
 class MissionIdRequest(BaseModel):
@@ -575,6 +583,9 @@ async def get_mission_extension(
         raise _extension_error(409, "MISSION_INVALID", str(error)) from error
 
     extension = metadata.get("extension") if metadata else None
+    defaults, defaults_source = await run_in_threadpool(
+        extension_settings.extension_defaults_store.load
+    )
     mission = _mission_state()
     decisions_revision = mission.get("extension_decisions_revision")
     current = (
@@ -592,6 +603,57 @@ async def get_mission_extension(
         # decisions_current is false.
         "decisions_current": current,
         "decisions": list(mission.get("extension_decisions") or []) if current else [],
+        # Skipped row ends that no longer match a row end that would extend
+        # (e.g. after a trigger change). They have no effect.
+        "unused_skips": list(mission.get("extension_unused_skips") or []) if current else [],
+        "defaults": defaults.as_dict(),
+        "defaults_source": defaults_source,
+    }
+
+
+@mission_router.get("/extension/defaults")
+async def get_extension_defaults(
+    _session: AuthenticatedSession = Depends(require_auth),
+) -> dict[str, Any]:
+    """Saved starting values for the row-extension dialog."""
+
+    defaults, source = await run_in_threadpool(
+        extension_settings.extension_defaults_store.load
+    )
+    return {
+        "success": True,
+        "defaults": defaults.as_dict(),
+        "defaults_source": source,
+        "bounds": extension_settings.bounds(),
+    }
+
+
+@mission_router.post("/extension/defaults")
+async def save_extension_defaults(
+    request: ExtensionDefaultsRequest,
+    _session: AuthenticatedSession = Depends(require_auth),
+) -> dict[str, Any]:
+    """Save the dialog's starting values. Does not change any mission."""
+
+    try:
+        defaults = extension_settings.parse_defaults(
+            request.distance_m, request.trigger_distance_m
+        )
+    except extension_settings.ExtensionSettingsError as error:
+        raise _extension_error(422, "INVALID_EXTENSION", str(error)) from error
+    try:
+        await run_in_threadpool(
+            extension_settings.extension_defaults_store.save, defaults
+        )
+    except OSError as error:
+        raise _extension_error(
+            500, "STORE_FAILED", f"The defaults could not be saved: {error}"
+        ) from error
+    return {
+        "success": True,
+        "defaults": defaults.as_dict(),
+        "defaults_source": "saved",
+        "bounds": extension_settings.bounds(),
     }
 
 
@@ -639,6 +701,7 @@ async def update_mission_extension(
                 trigger_distance_m=request.trigger_distance_m,
                 source=extension_settings.SOURCE_OPERATOR,
                 expected_revision=request.expected_revision,
+                skip_row_ends=request.skip_row_ends,
             )
         )
     except MissionRevisionConflict as error:

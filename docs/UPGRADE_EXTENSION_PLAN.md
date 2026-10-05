@@ -113,9 +113,13 @@ an `extension` object is converted on load:
 Upload (`POST /api/mission/upload`) keeps its current fields and adds
 `trigger_distance_m`; it writes `extension.revision = 1`.
 
-Defaults live in `~/.ros/dyx_extension_defaults.json` (atomic write), used only to
-pre-fill the tablet dialog and to fill an upload that omits values. Written only by
-`POST .../defaults`.
+Defaults live in `~/.ros/dyx_extension_defaults.json` (atomic write,
+`DYX_EXTENSION_DEFAULTS_PATH` overrides), used only to pre-fill the tablet dialog
+and to fill a value an OPERATOR request leaves out. An unmarked (old-tablet)
+upload always keeps the fixed 4.0 m / 3.0 m. Written only by
+`POST /api/mission/extension/defaults`; a missing or unreadable file reads as the
+factory values. `GET /api/mission/extension` also returns `defaults` and
+`defaults_source` (`saved` / `factory`).
 
 ### 5.2 Trajectory generator
 
@@ -236,11 +240,17 @@ Options to choose from:
 Rules that hold for B and C:
 - Overrides are keyed by the row-end marking point ID (`P0006`) and belong to that mission
   and revision. A new CSV upload starts with none.
-- An override on a point that no longer qualifies (e.g. after a trigger change) is dropped,
-  listed in the response, and shown to the operator — never kept silently.
+- An override on a point that no longer qualifies (e.g. after a trigger change) has no
+  effect, is listed as `unused_skips` and shown to the operator — never kept silently.
+  The tablet removes it on the next Apply.
 - The same bounds apply (1.0-20.0 m), and the same warnings.
 
-Questions for the team:
+**Decided 2026-10-05: option B (skip a row end), as a list in the dialog.** Built in
+phase 3: `skip_row_ends` in the settings object (point IDs, validated, sorted, dropped
+when the extension is off or the request is unmarked), `SKIPPED_OPERATOR` decisions,
+and a Skip switch on each extendable row end in the dialog.
+
+Questions the team discussed:
 1. Do we need per-row-end control in the first release, or is mission-wide enough?
 2. If yes, is skip (B) enough, or do we need a different distance per row end (C)?
 3. Where should it live on the tablet: a list in the dialog, or tapping the row end on the

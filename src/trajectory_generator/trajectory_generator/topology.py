@@ -29,6 +29,9 @@ class SegmentTopology:
     incoming_direction: Point | None
     transfer_angle_deg: float | None
     reversal_angle_deg: float | None
+    # The rule would have added an extension here, but the operator skipped
+    # this row end.
+    skipped_by_operator: bool = False
 
 
 @dataclass(frozen=True)
@@ -164,6 +167,7 @@ def compile_metric_topology(
     row_transfer_min_angle_deg: float,
     row_transfer_max_angle_deg: float,
     row_reversal_min_angle_deg: float,
+    skip_row_end_indices: frozenset[int] = frozenset(),
 ) -> MissionTopology:
     points = tuple(
         _finite_point(
@@ -239,6 +243,10 @@ def compile_metric_topology(
                 ),
             )
 
+        skipped_by_operator = use_dummy and index in skip_row_end_indices
+        if skipped_by_operator:
+            use_dummy = False
+
         segments.append(
             SegmentTopology(
                 index=index,
@@ -247,6 +255,7 @@ def compile_metric_topology(
                 incoming_direction=incoming_direction,
                 transfer_angle_deg=transfer_angle,
                 reversal_angle_deg=reversal_angle,
+                skipped_by_operator=skipped_by_operator,
             )
         )
 
@@ -259,7 +268,20 @@ def compile_metric_topology(
 # Row-end decision codes reported to the operator (Upgrade Extension phase 2).
 DECISION_ADDED = "ADDED"
 DECISION_SKIPPED_GAP = "SKIPPED_GAP"
+DECISION_SKIPPED_OPERATOR = "SKIPPED_OPERATOR"
 DECISION_DISABLED = "DISABLED"
+
+# Warn (never block) when an extension leg passes this close to another
+# marking point (operator decision 2026-10-04).
+CLEARANCE_WARNING_M = 0.30
+
+
+@dataclass(frozen=True)
+class ClearanceWarning:
+    """Another marking point lies near an extension leg."""
+
+    point_index: int
+    distance_m: float
 
 
 @dataclass(frozen=True)
@@ -277,6 +299,84 @@ class RowEndDecision:
     reversal_angle_deg: float
     decision: str
     point: Point | None
+    warnings: tuple[ClearanceWarning, ...] = ()
+
+
+def _distance_to_segment(point: Point, start: Point, end: Point) -> float:
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 0.0:
+        return _distance(point, start)
+    t = ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_squared
+    t = max(0.0, min(1.0, t))
+    return _distance(point, (start[0] + t * dx, start[1] + t * dy))
+
+
+class _PointGrid:
+    """Uniform grid over the marking points for near-segment queries."""
+
+    def __init__(self, points: Sequence[Point], cell_m: float) -> None:
+        self._cell = cell_m
+        self._points = points
+        self._cells: dict[tuple[int, int], list[int]] = {}
+        for index, point in enumerate(points):
+            self._cells.setdefault(self._key(point), []).append(index)
+
+    def _key(self, point: Point) -> tuple[int, int]:
+        return (math.floor(point[0] / self._cell), math.floor(point[1] / self._cell))
+
+    def near_segment(
+        self, start: Point, end: Point, radius_m: float
+    ) -> dict[int, float]:
+        low = self._key((min(start[0], end[0]) - radius_m, min(start[1], end[1]) - radius_m))
+        high = self._key((max(start[0], end[0]) + radius_m, max(start[1], end[1]) + radius_m))
+        found: dict[int, float] = {}
+        for cell_x in range(low[0], high[0] + 1):
+            for cell_y in range(low[1], high[1] + 1):
+                for index in self._cells.get((cell_x, cell_y), ()):
+                    distance = _distance_to_segment(self._points[index], start, end)
+                    if distance < radius_m:
+                        found[index] = distance
+        return found
+
+
+def _clearance_warnings(
+    grid: _PointGrid,
+    *,
+    row_end_index: int,
+    extension_point: Point,
+    points: Sequence[Point],
+    clearance_m: float,
+) -> tuple[ClearanceWarning, ...]:
+    """Marking points (other than the row end and the next row start) near
+    the legs row end -> extension point -> next row start."""
+
+    own = {row_end_index, row_end_index + 1}
+    nearest: dict[int, float] = {}
+    for start, end in (
+        (points[row_end_index], extension_point),
+        (extension_point, points[row_end_index + 1]),
+    ):
+        for index, distance in grid.near_segment(start, end, clearance_m).items():
+            if index in own:
+                continue
+            nearest[index] = min(distance, nearest.get(index, distance))
+    return tuple(
+        ClearanceWarning(point_index=index, distance_m=distance)
+        for index, distance in sorted(nearest.items())
+    )
+
+
+def unused_skip_indices(
+    topology: MissionTopology,
+    skip_row_end_indices: frozenset[int],
+) -> tuple[int, ...]:
+    """Skipped row ends that no longer match a row end that would extend
+    (for example after the trigger distance changed). They have no effect."""
+
+    used = {segment.index for segment in topology.segments if segment.skipped_by_operator}
+    return tuple(sorted(skip_row_end_indices - used))
 
 
 def row_end_decisions(
@@ -288,11 +388,15 @@ def row_end_decisions(
     row_transfer_min_angle_deg: float,
     row_transfer_max_angle_deg: float,
     row_reversal_min_angle_deg: float,
+    clearance_m: float = CLEARANCE_WARNING_M,
 ) -> tuple[RowEndDecision, ...]:
     """Explain the extension rule for every pair worth explaining.
 
     Reported: every row end (sideways hop into a row that runs back), as
-    ADDED, SKIPPED_GAP (hop not shorter than the trigger) or DISABLED.
+    ADDED, SKIPPED_OPERATOR (would extend, operator turned it off),
+    SKIPPED_GAP (hop not shorter than the trigger) or DISABLED. ADDED
+    entries carry clearance warnings for marking points within
+    ``clearance_m`` of either extension leg.
     Everything else is omitted, so the list is about one entry per row.
 
     Two deliberate omissions. The first pair is reported only when ADDED:
@@ -309,6 +413,7 @@ def row_end_decisions(
     mode = str(extension_mode).strip().upper()
     points = topology.metric_points
     decisions: list[RowEndDecision] = []
+    grid = _PointGrid(points, cell_m=max(1.0, clearance_m))
 
     for segment in topology.segments:
         (
@@ -327,6 +432,7 @@ def row_end_decisions(
             continue  # last pair: no following row to judge
 
         point = None
+        warnings: tuple[ClearanceWarning, ...] = ()
 
         if segment.use_dummy:
             decision = DECISION_ADDED
@@ -337,6 +443,15 @@ def row_end_decisions(
                 start[0] + incoming[0] / length * dummy_point_distance_m,
                 start[1] + incoming[1] / length * dummy_point_distance_m,
             )
+            warnings = _clearance_warnings(
+                grid,
+                row_end_index=segment.index,
+                extension_point=point,
+                points=points,
+                clearance_m=clearance_m,
+            )
+        elif segment.skipped_by_operator:
+            decision = DECISION_SKIPPED_OPERATOR
         elif not row_end or segment.index == 0:
             continue
         elif mode != "ENABLE":
@@ -352,6 +467,7 @@ def row_end_decisions(
                 reversal_angle_deg=reversal_angle,
                 decision=decision,
                 point=point,
+                warnings=warnings,
             )
         )
 
@@ -410,6 +526,7 @@ def compile_source_topology(
     row_transfer_min_angle_deg: float,
     row_transfer_max_angle_deg: float,
     row_reversal_min_angle_deg: float,
+    skip_row_end_indices: frozenset[int] = frozenset(),
 ) -> MissionTopology:
     mode = str(coordinate_mode).strip().lower()
 
@@ -451,4 +568,5 @@ def compile_source_topology(
         row_reversal_min_angle_deg=(
             row_reversal_min_angle_deg
         ),
+        skip_row_end_indices=skip_row_end_indices,
     )

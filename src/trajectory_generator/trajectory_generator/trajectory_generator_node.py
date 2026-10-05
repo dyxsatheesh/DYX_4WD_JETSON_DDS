@@ -94,6 +94,7 @@ from trajectory_generator.topology import MissionTopology
 from trajectory_generator.topology import compile_metric_topology
 from trajectory_generator.topology import compile_source_topology
 from trajectory_generator.topology import row_end_decisions
+from trajectory_generator.topology import unused_skip_indices
 
 
 class TrajectoryGenerator(Node):
@@ -610,6 +611,8 @@ class TrajectoryGenerator(Node):
         self.source_topology_extension_revision: int | None = None
         self.extension_revision: int | None = None
         self.extension_decisions: list[dict[str, Any]] = []
+        self.skip_row_end_indices: frozenset[int] = frozenset()
+        self.extension_unused_skips: list[str] = []
         self.source_topology_compile_ms: float | None = None
 
         # Monotonic latency evidence for the current PREPARE transaction,
@@ -1003,6 +1006,7 @@ class TrajectoryGenerator(Node):
             self.source_topology_checksum = None
             self.source_topology_extension_revision = None
             self.extension_decisions = []
+            self.extension_unused_skips = []
             self.source_topology_compile_ms = None
 
             # Do not allow a failed replacement PREPARE to report the
@@ -1013,6 +1017,7 @@ class TrajectoryGenerator(Node):
             self.dummy_point_distance_m = None
             self.row_transition_threshold_m = None
             self.extension_revision = None
+            self.skip_row_end_indices = frozenset()
             self.mission_id = None
             self.mission_checksum = None
 
@@ -1034,6 +1039,7 @@ class TrajectoryGenerator(Node):
                     self.dummy_point_distance_m,
                     self.row_transition_threshold_m,
                     self.extension_revision,
+                    self.skip_row_end_indices,
                 ) = self._extension_from_metadata(metadata)
 
                 self.mission_id = str(metadata["mission_id"])
@@ -1069,6 +1075,7 @@ class TrajectoryGenerator(Node):
                     row_reversal_min_angle_deg=(
                         self.ROW_REVERSAL_MIN_ANGLE_DEG
                     ),
+                    skip_row_end_indices=self.skip_row_end_indices,
                 )
 
                 self.source_topology_compile_ms = (
@@ -1089,6 +1096,12 @@ class TrajectoryGenerator(Node):
                 self.extension_decisions = self._extension_decisions_for(
                     self.source_topology
                 )
+                self.extension_unused_skips = [
+                    f"P{index + 1:04d}"
+                    for index in unused_skip_indices(
+                        self.source_topology, self.skip_row_end_indices
+                    )
+                ]
 
                 source_dummy_count = sum(
                     1
@@ -1242,6 +1255,13 @@ class TrajectoryGenerator(Node):
                 "reversal_deg": round(decision.reversal_angle_deg, 1),
                 "decision": decision.decision,
                 "point": None,
+                "warnings": [
+                    {
+                        "point": f"P{warning.point_index + 1:04d}",
+                        "distance_m": round(warning.distance_m, 3),
+                    }
+                    for warning in decision.warnings
+                ],
                 "revision": self.extension_revision,
             }
             if decision.point is not None:
@@ -1264,8 +1284,10 @@ class TrajectoryGenerator(Node):
     def _extension_from_metadata(
         self,
         metadata: dict[str, Any],
-    ) -> tuple[str, float | None, float, int]:
-        """Return (mode, dummy distance, trigger distance, revision).
+    ) -> tuple[str, float | None, float, int, frozenset[int]]:
+        """Return (mode, dummy distance, trigger distance, revision, skips).
+
+        ``skips`` are zero-based indices of row ends the operator excluded.
 
         Disabled missions return no distance; the trigger is still returned
         because the topology compiler requires one (it is unused then).
@@ -1288,14 +1310,14 @@ class TrajectoryGenerator(Node):
             if mode not in self.VALID_EXTENSION_MODES:
                 raise ValueError("Mission extension mode must be ENABLE or DISABLE")
             if mode != "ENABLE":
-                return mode, None, self.EXTENSION_TRIGGER_DISTANCE_M, 0
+                return mode, None, self.EXTENSION_TRIGGER_DISTANCE_M, 0, frozenset()
             source = str(metadata.get("dummy_point_distance_source") or "")
             distance = (
                 positive(metadata.get("dummy_point_distance_m"), "Dummy-point distance")
                 if source.strip().upper() == self.OPERATOR_DISTANCE_SOURCE
                 else self.EXTENSION_DISTANCE_M
             )
-            return mode, distance, self.EXTENSION_TRIGGER_DISTANCE_M, 0
+            return mode, distance, self.EXTENSION_TRIGGER_DISTANCE_M, 0, frozenset()
 
         if not isinstance(stored, dict) or not isinstance(stored.get("enabled"), bool):
             raise ValueError("Mission extension settings are invalid")
@@ -1303,12 +1325,20 @@ class TrajectoryGenerator(Node):
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
             raise ValueError("Mission extension revision is invalid")
         if not stored["enabled"]:
-            return "DISABLE", None, self.EXTENSION_TRIGGER_DISTANCE_M, revision
+            return "DISABLE", None, self.EXTENSION_TRIGGER_DISTANCE_M, revision, frozenset()
+
+        skips: set[int] = set()
+        for point_id in stored.get("skip_row_ends") or []:
+            text = str(point_id)
+            if len(text) < 5 or text[0] != "P" or not text[1:].isdigit():
+                raise ValueError("Mission skipped row end is invalid")
+            skips.add(int(text[1:]) - 1)
         return (
             "ENABLE",
             positive(stored.get("distance_m"), "Extension distance"),
             positive(stored.get("trigger_distance_m"), "Trigger distance"),
             revision,
+            frozenset(skips),
         )
 
     def _load_mission_source(
@@ -2309,6 +2339,7 @@ class TrajectoryGenerator(Node):
             row_transfer_min_angle_deg=self.ROW_TRANSFER_MIN_ANGLE_DEG,
             row_transfer_max_angle_deg=self.ROW_TRANSFER_MAX_ANGLE_DEG,
             row_reversal_min_angle_deg=self.ROW_REVERSAL_MIN_ANGLE_DEG,
+            skip_row_end_indices=self.skip_row_end_indices,
         )
 
         for index in range(len(marking_points) - 1):
@@ -2595,6 +2626,9 @@ class TrajectoryGenerator(Node):
                 "extension_decisions": (
                     self.extension_decisions if source_current else []
                 ),
+                "extension_unused_skips": (
+                    self.extension_unused_skips if source_current else []
+                ),
                 "source_topology_segment_count": (
                     len(source_topology.segments)
                     if source_topology is not None
@@ -2826,6 +2860,7 @@ class TrajectoryGenerator(Node):
         self.source_topology_checksum = None
         self.source_topology_extension_revision = None
         self.extension_decisions = []
+        self.extension_unused_skips = []
         self.source_topology_compile_ms = None
 
         self.placement_timing = {}
@@ -2836,6 +2871,7 @@ class TrajectoryGenerator(Node):
         self.dummy_point_distance_m = None
         self.row_transition_threshold_m = None
         self.extension_revision = None
+        self.skip_row_end_indices = frozenset()
 
         self.mission_id = None
         self.mission_checksum = None

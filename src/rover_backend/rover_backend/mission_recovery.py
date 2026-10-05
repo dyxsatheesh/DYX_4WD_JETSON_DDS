@@ -57,6 +57,19 @@ def validate_power_cycle_recovery_payload(
     if not checksum or checksum != metadata_checksum:
         return None
 
+    # Checkpoints written before the extension revision existed (or with no
+    # mission extension known) carry none and stay valid. Otherwise the stored settings must not have
+    # changed since: the path to resume on would differ.
+    if payload.get("extension_revision") is not None:
+        stored_extension = metadata.get("extension")
+        stored_revision = (
+            stored_extension.get("revision")
+            if isinstance(stored_extension, dict)
+            else 0
+        )
+        if payload.get("extension_revision") != stored_revision:
+            return None
+
     runtime = payload.get("runtime")
     if not isinstance(runtime, dict):
         return None

@@ -297,6 +297,7 @@ class MissionStore:
                 trigger_distance_m=trigger_distance_m,
                 source=dummy_point_distance_source,
                 revision=revision,
+                defaults=extension_settings.extension_defaults_store.load()[0],
             )
         except ExtensionSettingsError as error:
             raise MissionValidationError(str(error)) from error
@@ -889,6 +890,7 @@ class MissionStore:
         trigger_distance_m: Any,
         source: Any,
         expected_revision: int,
+        skip_row_ends: Any = None,
     ) -> dict[str, Any]:
         """Replace the active mission's extension settings in place.
 
@@ -913,6 +915,8 @@ class MissionStore:
                     trigger_distance_m=trigger_distance_m,
                     source=source,
                     revision=current.revision + 1,
+                    skip_row_ends=skip_row_ends,
+                    defaults=extension_settings.extension_defaults_store.load()[0],
                 )
             except ExtensionSettingsError as error:
                 raise MissionValidationError(str(error)) from error

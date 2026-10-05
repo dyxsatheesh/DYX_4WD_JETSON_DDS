@@ -393,3 +393,58 @@ def test_hops_along_a_row_are_not_reported():
     _, decisions = _decisions(points)
 
     assert decisions == ()
+
+
+def test_operator_skip_turns_an_added_row_end_into_skipped_operator():
+    topology = compile_metric_topology(
+        _THREE_ROWS,
+        extension_mode="ENABLE",
+        row_transition_threshold_m=3.0,
+        minimum_segment_length_m=0.001,
+        skip_row_end_indices=frozenset({3}),
+        **_ANGLES,
+    )
+    decisions = row_end_decisions(
+        topology,
+        extension_mode="ENABLE",
+        row_transition_threshold_m=3.0,
+        dummy_point_distance_m=4.0,
+        **_ANGLES,
+    )
+
+    assert [(d.from_index, d.decision) for d in decisions] == [
+        (3, "SKIPPED_OPERATOR"),
+        (7, "ADDED"),
+    ]
+    assert [s.index for s in topology.segments if s.use_dummy] == [7]
+
+
+def test_unused_skips_are_reported():
+    from trajectory_generator.topology import unused_skip_indices
+
+    topology = compile_metric_topology(
+        _THREE_ROWS,
+        extension_mode="ENABLE",
+        row_transition_threshold_m=3.0,
+        minimum_segment_length_m=0.001,
+        skip_row_end_indices=frozenset({3, 5}),
+        **_ANGLES,
+    )
+    assert unused_skip_indices(topology, frozenset({3, 5})) == (5,)
+
+
+def test_clearance_warning_for_a_mark_near_the_extension_leg():
+    # A stray mark 0.2 m beside the run-out past P4 (0,3) -> X (0,7).
+    points = list(_THREE_ROWS) + [(0.2, 5.0)]
+    _, decisions = _decisions(points, distance=4.0)
+
+    first = decisions[0]
+    assert first.decision == "ADDED"
+    assert [(w.point_index, round(w.distance_m, 3)) for w in first.warnings] == [(12, 0.2)]
+    # The second row end's legs are clear.
+    assert decisions[1].warnings == ()
+
+
+def test_row_end_and_next_row_start_never_warn():
+    _, decisions = _decisions(_THREE_ROWS, distance=4.0)
+    assert all(d.warnings == () for d in decisions)

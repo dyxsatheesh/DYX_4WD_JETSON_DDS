@@ -92,6 +92,8 @@ def _fake_generator():
     node.source_topology_checksum = None
     node.source_topology_extension_revision = None
     node.extension_decisions = []
+    node.extension_unused_skips = []
+    node.skip_row_end_indices = frozenset()
     node.source_topology_compile_ms = None
 
     node.extension_mode = None
@@ -450,6 +452,7 @@ def test_prepare_publishes_row_end_decisions_with_revision():
             "reversal_deg": 180.0,
             "decision": "ADDED",
             "point": {"x": 0.0, "y": 9.0},
+            "warnings": [],
             "revision": 7,
         }
     ]
@@ -502,6 +505,31 @@ def test_gps_decision_point_is_reported_as_lat_lon():
     # 4 m past the row end, along the row (north).
     assert enu.north_m - row_end.north_m == pytest.approx(4.0, abs=0.005)
     assert enu.east_m - row_end.east_m == pytest.approx(0.0, abs=0.005)
+
+
+def test_operator_skip_removes_extension_from_compiled_path():
+    node = _fake_generator()
+    node._load_mission_source = lambda: _extension_mission(
+        "mission-skip",
+        {
+            "enabled": True,
+            "distance_m": 4.0,
+            "trigger_distance_m": 3.0,
+            "source": "OPERATOR",
+            "revision": 2,
+            "skip_row_ends": ["P0002", "P0009"],
+        },
+    )
+
+    assert _run_prepare(node).success is True
+
+    assert node.skip_row_end_indices == frozenset({1, 8})
+    assert _dummy_decisions(node) == [False, False, False]
+    assert [d["decision"] for d in node.extension_decisions] == ["SKIPPED_OPERATOR"]
+    # P0009 does not exist as a qualifying row end, so it has no effect.
+    assert node.extension_unused_skips == ["P0009"]
+    payload = node._build_status_payload(state="PREPARING", message="")
+    assert payload["extension_unused_skips"] == ["P0009"]
 
 
 def test_binding_check_rejects_extension_revision_mismatch():

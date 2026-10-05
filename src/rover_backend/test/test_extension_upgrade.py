@@ -21,6 +21,15 @@ SOURCE = Path(__file__).resolve().parents[1] / "rover_backend"
 CSV = b"latitude,longitude\n13.1,80.2\n13.2,80.3\n"
 
 
+@pytest.fixture(autouse=True)
+def _defaults_store(tmp_path, monkeypatch):
+    """Never read or write the real ~/.ros defaults file."""
+
+    store = ext.ExtensionDefaultsStore(tmp_path / "extension_defaults.json")
+    monkeypatch.setattr(ext, "extension_defaults_store", store)
+    return store
+
+
 # ── extension_settings ─────────────────────────────────────────────────────
 
 
@@ -129,6 +138,7 @@ def _update(store, revision, **values):
         trigger_distance_m=values.get("trigger"),
         source="OPERATOR",
         expected_revision=revision,
+        skip_row_ends=values.get("skips"),
     )
 
 
@@ -235,6 +245,7 @@ def test_legacy_stored_metadata_reads_as_revision_zero(tmp_path, monkeypatch):
         "trigger_distance_m": 3.0,
         "source": "DEFAULT",
         "revision": 0,
+        "skip_row_ends": [],
     }
     # The legacy mission can then be edited from revision 0.
     assert _update(store, 0, distance=5.0)["extension"]["revision"] == 1
@@ -316,6 +327,7 @@ def _request(**values):
         enabled=values.get("enabled", True),
         distance_m=values.get("distance_m", 5.0),
         trigger_distance_m=values.get("trigger_distance_m", 3.0),
+        skip_row_ends=values.get("skip_row_ends"),
         expected_revision=values.get("expected_revision", 1),
     )
 
@@ -472,3 +484,93 @@ def test_settings_change_clears_previous_decisions(tmp_path, monkeypatch):
     assert mission["extension_decisions"] == []
     assert mission["extension_decisions_revision"] is None
     assert mission["extension"]["revision"] == 2
+
+
+
+# ── Phase 3: skipped row ends and saved defaults ──────────────────────────
+
+
+def test_skip_row_ends_are_validated_sorted_and_deduplicated():
+    settings = ext.from_request(
+        enabled=True,
+        source="OPERATOR",
+        revision=1,
+        skip_row_ends=["P0012", "P0004", "P0012"],
+    )
+    assert settings.skip_row_ends == ("P0004", "P0012")
+    with pytest.raises(ext.ExtensionSettingsError):
+        ext.from_request(enabled=True, source="OPERATOR", revision=1, skip_row_ends=["row 4"])
+    with pytest.raises(ext.ExtensionSettingsError):
+        ext.from_request(enabled=True, source="OPERATOR", revision=1, skip_row_ends="P0004")
+
+
+def test_skips_are_dropped_when_disabled_or_unmarked():
+    assert ext.from_request(
+        enabled=False, source="OPERATOR", revision=1, skip_row_ends=["P0004"]
+    ).skip_row_ends == ()
+    assert ext.from_request(
+        enabled=True, source=None, revision=1, skip_row_ends=["P0004"]
+    ).skip_row_ends == ()
+
+
+def test_update_stores_skips_and_upload_starts_without_them(tmp_path, monkeypatch):
+    store = _store(tmp_path, monkeypatch)
+    _upload(store)
+    updated = _update(store, 1, distance=4.0, skips=["P0002"])
+    assert updated["extension"]["skip_row_ends"] == ["P0002"]
+
+    fresh = _upload(store)
+    assert fresh["extension"]["skip_row_ends"] == []
+
+
+def test_saved_defaults_fill_missing_operator_values_only(tmp_path, monkeypatch, _defaults_store):
+    _defaults_store.save(ext.parse_defaults(6.0, 2.0))
+
+    operator = ext.from_request(
+        enabled=True, source="OPERATOR", revision=1, defaults=_defaults_store.load()[0]
+    )
+    unmarked = ext.from_request(
+        enabled=True, source=None, revision=1, defaults=_defaults_store.load()[0]
+    )
+    assert (operator.distance_m, operator.trigger_distance_m) == (6.0, 2.0)
+    # An old tablet's unmarked upload keeps the fixed defaults.
+    assert (unmarked.distance_m, unmarked.trigger_distance_m) == (4.0, 3.0)
+
+
+def test_defaults_store_round_trip_and_bad_file(_defaults_store):
+    assert _defaults_store.load() == (ext.ExtensionDefaults(), "factory")
+    _defaults_store.save(ext.parse_defaults(5.5, 2.5))
+    assert _defaults_store.load() == (ext.ExtensionDefaults(5.5, 2.5), "saved")
+
+    _defaults_store.path.write_text("{not json")
+    assert _defaults_store.load() == (ext.ExtensionDefaults(), "factory")
+
+
+def test_defaults_are_bounded_like_the_settings():
+    with pytest.raises(ext.ExtensionSettingsError):
+        ext.parse_defaults(0.5, 3.0)
+    with pytest.raises(ext.ExtensionSettingsError):
+        ext.parse_defaults(4.0, 6.0)
+
+
+def test_put_forwards_skips(tmp_path):
+    calls, _mission, namespace = _namespace(tmp_path)
+    request = _request()
+    request.skip_row_ends = ["P0004"]
+    _call(_route(namespace), request)
+    assert calls[0][1]["skip_row_ends"] == ["P0004"]
+
+
+def test_get_returns_unused_skips_only_when_current():
+    route = _get_route(
+        {"mission_id": "m1", "extension": {"revision": 3}},
+        {
+            "mission_id": "m1",
+            "extension_decisions_revision": 3,
+            "extension_decisions": [_DECISION],
+            "extension_unused_skips": ["P0009"],
+        },
+    )
+    response = asyncio.run(route(_session=None))
+    assert response["unused_skips"] == ["P0009"]
+    assert response["defaults_source"] == "factory"

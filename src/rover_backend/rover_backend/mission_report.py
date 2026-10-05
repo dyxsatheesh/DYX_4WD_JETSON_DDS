@@ -687,6 +687,9 @@ class MissionReportStore:
                 "execution_mode": mission.get("execution_mode", "AUTO"),
                 "extension_mode": metadata.get("extension_mode")
                 or mission.get("extension_mode"),
+                # The full row-extension settings this run used (revision,
+                # distance, trigger, skipped row ends).
+                "extension": metadata.get("extension") or mission.get("extension"),
                 "total_points": total_points,
                 "uploaded_at": metadata.get("uploaded_at")
                 or mission.get("uploaded_at"),
@@ -821,6 +824,7 @@ class MissionReportStore:
                 "active_filename": mission.get("filename"),
                 "coordinate_mode": mission.get("coordinate_mode"),
                 "extension_mode": mission.get("extension_mode"),
+                "extension": mission.get("extension"),
                 "total_points": mission.get("total_points", 0),
                 "uploaded_at": mission.get("uploaded_at"),
             }
