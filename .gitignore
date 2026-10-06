@@ -95,3 +95,7 @@ docs/patches/straight-reverse-pivot.patch
 scripts/control_chain_report.py
 scripts/motion_leg_report.py
 scripts/phase_report.py
+
+# Local field data (2026-10-06)
+missions/mtemple*.csv
+receiver_backups/
