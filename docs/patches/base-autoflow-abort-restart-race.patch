@@ -1,0 +1,187 @@
+From 76254534e9a9e7b87567c8b3ed95086b999e1128 Mon Sep 17 00:00:00 2001
+From: Vetrivelan Velmurugan <vetri96muruga@gmail.com>
+Date: Sat, 3 Oct 2026 14:03:43 +0530
+Subject: [PATCH] autoflow: stop the old run when /autoflow/start follows
+ /autoflow/stop
+
+abort() set the state to IDLE and trigger_run() set it back to
+WAITING_SERIAL before the streaming monitor (10 s wait) looked at
+_halted(). The old run kept looping with no NTRIP client, and the new run
+never started: the base sat in WAITING_SERIAL with RTCM off and no NTRIP
+push (seen 2026-10-03 13:51 IST).
+
+abort() now bumps a run generation; each _execute() records the one it
+started with, and _halted() also returns true when they differ.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/gnss/autoflow.py                 |  16 ++++-
+ tests/__init__.py                    |   0
+ tests/test_autoflow_abort_restart.py | 103 +++++++++++++++++++++++++++
+ 3 files changed, 118 insertions(+), 1 deletion(-)
+ create mode 100644 tests/__init__.py
+ create mode 100644 tests/test_autoflow_abort_restart.py
+
+diff --git a/app/gnss/autoflow.py b/app/gnss/autoflow.py
+index b7792a9..6462885 100644
+--- a/app/gnss/autoflow.py
++++ b/app/gnss/autoflow.py
+@@ -136,6 +136,13 @@ class AutoflowOrchestrator:
+         self._lora_client: Optional["LoRaPushClient"] = None
+         self._survey_start_ts: Optional[float] = None
+ 
++        # Run generation: abort() bumps it, each _execute() records the value it
++        # started with, and _halted() compares the two. A stop followed quickly by
++        # a start flips _state IDLE -> WAITING_SERIAL before the old run polls
++        # _halted(), so the state check alone cannot stop the old run.
++        self._run_generation: int = 0
++        self._exec_generation: int = 0
++
+         # Survey polling state
+         self._last_obs_time: int = 0
+         self._stuck_count: int = 0
+@@ -218,6 +225,7 @@ class AutoflowOrchestrator:
+         with self._lock:
+             self._state = AutoflowState.IDLE
+             self._last_error = "Aborted by user"
++            self._run_generation += 1
+         self._cleanup_ntrip()
+         # Stop RTCM output and TMODE on the receiver itself
+         if self.gnss_reader.is_connected:
+@@ -501,6 +509,8 @@ class AutoflowOrchestrator:
+         """Full autoflow sequence — runs blocking in the orchestrator thread."""
+ 
+         cfg = self._config   # snapshot for this run
++        with self._lock:
++            self._exec_generation = self._run_generation
+ 
+         # ── Phase 1: Wait for serial connection ──────────────────────────
+         self._set_state(AutoflowState.WAITING_SERIAL)
+@@ -1014,7 +1024,11 @@ class AutoflowOrchestrator:
+     def _halted(self) -> bool:
+         """True if stop was requested or run was aborted."""
+         with self._lock:
+-            return self._stop_event.is_set() or self._state == AutoflowState.IDLE
++            return (
++                self._stop_event.is_set()
++                or self._state == AutoflowState.IDLE
++                or self._exec_generation != self._run_generation
++            )
+ 
+     def _status_dict(self) -> dict:
+         with self._lock:
+diff --git a/tests/__init__.py b/tests/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/test_autoflow_abort_restart.py b/tests/test_autoflow_abort_restart.py
+new file mode 100644
+index 0000000..a7d0c59
+--- /dev/null
++++ b/tests/test_autoflow_abort_restart.py
+@@ -0,0 +1,103 @@
++"""Regression: /autoflow/stop followed by /autoflow/start within the 10 s streaming
++monitor interval left the old run looping in STREAMING with no NTRIP client, and the
++new run never started (stuck in WAITING_SERIAL). Seen on the base 2026-10-03 13:51.
++
++Run: venv/bin/python -m unittest tests.test_autoflow_abort_restart
++"""
++import time
++import unittest
++from unittest import mock
++
++from app.gnss.autoflow import AutoflowOrchestrator, AutoflowState
++
++SAVED = {"latitude": 13.0720463, "longitude": 80.2619251, "altitude": -78.279, "accuracy": 0.9248}
++
++
++class FakeReader:
++    is_connected = True
++
++    def __init__(self):
++        self.acked = []
++
++    def send_command_and_wait_ack(self, command, timeout=6.0):
++        self.acked.append(command)
++        return True
++
++    def send_command(self, command):
++        return True
++
++    def set_rtcm_callback(self, name, cb):
++        pass
++
++    def remove_rtcm_callback(self, name):
++        pass
++
++
++class FakeClient:
++    connected = True
++
++    def get_status(self):
++        return {"connected": True, "host": "h", "port": 1, "mountpoint": "m", "bytes_sent": 0}
++
++    def stop(self):
++        pass
++
++
++def wait_for(pred, timeout):
++    end = time.time() + timeout
++    while time.time() < end:
++        if pred():
++            return True
++        time.sleep(0.05)
++    return False
++
++
++class AbortRestartRace(unittest.TestCase):
++    def setUp(self):
++        self.reader = FakeReader()
++        self.orch = AutoflowOrchestrator(mock.MagicMock(), self.reader, mock.MagicMock(), mock.MagicMock())
++        cfg = self.orch._config
++        cfg.ntrip_host, cfg.ntrip_mountpoint, cfg.msm_type = "caster", "MP", "MSM4"
++        self.starts = 0
++
++        def fake_start_ntrip(_cfg):
++            self.starts += 1
++            with self.orch._lock:
++                self.orch._ntrip_client = FakeClient()
++
++        for name, value in {
++            "_emit": lambda *a, **k: None,
++            "_emit_ntrip_status": lambda *a, **k: None,
++            "_load_base_position": lambda: dict(SAVED),
++            "_start_ntrip": fake_start_ntrip,
++        }.items():
++            p = mock.patch.object(self.orch, name, side_effect=value)
++            p.start()
++            self.addCleanup(p.stop)
++        self.orch._stop_event.wait = lambda timeout=None: time.sleep(min(timeout or 0, 0.05)) or False
++        self.addCleanup(self.orch.stop, 1.0)
++
++    def test_stop_then_immediate_start_runs_a_new_session(self):
++        self.orch.start()
++        self.orch.trigger_run()
++        self.assertTrue(wait_for(lambda: self.orch.state == AutoflowState.STREAMING, 5))
++        self.assertEqual(self.starts, 1)
++
++        self.orch.abort()
++        self.orch.trigger_run()   # same as POST /autoflow/start right after /autoflow/stop
++
++        self.assertTrue(wait_for(lambda: self.starts == 2, 5), "second run never started")
++        self.assertTrue(wait_for(lambda: self.orch.state == AutoflowState.STREAMING, 5))
++
++    def test_abort_alone_still_halts(self):
++        self.orch.start()
++        self.orch.trigger_run()
++        self.assertTrue(wait_for(lambda: self.orch.state == AutoflowState.STREAMING, 5))
++        self.orch.abort()
++        time.sleep(0.5)
++        self.assertEqual(self.orch.state, AutoflowState.IDLE)
++        self.assertEqual(self.starts, 1)
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.54.0
+

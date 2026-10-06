@@ -1,0 +1,539 @@
+From 276d50ebcdd937c54bd772accdb94ff84a6defcf Mon Sep 17 00:00:00 2001
+From: Vetrivelan Velmurugan <vetri96muruga@gmail.com>
+Date: Wed, 30 Sep 2026 13:32:34 +0530
+Subject: [PATCH] backend: system_event on Socket.IO; battery lockout confirmed
+ and PAUSEs
+
+1. system_event (new socket event, system_event@1)
+   mission_manager sends OBSTACLE_PAUSED/CLEARED, RTK_FLOAT/PAUSED/RECOVERED,
+   ODOM_PAUSED, ESTOP_ACTIVE/RELEASED and MISSION_COMPLETED on
+   /mission_manager/point_event without a point_id. ros_bridge only spoke
+   them (voice); the tablet never received them. They are now queued on the
+   same ordered queue as point events and emitted as `system_event`
+   (original fields + event_kind=SYSTEM + schema). Point events unchanged.
+
+2. Battery critical lockout (follow-up to 9268a87/1e587d9/1097940)
+   - Confirmed, not single-sample: >= 3 consecutive samples <= 23.80 V over
+     >= 8 s (/mavros/battery measured ~0.3 Hz). Unlock needs 2 consecutive
+     samples >= 24.20 V (hysteresis). Pure BatteryLockoutFilter.
+   - The automatic action is PAUSE (progress preserved), not STOP, and only
+     while RUNNING, per docs/DYX_Mission_Power_Cycle_Recovery_Logic.md
+     "Battery Critical Case". START/RESUME/NEXT/SKIP stay refused by the
+     existing route check (which still also refuses on an instantaneous
+     <= 10 % sample; conservative for starting motion).
+   - Telemetry field names (battery_critical_stop_*) unchanged for the
+     tablet (ae5f711 reads them).
+
+Not included: manual-drive API (needs a design), battery stream rate (which
+MAVLink message feeds /mavros/battery at 0.3 Hz is not yet established).
+
+Tests: 676 passed locally; the one failure
+(test_signature_changes_on_lifecycle_change[change11]) predates this.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../rover_backend/battery_policy.py           | 88 +++++++++++++++++++
+ src/rover_backend/rover_backend/realtime.py   | 12 +++
+ .../rover_backend/realtime_contract.py        | 26 ++++++
+ src/rover_backend/rover_backend/ros_bridge.py | 64 +++++++++-----
+ src/rover_backend/test/test_battery_policy.py | 86 ++++++++++++++++++
+ .../test/test_realtime_transport_contract.py  | 36 +++++++-
+ 6 files changed, 290 insertions(+), 22 deletions(-)
+
+diff --git a/src/rover_backend/rover_backend/battery_policy.py b/src/rover_backend/rover_backend/battery_policy.py
+index b3b4e10..baf84fd 100644
+--- a/src/rover_backend/rover_backend/battery_policy.py
++++ b/src/rover_backend/rover_backend/battery_policy.py
+@@ -11,6 +11,15 @@ BATTERY_FULL_PERCENT = 100
+ BATTERY_LOW_PERCENT = 30
+ BATTERY_CRITICAL_PERCENT = 10
+ 
++# Lockout is confirmed, not single-sample: driving load sags the pack, and one
++# low sample must not pause a mission. /mavros/battery measured ~0.3 Hz on
++# 2026-09-30, so 3 samples spanning >= 8 s is roughly 9-10 s of evidence.
++BATTERY_LOCKOUT_CONFIRM_SAMPLES = 3
++BATTERY_LOCKOUT_CONFIRM_SEC = 8.0
++# Unlock needs a clearly recovered pack (hysteresis above 23.80 V), confirmed.
++BATTERY_UNLOCK_VOLTAGE_V = 24.20
++BATTERY_UNLOCK_CONFIRM_SAMPLES = 2
++
+ 
+ def battery_percentage_from_voltage(
+     voltage_v: float | None,
+@@ -108,3 +117,82 @@ def battery_mission_locked(
+         and math.isfinite(percentage)
+         and percentage <= BATTERY_CRITICAL_PERCENT
+     )
++
++
++class BatteryLockoutFilter:
++    """Confirmed critical-battery lockout with unlock hysteresis (pure).
++
++    Locks after BATTERY_LOCKOUT_CONFIRM_SAMPLES consecutive samples at or
++    below BATTERY_CRITICAL_VOLTAGE_V spanning BATTERY_LOCKOUT_CONFIRM_SEC.
++    Unlocks after BATTERY_UNLOCK_CONFIRM_SAMPLES consecutive samples at or
++    above BATTERY_UNLOCK_VOLTAGE_V. An invalid sample breaks either streak and
++    never changes the lock.
++    """
++
++    def __init__(
++        self,
++        *,
++        critical_voltage_v: float = BATTERY_CRITICAL_VOLTAGE_V,
++        unlock_voltage_v: float = BATTERY_UNLOCK_VOLTAGE_V,
++        confirm_samples: int = BATTERY_LOCKOUT_CONFIRM_SAMPLES,
++        confirm_sec: float = BATTERY_LOCKOUT_CONFIRM_SEC,
++        unlock_samples: int = BATTERY_UNLOCK_CONFIRM_SAMPLES,
++    ) -> None:
++        if not unlock_voltage_v > critical_voltage_v:
++            raise ValueError("unlock voltage must be above the critical voltage")
++        if confirm_samples < 1 or unlock_samples < 1 or confirm_sec < 0.0:
++            raise ValueError("confirmation counts must be >= 1 and time >= 0")
++        self.critical_voltage_v = float(critical_voltage_v)
++        self.unlock_voltage_v = float(unlock_voltage_v)
++        self.confirm_samples = int(confirm_samples)
++        self.confirm_sec = float(confirm_sec)
++        self.unlock_samples = int(unlock_samples)
++        self.locked = False
++        self._low_count = 0
++        self._low_since: float | None = None
++        self._high_count = 0
++
++    def _reset_streaks(self) -> None:
++        self._low_count = 0
++        self._low_since = None
++        self._high_count = 0
++
++    def update(self, voltage_v: float | None, now_sec: float) -> bool:
++        """Consume one sample; return the (possibly new) lock state."""
++
++        if (
++            voltage_v is None
++            or not math.isfinite(voltage_v)
++            or voltage_v <= 0.0
++            or not math.isfinite(now_sec)
++        ):
++            self._reset_streaks()
++            return self.locked
++
++        if not self.locked:
++            self._high_count = 0
++            if voltage_v <= self.critical_voltage_v:
++                if self._low_since is None:
++                    self._low_since = now_sec
++                self._low_count += 1
++                if (
++                    self._low_count >= self.confirm_samples
++                    and now_sec - self._low_since >= self.confirm_sec
++                ):
++                    self.locked = True
++                    self._reset_streaks()
++            else:
++                self._low_count = 0
++                self._low_since = None
++            return self.locked
++
++        self._low_count = 0
++        self._low_since = None
++        if voltage_v >= self.unlock_voltage_v:
++            self._high_count += 1
++            if self._high_count >= self.unlock_samples:
++                self.locked = False
++                self._reset_streaks()
++        else:
++            self._high_count = 0
++        return self.locked
+diff --git a/src/rover_backend/rover_backend/realtime.py b/src/rover_backend/rover_backend/realtime.py
+index 205569e..01086e0 100644
+--- a/src/rover_backend/rover_backend/realtime.py
++++ b/src/rover_backend/rover_backend/realtime.py
+@@ -31,6 +31,12 @@ Emitted events:
+         profile/source/START/STOP change, and on connect. Omitted while the
+         RTK control service is not installed.
+ 
++    system_event
++        Mission Manager notification without a point (system_event@1):
++        OBSTACLE_PAUSED/CLEARED, RTK_FLOAT/PAUSED/RECOVERED, ODOM_PAUSED,
++        ESTOP_ACTIVE/RELEASED, MISSION_COMPLETED. Same ordered queue as the
++        point events below, so arrival order across both is preserved.
++
+     point_completed
+     point_skipped
+     point_failed
+@@ -165,6 +171,12 @@ def publish_point_event(event: dict[str, Any]) -> None:
+     notify_authoritative_state_changed()
+ 
+ 
++def publish_system_event(event: dict[str, Any]) -> None:
++    """Queue one system notification (ROS thread) in point-event order."""
++
++    publish_point_event(event)
++
++
+ def _socket_mission_payload(mission: dict[str, Any]) -> dict[str, Any]:
+     """mission_status as sent on Socket.IO (REST keeps the full contract)."""
+ 
+diff --git a/src/rover_backend/rover_backend/realtime_contract.py b/src/rover_backend/rover_backend/realtime_contract.py
+index a22cb41..ca4a239 100644
+--- a/src/rover_backend/rover_backend/realtime_contract.py
++++ b/src/rover_backend/rover_backend/realtime_contract.py
+@@ -418,11 +418,37 @@ _POINT_EVENT_SOCKET_NAMES = {
+ }
+ 
+ 
++SYSTEM_EVENT_SCHEMA = "system_event@1"
++
++
+ def point_event_socket_name(point_event: dict[str, Any]) -> str:
++    if point_event.get("event_kind") == "SYSTEM":
++        return "system_event"
+     event_name = str(point_event.get("event", "")).strip().upper()
+     return _POINT_EVENT_SOCKET_NAMES.get(event_name, "point_event")
+ 
+ 
++def build_system_event(point_event: dict[str, Any]) -> dict[str, Any] | None:
++    """system_event payload for a Mission Manager notification, else None.
++
++    /mission_manager/point_event also carries system notifications
++    (OBSTACLE_PAUSED, OBSTACLE_CLEARED, RTK_FLOAT, RTK_PAUSED, RTK_RECOVERED,
++    ODOM_PAUSED, ESTOP_ACTIVE, ESTOP_RELEASED, MISSION_COMPLETED). They are
++    the events without a point_id. The original fields are preserved.
++    """
++
++    if str(point_event.get("point_id") or "").strip():
++        return None
++    event_name = str(point_event.get("event") or "").strip().upper()
++    if not event_name:
++        return None
++    payload = dict(point_event)
++    payload["event"] = event_name
++    payload["event_kind"] = "SYSTEM"
++    payload["schema"] = SYSTEM_EVENT_SCHEMA
++    return payload
++
++
+ def build_point_result_event(
+     point_event: dict[str, Any],
+     point_result: dict[str, Any] | None,
+diff --git a/src/rover_backend/rover_backend/ros_bridge.py b/src/rover_backend/rover_backend/ros_bridge.py
+index a005c61..20adc3f 100644
+--- a/src/rover_backend/rover_backend/ros_bridge.py
++++ b/src/rover_backend/rover_backend/ros_bridge.py
+@@ -60,12 +60,13 @@ from mission_manager_interfaces.srv import ReleaseEmergencyStop
+ from std_srvs.srv import SetBool
+ from std_srvs.srv import Trigger
+ 
+-from rover_backend.battery_policy import battery_mission_locked
++from rover_backend.battery_policy import BatteryLockoutFilter
+ from rover_backend.battery_policy import battery_percentage_from_voltage
+ from rover_backend.battery_policy import classify_battery_percentage
+ from rover_backend.config import settings
+ from rover_backend.voice import voice_announcer
+ from rover_backend.realtime_contract import build_point_result_event
++from rover_backend.realtime_contract import build_system_event
+ from rover_backend.manager_status_sync import ManagerStatusSync
+ from rover_backend.mission_report import MissionReportError
+ from rover_backend.mission_report import StaleMissionTerminalEvent
+@@ -114,6 +115,17 @@ def _notify_authoritative_state_changed() -> None:
+         return
+ 
+ 
++def _publish_system_event(event: dict[str, Any]) -> None:
++    """Queue one Mission Manager system notification (lazy import, see above)."""
++
++    try:
++        from rover_backend.realtime import publish_system_event
++
++        publish_system_event(event)
++    except ImportError:
++        return
++
++
+ def _publish_point_result_event(event: dict[str, Any]) -> None:
+     """Queue one point-result socket event (lazy import, see above)."""
+ 
+@@ -489,10 +501,13 @@ class RoverBackendRosNode(Node):
+         self._terminal_cleanup_lock = threading.Lock()
+         self._terminal_cleanup_keys: set[str] = set()
+ 
+-        # Battery-critical STOP is dispatched outside the BatteryState callback
++        # Battery-critical PAUSE is dispatched outside the BatteryState callback
+         # so the ROS executor thread is never blocked waiting on Mission Manager.
+         self._battery_stop_lock = threading.Lock()
+         self._battery_stop_in_progress = False
++        # Lockout is confirmed over several samples and unlocks with
++        # hysteresis; one sag sample under load must not pause a mission.
++        self._battery_lockout = BatteryLockoutFilter()
+ 
+         # The backend always starts safe.
+         self._mission_enable = False
+@@ -2114,22 +2129,26 @@ class RoverBackendRosNode(Node):
+         self,
+         percentage: float,
+     ) -> None:
+-        """STOP an active mission after entering the critical battery band."""
++        """PAUSE a RUNNING mission after a confirmed critical battery.
++
++        PAUSE, not STOP: progress is preserved so the operator can change the
++        battery and Resume (docs/DYX_Mission_Power_Cycle_Recovery_Logic.md,
++        "Battery Critical Case"). RESUME/NEXT stay refused by the lockout.
++        The telemetry field names keep "stop" for tablet compatibility.
++        """
+ 
+         error_text: str | None = None
+ 
+         try:
+             LOGGER.error(
+-                "Battery critical at %.1f%%; requesting Mission Manager STOP",
++                "Battery critical at %.1f%% (confirmed); requesting Mission Manager PAUSE",
+                 percentage,
+             )
+-            # Use the runtime STOP path so its safety-generation ordering stays
+-            # identical to an operator-issued STOP.
+-            ros_bridge.stop_mission()
++            ros_bridge.pause_mission()
+         except Exception as error:
+             error_text = str(error)
+             LOGGER.exception(
+-                "Battery-critical automatic mission STOP failed"
++                "Battery-critical automatic mission PAUSE failed"
+             )
+         finally:
+             rover_state.update(
+@@ -2145,24 +2164,18 @@ class RoverBackendRosNode(Node):
+         self,
+         percentage: float,
+     ) -> None:
+-        """Request one non-blocking STOP only when a mission can operate."""
++        """Request one non-blocking PAUSE only while the mission is RUNNING.
++
++        PAUSED and WAITING_FOR_NEXT are already stationary, and the lockout
++        refuses START/RESUME/NEXT/SKIP, so only RUNNING needs an action.
++        """
+ 
+         mission = rover_state.section("mission")
+-        safety = rover_state.section("safety")
+         mission_state = str(
+             mission.get("state") or "EMPTY"
+         ).strip().upper()
+ 
+-        mission_active = (
+-            bool(safety.get("mission_enable", False))
+-            or mission_state in {
+-                "RUNNING",
+-                "PAUSED",
+-                "WAITING_FOR_NEXT",
+-            }
+-        )
+-
+-        if not mission_active:
++        if mission_state != "RUNNING":
+             return
+ 
+         with self._battery_stop_lock:
+@@ -2193,7 +2206,9 @@ class RoverBackendRosNode(Node):
+         voltage_v = _finite_float(message.voltage)
+         percentage = battery_percentage_from_voltage(voltage_v)
+         remaining_status = classify_battery_percentage(percentage)
+-        mission_lockout = battery_mission_locked(percentage)
++        mission_lockout = self._battery_lockout.update(
++            voltage_v, time.monotonic()
++        )
+ 
+         voice_announcer.on_battery_percent(percentage)
+ 
+@@ -3375,6 +3390,13 @@ class RoverBackendRosNode(Node):
+ 
+         voice_announcer.on_point_event(payload)
+ 
++        # Mission Manager also sends system notifications on this topic
++        # (OBSTACLE_PAUSED, RTK_FLOAT, ESTOP_ACTIVE, ...). They carry no
++        # point_id; forward them to the tablet as system_event.
++        system_event = build_system_event(payload)
++        if system_event is not None:
++            _publish_system_event(system_event)
++
+         event_name = str(payload.get("event") or "").strip().upper()
+ 
+         point_index_raw = payload.get("point_index")
+diff --git a/src/rover_backend/test/test_battery_policy.py b/src/rover_backend/test/test_battery_policy.py
+index 75bdb9f..ff777a5 100644
+--- a/src/rover_backend/test/test_battery_policy.py
++++ b/src/rover_backend/test/test_battery_policy.py
+@@ -1,4 +1,9 @@
++from pathlib import Path
++
++import pytest
++
+ from rover_backend.battery_policy import BATTERY_CRITICAL_PERCENT
++from rover_backend.battery_policy import BatteryLockoutFilter
+ from rover_backend.battery_policy import BATTERY_CRITICAL_VOLTAGE_V
+ from rover_backend.battery_policy import BATTERY_FULL_VOLTAGE_V
+ from rover_backend.battery_policy import battery_mission_locked
+@@ -58,3 +63,84 @@ def test_legacy_percentage_normalization_remains_available():
+     assert normalize_battery_percentage(42.0) == 42.0
+     assert normalize_battery_percentage(-1.0) is None
+     assert normalize_battery_percentage(101.0) is None
++
++
++# ---------------------------------------------------------------- lockout filter
++
++
++def _feed(lockout, samples, *, start=0.0, step=3.0):
++    """Feed (voltage) samples ~3 s apart (the measured /mavros/battery rate)."""
++    t = start
++    states = []
++    for voltage in samples:
++        states.append(lockout.update(voltage, t))
++        t += step
++    return states, t
++
++
++def test_single_sag_sample_does_not_lock():
++    lockout = BatteryLockoutFilter()
++    states, _ = _feed(lockout, [23.5, 25.8, 23.6, 25.9])
++    assert states == [False, False, False, False]
++
++
++def test_sustained_critical_voltage_locks_after_confirmation():
++    lockout = BatteryLockoutFilter()
++    states, _ = _feed(lockout, [23.7, 23.7, 23.7, 23.7])
++    # 3 samples span 6 s < 8 s; the 4th (9 s) confirms.
++    assert states == [False, False, False, True]
++
++
++def test_confirmation_needs_both_samples_and_time():
++    lockout = BatteryLockoutFilter()
++    states, _ = _feed(lockout, [23.7] * 5, step=0.5)      # fast samples, 2 s
++    assert not any(states)
++    states, _ = _feed(lockout, [23.7], start=8.5)
++    assert states == [True]
++
++
++def test_invalid_sample_breaks_the_streak_and_keeps_the_lock():
++    lockout = BatteryLockoutFilter()
++    states, _ = _feed(lockout, [23.7, 23.7, None, 23.7, 23.7])
++    assert not any(states)
++    lockout.locked = True
++    assert lockout.update(float("nan"), 100.0) is True
++
++
++def test_unlock_needs_recovered_voltage_confirmed():
++    lockout = BatteryLockoutFilter()
++    _feed(lockout, [23.7] * 4)
++    assert lockout.locked
++    # 24.0 V is above critical but inside the hysteresis band: stays locked.
++    states, _ = _feed(lockout, [24.0, 24.1, 24.0], start=20.0)
++    assert states == [True, True, True]
++    # One recovered sample is not enough; two in a row unlock.
++    states, _ = _feed(lockout, [26.2, 24.0, 26.2, 26.3], start=40.0)
++    assert states == [True, True, True, False]
++
++
++def test_filter_rejects_inverted_thresholds():
++    with pytest.raises(ValueError):
++        BatteryLockoutFilter(critical_voltage_v=24.0, unlock_voltage_v=23.9)
++
++
++def test_critical_battery_pauses_instead_of_stopping():
++    source = (
++        Path(__file__).resolve().parents[1] / "rover_backend" / "ros_bridge.py"
++    ).read_text()
++    worker = source[
++        source.index("def _critical_battery_stop_worker"):
++        source.index("def _schedule_critical_battery_stop")
++    ]
++    assert "ros_bridge.pause_mission()" in worker
++    assert "stop_mission()" not in worker
++    schedule = source[
++        source.index("def _schedule_critical_battery_stop"):
++        source.index("def _battery_callback")
++    ]
++    assert 'if mission_state != "RUNNING":' in schedule
++    callback = source[
++        source.index("def _battery_callback"):
++        source.index("def _rtk_health_callback")
++    ]
++    assert "self._battery_lockout.update(" in callback
+diff --git a/src/rover_backend/test/test_realtime_transport_contract.py b/src/rover_backend/test/test_realtime_transport_contract.py
+index 890dd46..5281c74 100644
+--- a/src/rover_backend/test/test_realtime_transport_contract.py
++++ b/src/rover_backend/test/test_realtime_transport_contract.py
+@@ -281,7 +281,9 @@ def test_loop_emits_every_point_event_in_order_and_mission_status_on_change(
+         script = {
+             # iteration -> action before records are read
+             1: lambda: [queue.append({"event": "ACCURACY_ACHIEVED", "point_id": "P0003"}),
+-                        queue.append({"event": "COMPLETED", "point_id": "P0003"})],
++                        queue.append({"event": "COMPLETED", "point_id": "P0003"}),
++                        queue.append(rc.build_system_event(
++                            {"event": "OBSTACLE_PAUSED", "message": "Obstacle ahead"}))],
+             4: lambda: state.update("mission", emergency_stop=True),
+             # An RTK START/STOP between periods emits rtk_status at once.
+             5: lambda: rtk_dirty.set(),
+@@ -343,6 +345,10 @@ def test_loop_emits_every_point_event_in_order_and_mission_status_on_change(
+     point_events = [(n, p["event"]) for n, p in emitted if n.startswith("point_")]
+     assert point_events == [("point_event", "ACCURACY_ACHIEVED"),
+                             ("point_completed", "COMPLETED")]
++    # A system notification queued after them is emitted after them, in order.
++    system_events = [(n, p["event"]) for n, p in emitted if n == "system_event"]
++    assert system_events == [("system_event", "OBSTACLE_PAUSED")]
++    assert names.index("point_completed") < names.index("system_event")
+     # Telemetry every iteration; mission_status only first + on e-stop change.
+     assert names.count("telemetry") == 7
+     mission_status = [p for n, p in emitted if n == "mission_status"]
+@@ -420,6 +426,7 @@ def test_ros_point_event_callback_publishes_exactly_the_stored_result(state):
+     fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef)
+               and n.name == "_point_event_callback")
+     published: list[dict] = []
++    system_published: list = []
+     namespace = {
+         "copy": copy, "Any": object, "String": object,
+         "rover_state": state,
+@@ -431,6 +438,8 @@ def test_ros_point_event_callback_publishes_exactly_the_stored_result(state):
+         "_notify_authoritative_state_changed": lambda: None,
+         "_publish_point_result_event": published.append,
+         "build_point_result_event": rc.build_point_result_event,
++        "_publish_system_event": system_published.append,
++        "build_system_event": rc.build_system_event,
+         # Voice announcements are best-effort and not under test here.
+         "voice_announcer": SimpleNamespace(on_point_event=lambda _payload: None),
+     }
+@@ -451,6 +460,7 @@ def test_ros_point_event_callback_publishes_exactly_the_stored_result(state):
+         namespace["_point_event_callback"](node, message)
+ 
+     assert [e["event"] for e in published] == ["ACCURACY_ACHIEVED", "COMPLETED"]
++    assert system_published == []                  # point events are not system events
+     stored = state.section("mission")["point_results"]["P0001"]
+     last = published[-1]
+     assert last["mission_id"] == "mission-1"
+@@ -466,3 +476,27 @@ def test_ros_point_event_callback_publishes_exactly_the_stored_result(state):
+     last["point_result"]["accuracy"]["overall_accuracy_mm"] = -1
+     assert state.section("mission")["point_results"]["P0001"]["accuracy"][
+         "overall_accuracy_mm"] == accuracy["overall_accuracy_mm"]
++
++
++
++def test_system_event_is_built_only_for_pointless_notifications():
++    event = rc.build_system_event(
++        {"event": "rtk_float", "message": "RTK FLOAT", "state": "PAUSED"}
++    )
++    assert event["event"] == "RTK_FLOAT"
++    assert event["event_kind"] == "SYSTEM"
++    assert event["schema"] == rc.SYSTEM_EVENT_SCHEMA
++    assert event["message"] == "RTK FLOAT" and event["state"] == "PAUSED"
++    assert rc.point_event_socket_name(event) == "system_event"
++    assert rc.build_system_event({"event": "COMPLETED", "point_id": "P0001"}) is None
++    assert rc.build_system_event({"message": "no event name"}) is None
++    # Existing point-event naming is unchanged.
++    assert rc.point_event_socket_name({"event": "ACCURACY_ACHIEVED"}) == "point_event"
++
++
++def test_ros_bridge_forwards_system_events():
++    source = (SOURCE / "ros_bridge.py").read_text()
++    callback = source[source.index("def _point_event_callback"):]
++    callback = callback[:callback.index("\n    def ", 10)]
++    assert "build_system_event(payload)" in callback
++    assert "_publish_system_event(system_event)" in callback
+-- 
+2.54.0
+
