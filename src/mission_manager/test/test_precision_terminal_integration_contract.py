@@ -81,6 +81,50 @@ def test_dummy_certificate_path_never_uses_legacy_radius_speed_gate():
     assert "Dummy/extension precision stop certified" in loop
 
 
+def test_dummy_certificate_path_advances_on_rpp_missed():
+    # 2026-10-06: an extension settled 25 mm out (RADIAL20_SETTLED_OUTSIDE_
+    # TOLERANCE) and the mission sat 87 s waiting for a certificate that
+    # could never come. A MISSED for the extension must advance, not wait.
+    loop = function_source("_control_loop")
+    branch = loop.index("if self.terminal_certificate_required:")
+    invalid = loop.index("if not decision.valid:", branch)
+    missed = loop.index('if rpp_outcome != "MISSED":', invalid)
+    waiting = loop.index("Dummy/extension waiting for current precision", missed)
+    advance = loop.index("Dummy/extension MISSED", waiting)
+    next_goal = loop.index(
+        "self._current_path_index = self._next_semantic_index(", advance - 600
+    )
+    certified = loop.index("Dummy/extension precision stop certified", advance)
+    assert invalid < missed < waiting < next_goal < certified
+    missed_block = loop[missed:certified]
+    assert "self._reset_arrival_state()" in missed_block
+    assert "self._publish_goal()" in missed_block
+
+
+def test_skip_on_extension_skips_only_the_extension():
+    # 2026-10-06: SKIP on a stuck extension resolved P0025 (the next row's
+    # first point) as SKIPPED. The extension check must run before the
+    # marking point is looked up, and must write no point result.
+    skip = function_source("_skip_point_service")
+    dummy_check = skip.index("self.POINT_DUMMY_ALIGNMENT")
+    delegate = skip.index("return self._skip_extension_locked(response)")
+    marking_lookup = skip.index("self._current_or_next_marking_number()")
+    assert dummy_check < delegate < marking_lookup
+
+    extension = function_source("_skip_extension_locked")
+    assert "self._next_semantic_index(" in extension
+    assert "self._reset_arrival_state()" in extension
+    assert "self._publish_goal()" in extension
+    for forbidden in (
+        "_point_status",
+        "_store_point_result",
+        "_emit_point_event",
+        "self._state =",
+        "_enable_motion",
+    ):
+        assert forbidden not in extension
+
+
 def test_default_off_legacy_result_path_remains_present():
     loop = function_source("_control_loop")
     assert 'rpp_terminal_outcome == "MISSED"' in loop

@@ -3881,6 +3881,32 @@ class MissionManager(Node):
             response.message = self._last_message
             return response
 
+    def _skip_extension_locked(self, response: Trigger.Response) -> Trigger.Response:
+        """Skip the active extension goal only; caller holds self._lock.
+
+        The extension marks nothing, so no point result is written and the
+        next marking point stays PENDING. Mission state, pause reason and
+        motion permission are left exactly as they were: a RUNNING mission
+        drives on to the next point, a PAUSED or WAITING_FOR_NEXT one stays.
+        """
+        self._reset_arrival_state()
+        self._publish_marking_active(False)
+        self._current_path_index = self._next_semantic_index(
+            self._current_path_index + 1
+        )
+        if self._finish_if_done():
+            response.success = True
+            response.message = "Extension skipped; mission completed"
+            return response
+        self._last_message = "Extension skipped by operator; next point selected"
+        self._emit_system_event("EXTENSION_SKIPPED", self._last_message)
+        self._publish_goal()
+        self._publish_runtime_path()
+        self._publish_status(force=True)
+        response.success = True
+        response.message = self._last_message
+        return response
+
     def _skip_point_service(
         self, _request: Trigger.Request, response: Trigger.Response
     ) -> Trigger.Response:
@@ -3898,6 +3924,16 @@ class MissionManager(Node):
             previous_state = self._state
             previous_pause_reason = self._pause_reason
             previous_resume_available = self._resume_available
+
+            # SKIP while the goal is an extension skips only the extension.
+            # It used to resolve the next marking point instead, so the first
+            # point of the next row was lost (2026-10-06, P0025).
+            if (
+                0 <= self._current_path_index < len(self._path_types)
+                and self._path_types[self._current_path_index]
+                == self.POINT_DUMMY_ALIGNMENT
+            ):
+                return self._skip_extension_locked(response)
 
             marking_number = self._current_or_next_marking_number()
             if marking_number is None:
@@ -5506,10 +5542,52 @@ class MissionManager(Node):
                     now = time.monotonic()
                     decision = self._precision_terminal_decision(now)
                     if not decision.valid:
-                        self._last_message = (
-                            "Dummy/extension waiting for current precision "
-                            f"certificate: {decision.reason}"
+                        # The extension marks nothing, so a miss must never
+                        # stall the mission (2026-10-06: 87 s stuck at 25 mm).
+                        # RPP still runs its radial20 stop here; a MISSED
+                        # result for this goal (position-bound in the result
+                        # callback, cleared on every transition) advances
+                        # like a CAPTURED certificate does.
+                        rpp = (
+                            self._rpp_terminal_result
+                            if isinstance(self._rpp_terminal_result, dict)
+                            else None
                         )
+                        rpp_outcome = (
+                            str(rpp.get("outcome") or "").strip().upper()
+                            if rpp is not None
+                            else ""
+                        )
+                        if rpp_outcome != "MISSED":
+                            self._last_message = (
+                                "Dummy/extension waiting for current precision "
+                                f"certificate: {decision.reason}"
+                            )
+                            return
+                        miss_reason = str(rpp.get("reason") or "RPP_MISSED")
+                        radial_mm = rpp.get("radial_error_mm")
+                        radial_text = (
+                            f"{float(radial_mm):.1f}mm"
+                            if isinstance(radial_mm, (int, float))
+                            and math.isfinite(float(radial_mm))
+                            else "unknown radial"
+                        )
+                        self.get_logger().warning(
+                            "Dummy/extension MISSED "
+                            f"({miss_reason}, {radial_text}); advancing"
+                        )
+                        self._reset_arrival_state()
+                        self._current_path_index = self._next_semantic_index(
+                            self._current_path_index + 1
+                        )
+                        self._last_message = (
+                            f"Dummy/extension MISSED ({miss_reason}, "
+                            f"{radial_text}); not a marking point, "
+                            "next semantic goal selected"
+                        )
+                        self._publish_runtime_path()
+                        self._publish_goal()
+                        self._publish_status(force=True)
                         return
                     self._reset_arrival_state()
                     self._current_path_index = self._next_semantic_index(
