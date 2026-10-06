@@ -1513,9 +1513,9 @@ Pickup procedure: HANDOFF.md §"READ FIRST". Memory: `um982-receiver-swap-plan.m
 **Verified on the live FCU (NSH, disarmed)**
 - `gps status` -> "[gps] not running": the generic GPS driver is **compiled in**. `GPS_1_PROTOCOL` (default 1), `GPS_YAW_OFFSET`, `SER_GPS1_BAUD`, `GPS_DUMP_COMM` exist. No firmware rebuild is needed.
 - `param show` and QGC hide parameters no running module has read (792 of 1604 used). `param show -a` prints the whole table (it ignores the filter).
-- The flashed build is `1fe1789`, variant `differential`, built 2026-09-25 13:25. **That commit is in no local repo.** `/Users/dyx_a1/px4-rover-build` is v1.16.2 (`54f0455`) plus uncommitted rover changes, and has no `differential` board variant. A rebuild from it may not reproduce the flashed firmware.
+- The flashed build is `1fe1789`, variant `differential`, built 2026-09-25 13:25. **Its source is `/Users/dyx_a1/Vetri/4WD_Proto/DYX_4WD_PX4_FIRMWARE_16.2`** (branch `feat/offboard-reverse-arc`; found 2026-10-06 — an earlier note here said no local repo had it). `/Users/dyx_a1/px4-rover-build` (v1.16.2 `54f0455` plus uncommitted rover changes, no `differential` board variant) was **deleted 2026-10-06** — never rebuild from it.
 
-**PX4 NMEA/Unicore driver, read from source (`px4-rover-build`, not the flashed binary)**
+**PX4 NMEA/Unicore driver, read from source (`px4-rover-build` — deleted 2026-10-06; re-read from stock v1.16.2 to re-verify — not the flashed binary)**
 - `GPS_1_PROTOCOL`: 0 auto, 1 u-blox, 2 MTK, 3 Ashtech/Trimble, 4 Emlid, 5 Femtomes, **6 NMEA (generic)**. The Septentrio has its own driver (`SEP_*`).
 - It parses `UNIHEADINGA` (heading, adds 180 degrees assuming the primary antenna is in front, then subtracts `GPS_YAW_OFFSET`), `UNIAGRICA` (velocity and its accuracy), `GPGST` (`eph`, `epv`), `GPGSA`, `GPRMC`.
 - A fix is published when **GGA and velocity** have both arrived, so GST is not required. Without GST, `eph`/`epv` stay at their defaults.
@@ -1560,7 +1560,7 @@ Pickup procedure: HANDOFF.md §"READ FIRST". Memory: `um982-receiver-swap-plan.m
 ## GCS frontend — verified
 
 The verified 4WD GCS frontend is
-`/Users/dyx_a1/Vetri/temp/DYX_GCS_Frontend` (package `dyx-gcs-mobile`,
+`/Users/dyx_a1/Vetri/4WD_Proto/DYX_GCS_Frontend` (package `dyx-gcs-mobile`,
 app id `com.dyxgcs.mobile`, Expo 54 / React Native 0.81). The working branch
 is `realtime-hardening`, and `main` is fast-forwarded to it. The rover is
 `192.168.3.101:5001`. The backend is this `rover_ws` workspace, under
@@ -1609,7 +1609,7 @@ repository.
   `NAV_DLL_ACT` are not set to Disarm here, unlike the 3WD sibling.
 - Do not confuse this backend with `/Users/dyx_a1/Vetri/4WD_SERVER`; that is
   a different repo. The verified frontend is
-  `/Users/dyx_a1/Vetri/temp/DYX_GCS_Frontend`.
+  `/Users/dyx_a1/Vetri/4WD_Proto/DYX_GCS_Frontend`.
 - Do not trust a static `.params` export in `px4-params/` over a
   same-session live param capture from a bag bundle — the exports disagree
   with each other on at least one FCU param.
