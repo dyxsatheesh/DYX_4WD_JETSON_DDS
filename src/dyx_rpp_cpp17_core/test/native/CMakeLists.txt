@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.16)
+project(dyx_rpp_cpp17_native LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_executable(rpp_probe ../rpp_probe.cpp)
+target_include_directories(rpp_probe PRIVATE ../../include)
+enable_testing()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME python_cpp_parity
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../python_parity.py" "$<TARGET_FILE:rpp_probe>")

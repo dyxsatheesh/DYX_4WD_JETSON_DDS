@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>dyx_rpp_cpp17_core</name>
+  <version>0.1.0</version>
+  <description>Non-actuating C++17 RPP pure math primitives for staged parity testing.</description>
+  <maintainer email="noreply@dyxautonomous.com">DYX Autonomous Engineering</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>
