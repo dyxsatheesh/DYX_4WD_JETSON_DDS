@@ -58,3 +58,13 @@ add_test(NAME python_cpp_tracking_metrics_parity
 add_executable(tracking_metrics_native_smoke ../tracking_metrics_native_smoke.cpp)
 target_include_directories(tracking_metrics_native_smoke PRIVATE ../../include)
 add_test(NAME tracking_metrics_native_smoke COMMAND "$<TARGET_FILE:tracking_metrics_native_smoke>")
+
+# Phase 2D1: position-derived stationary evidence (non-actuating).
+add_executable(stationary_detector_probe ../stationary_detector_probe.cpp)
+target_include_directories(stationary_detector_probe PRIVATE ../../include)
+add_test(NAME python_cpp_stationary_detector_parity
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../stationary_detector_parity.py" "$<TARGET_FILE:stationary_detector_probe>")
+
+add_executable(stationary_detector_native_smoke ../stationary_detector_native_smoke.cpp)
+target_include_directories(stationary_detector_native_smoke PRIVATE ../../include)
+add_test(NAME stationary_detector_native_smoke COMMAND "$<TARGET_FILE:stationary_detector_native_smoke>")
