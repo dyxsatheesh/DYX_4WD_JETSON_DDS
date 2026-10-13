@@ -48,3 +48,13 @@ add_test(NAME python_cpp_tracking_stability_parity
 add_executable(tracking_stability_native_smoke ../tracking_stability_native_smoke.cpp)
 target_include_directories(tracking_stability_native_smoke PRIVATE ../../include)
 add_test(NAME tracking_stability_native_smoke COMMAND "$<TARGET_FILE:tracking_stability_native_smoke>")
+
+# Phase 2C4: bounded tracking metrics and exact Python stateful diagnostic replay.
+add_executable(tracking_metrics_probe ../tracking_metrics_probe.cpp)
+target_include_directories(tracking_metrics_probe PRIVATE ../../include)
+add_test(NAME python_cpp_tracking_metrics_parity
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tracking_metrics_parity.py" "$<TARGET_FILE:tracking_metrics_probe>")
+
+add_executable(tracking_metrics_native_smoke ../tracking_metrics_native_smoke.cpp)
+target_include_directories(tracking_metrics_native_smoke PRIVATE ../../include)
+add_test(NAME tracking_metrics_native_smoke COMMAND "$<TARGET_FILE:tracking_metrics_native_smoke>")
