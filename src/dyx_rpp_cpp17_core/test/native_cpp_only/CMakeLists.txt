@@ -70,7 +70,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     dds_mission_runtime_nominal_native_smoke
     dds_mission_runtime_float_native_smoke
     dds_mission_runtime_fault_native_smoke
-    dds_mission_runtime_epoch_native_smoke)
+    dds_mission_runtime_epoch_native_smoke
+    mission_gateway_nominal_native_smoke
+    mission_gateway_authority_native_smoke
+    mission_gateway_safety_native_smoke
+    mission_gateway_epoch_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
