@@ -38,3 +38,13 @@ add_test(NAME python_cpp_speed_regulator_parity
 add_executable(speed_regulator_native_smoke ../speed_regulator_native_smoke.cpp)
 target_include_directories(speed_regulator_native_smoke PRIVATE ../../include)
 add_test(NAME speed_regulator_native_smoke COMMAND "$<TARGET_FILE:speed_regulator_native_smoke>")
+
+# Phase 2C3: stateful tracking recovery and recapture hysteresis parity.
+add_executable(tracking_stability_probe ../tracking_stability_probe.cpp)
+target_include_directories(tracking_stability_probe PRIVATE ../../include)
+add_test(NAME python_cpp_tracking_stability_parity
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tracking_stability_parity.py" "$<TARGET_FILE:tracking_stability_probe>")
+
+add_executable(tracking_stability_native_smoke ../tracking_stability_native_smoke.cpp)
+target_include_directories(tracking_stability_native_smoke PRIVATE ../../include)
+add_test(NAME tracking_stability_native_smoke COMMAND "$<TARGET_FILE:tracking_stability_native_smoke>")
