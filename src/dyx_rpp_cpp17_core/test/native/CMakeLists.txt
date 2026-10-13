@@ -78,3 +78,13 @@ add_test(NAME python_cpp_terminal_stop_parity
 add_executable(terminal_stop_native_smoke ../terminal_stop_native_smoke.cpp)
 target_include_directories(terminal_stop_native_smoke PRIVATE ../../include)
 add_test(NAME terminal_stop_native_smoke COMMAND "$<TARGET_FILE:terminal_stop_native_smoke>")
+
+# Phase 2E1: verified pivot/recenter state machine (directives only, non-actuating).
+add_executable(pivot_motion_probe ../pivot_motion_probe.cpp)
+target_include_directories(pivot_motion_probe PRIVATE ../../include)
+add_test(NAME python_cpp_pivot_motion_parity
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../pivot_motion_parity.py" "$<TARGET_FILE:pivot_motion_probe>")
+
+add_executable(pivot_motion_native_smoke ../pivot_motion_native_smoke.cpp)
+target_include_directories(pivot_motion_native_smoke PRIVATE ../../include)
+add_test(NAME pivot_motion_native_smoke COMMAND "$<TARGET_FILE:pivot_motion_native_smoke>")
