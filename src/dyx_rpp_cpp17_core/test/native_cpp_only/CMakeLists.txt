@@ -23,7 +23,9 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     forward_yaw_rate_native_smoke
     shadow_geometry_native_smoke
     mission_leg_preview_native_smoke
-    mission_leg_preview_safety_native_smoke)
+    mission_leg_preview_safety_native_smoke
+    mission_sequence_native_smoke
+    mission_sequence_safety_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
