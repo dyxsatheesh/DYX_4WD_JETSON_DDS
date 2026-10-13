@@ -39,7 +39,10 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     mission_runtime_install_safety_native_smoke
     safety_arbiter_rtk_native_smoke
     safety_arbiter_battery_native_smoke
-    safety_arbiter_interlocks_native_smoke)
+    safety_arbiter_interlocks_native_smoke
+    safety_mission_float_native_smoke
+    safety_mission_fault_native_smoke
+    safety_mission_hold_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
