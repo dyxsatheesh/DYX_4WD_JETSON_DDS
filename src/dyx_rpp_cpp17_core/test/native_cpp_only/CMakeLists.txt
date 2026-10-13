@@ -31,7 +31,10 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     raw_survey_mission_link_native_smoke
     trajectory_builder_native_smoke
     trajectory_builder_rules_native_smoke
-    trajectory_builder_safety_native_smoke)
+    trajectory_builder_safety_native_smoke
+    mission_snapshot_signature_native_smoke
+    mission_snapshot_staging_native_smoke
+    mission_snapshot_safety_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
