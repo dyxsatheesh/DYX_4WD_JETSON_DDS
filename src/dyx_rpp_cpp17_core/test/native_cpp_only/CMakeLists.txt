@@ -52,7 +52,10 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     manual_spray_recovery_native_smoke
     laser_steady_native_smoke
     laser_blink_native_smoke
-    laser_safety_native_smoke)
+    laser_safety_native_smoke
+    dds_actuator_payload_native_smoke
+    actuator_journal_restart_native_smoke
+    actuator_journal_safety_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
