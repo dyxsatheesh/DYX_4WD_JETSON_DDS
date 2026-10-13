@@ -88,3 +88,13 @@ add_test(NAME python_cpp_pivot_motion_parity
 add_executable(pivot_motion_native_smoke ../pivot_motion_native_smoke.cpp)
 target_include_directories(pivot_motion_native_smoke PRIVATE ../../include)
 add_test(NAME pivot_motion_native_smoke COMMAND "$<TARGET_FILE:pivot_motion_native_smoke>")
+
+# Phase 2E3: NEW forward-only signed yaw-rate contract (not a legacy Python port).
+add_executable(forward_yaw_rate_probe ../forward_yaw_rate_probe.cpp)
+target_include_directories(forward_yaw_rate_probe PRIVATE ../../include)
+add_test(NAME forward_only_yaw_rate_contract
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../forward_yaw_rate_contract.py" "$<TARGET_FILE:forward_yaw_rate_probe>")
+
+add_executable(forward_yaw_rate_native_smoke ../forward_yaw_rate_native_smoke.cpp)
+target_include_directories(forward_yaw_rate_native_smoke PRIVATE ../../include)
+add_test(NAME forward_yaw_rate_native_smoke COMMAND "$<TARGET_FILE:forward_yaw_rate_native_smoke>")
