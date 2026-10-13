@@ -68,3 +68,13 @@ add_test(NAME python_cpp_stationary_detector_parity
 add_executable(stationary_detector_native_smoke ../stationary_detector_native_smoke.cpp)
 target_include_directories(stationary_detector_native_smoke PRIVATE ../../include)
 add_test(NAME stationary_detector_native_smoke COMMAND "$<TARGET_FILE:stationary_detector_native_smoke>")
+
+# Phase 2D2: complete one-shot radial terminal-stop FSM + certificate parity.
+add_executable(terminal_stop_probe ../terminal_stop_probe.cpp)
+target_include_directories(terminal_stop_probe PRIVATE ../../include)
+add_test(NAME python_cpp_terminal_stop_parity
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../terminal_stop_parity.py" "$<TARGET_FILE:terminal_stop_probe>")
+
+add_executable(terminal_stop_native_smoke ../terminal_stop_native_smoke.cpp)
+target_include_directories(terminal_stop_native_smoke PRIVATE ../../include)
+add_test(NAME terminal_stop_native_smoke COMMAND "$<TARGET_FILE:terminal_stop_native_smoke>")
