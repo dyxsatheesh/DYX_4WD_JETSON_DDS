@@ -28,3 +28,13 @@ add_test(NAME python_cpp_precision_guidance_parity
 add_executable(guidance_mock_smoke ../guidance_mock_smoke.cpp)
 target_include_directories(guidance_mock_smoke PRIVATE ../../include)
 add_test(NAME guidance_mock_smoke COMMAND "$<TARGET_FILE:guidance_mock_smoke>")
+
+# Phase 2C2: longitudinal state machine and Python reference replay.
+add_executable(speed_regulator_probe ../speed_regulator_probe.cpp)
+target_include_directories(speed_regulator_probe PRIVATE ../../include)
+add_test(NAME python_cpp_speed_regulator_parity
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../speed_regulator_parity.py" "$<TARGET_FILE:speed_regulator_probe>")
+
+add_executable(speed_regulator_native_smoke ../speed_regulator_native_smoke.cpp)
+target_include_directories(speed_regulator_native_smoke PRIVATE ../../include)
+add_test(NAME speed_regulator_native_smoke COMMAND "$<TARGET_FILE:speed_regulator_native_smoke>")
