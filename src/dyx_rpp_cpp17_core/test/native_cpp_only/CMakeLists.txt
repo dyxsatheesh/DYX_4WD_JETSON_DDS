@@ -62,7 +62,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     dds_transport_restart_native_smoke
     dds_monitor_observe_native_smoke
     dds_monitor_safety_native_smoke
-    dds_monitor_config_native_smoke)
+    dds_monitor_config_native_smoke
+    dds_safety_telemetry_nominal_native_smoke
+    dds_safety_telemetry_stale_native_smoke
+    dds_safety_telemetry_reboot_native_smoke
+    dds_safety_telemetry_fault_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
