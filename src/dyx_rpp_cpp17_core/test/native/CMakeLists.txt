@@ -18,3 +18,13 @@ add_test(NAME python_cpp_path_index_parity
 add_executable(path_index_native_test ../path_index_native_test.cpp)
 target_include_directories(path_index_native_test PRIVATE ../../include)
 add_test(NAME path_index_native_smoke COMMAND "$<TARGET_FILE:path_index_native_test>")
+
+# Phase 2C1: Python/C++17 full steering-target calculation parity.
+add_executable(guidance_probe ../guidance_probe.cpp)
+target_include_directories(guidance_probe PRIVATE ../../include)
+add_test(NAME python_cpp_precision_guidance_parity
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../guidance_parity.py" "$<TARGET_FILE:guidance_probe>")
+
+add_executable(guidance_mock_smoke ../guidance_mock_smoke.cpp)
+target_include_directories(guidance_mock_smoke PRIVATE ../../include)
+add_test(NAME guidance_mock_smoke COMMAND "$<TARGET_FILE:guidance_mock_smoke>")
