@@ -82,7 +82,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     backend_upload_nominal_native_smoke
     backend_upload_update_native_smoke
     backend_upload_authority_native_smoke
-    backend_upload_load_safety_native_smoke)
+    backend_upload_load_safety_native_smoke
+    backend_live_nominal_native_smoke
+    backend_live_stale_native_smoke
+    backend_live_authority_native_smoke
+    backend_live_sources_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
