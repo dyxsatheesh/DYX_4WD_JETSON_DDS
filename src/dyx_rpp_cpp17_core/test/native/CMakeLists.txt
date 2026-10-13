@@ -98,3 +98,12 @@ add_test(NAME forward_only_yaw_rate_contract
 add_executable(forward_yaw_rate_native_smoke ../forward_yaw_rate_native_smoke.cpp)
 target_include_directories(forward_yaw_rate_native_smoke PRIVATE ../../include)
 add_test(NAME forward_yaw_rate_native_smoke COMMAND "$<TARGET_FILE:forward_yaw_rate_native_smoke>")
+
+# Phase 2F1: non-actuating DDS shadow telemetry frame conversion and gating.
+add_executable(shadow_geometry_native_smoke ../shadow_geometry_native_smoke.cpp)
+target_include_directories(shadow_geometry_native_smoke PRIVATE ../../include)
+add_test(NAME shadow_geometry_native_smoke COMMAND "$<TARGET_FILE:shadow_geometry_native_smoke>")
+add_test(NAME shadow_geometry_contract
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../shadow_geometry_contract.py" "$<TARGET_FILE:shadow_geometry_native_smoke>")
+add_test(NAME shadow_node_non_actuating_source_contract
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../shadow_node_source_contract.py")
