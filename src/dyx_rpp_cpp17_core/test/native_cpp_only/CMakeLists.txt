@@ -111,7 +111,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     backend_stream_nominal_native_smoke
     backend_stream_reconnect_native_smoke
     backend_stream_authority_native_smoke
-    backend_stream_epoch_native_smoke)
+    backend_stream_epoch_native_smoke
+    backend_android_nominal_native_smoke
+    backend_android_reconnect_native_smoke
+    backend_android_ordering_native_smoke
+    backend_android_safety_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
