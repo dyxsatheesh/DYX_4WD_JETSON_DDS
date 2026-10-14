@@ -99,7 +99,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     backend_ingress_lease_native_smoke
     backend_ingress_expiry_native_smoke
     backend_ingress_epoch_native_smoke
-    backend_ingress_wire_native_smoke)
+    backend_ingress_wire_native_smoke
+    backend_lifecycle_nominal_native_smoke
+    backend_lifecycle_timeout_native_smoke
+    backend_lifecycle_capacity_native_smoke
+    backend_lifecycle_android_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
