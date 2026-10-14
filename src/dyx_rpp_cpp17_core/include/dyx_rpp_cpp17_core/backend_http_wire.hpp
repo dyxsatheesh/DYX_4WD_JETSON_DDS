@@ -49,6 +49,7 @@ struct BackendHttpWireResponse {
       case 403: reason = "Forbidden"; break;
       case 404: reason = "Not Found"; break;
       case 405: reason = "Method Not Allowed"; break;
+      case 408: reason = "Request Timeout"; break;
       case 409: reason = "Conflict"; break;
       case 412: reason = "Precondition Failed"; break;
       case 413: reason = "Content Too Large"; break;
