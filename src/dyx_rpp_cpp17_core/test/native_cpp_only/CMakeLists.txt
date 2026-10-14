@@ -107,7 +107,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     backend_loopback_deadline_native_smoke
     backend_loopback_incomplete_native_smoke
     backend_loopback_header_limit_native_smoke
-    backend_loopback_stop_native_smoke)
+    backend_loopback_stop_native_smoke
+    backend_stream_nominal_native_smoke
+    backend_stream_reconnect_native_smoke
+    backend_stream_authority_native_smoke
+    backend_stream_epoch_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
