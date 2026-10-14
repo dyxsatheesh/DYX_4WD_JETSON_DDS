@@ -91,7 +91,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     backend_http_commands_native_smoke
     backend_http_security_native_smoke
     backend_http_json_native_smoke
-    backend_http_stale_sse_native_smoke)
+    backend_http_stale_sse_native_smoke
+    backend_loopback_get_native_smoke
+    backend_loopback_commands_native_smoke
+    backend_loopback_security_native_smoke
+    backend_loopback_auth_restart_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
@@ -103,3 +107,21 @@ foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   endif()
   add_test(NAME ${test_name} COMMAND "$<TARGET_FILE:${test_name}>")
 endforeach()
+
+# The offline listener has real loopback sockets. Windows requires ws2_32.
+find_package(Threads REQUIRED)
+foreach(test_name IN ITEMS backend_loopback_get_native_smoke
+                           backend_loopback_commands_native_smoke
+                           backend_loopback_security_native_smoke
+                           backend_loopback_auth_restart_native_smoke)
+  target_link_libraries(${test_name} PRIVATE Threads::Threads)
+  if(WIN32)
+    target_link_libraries(${test_name} PRIVATE ws2_32)
+  endif()
+endforeach()
+add_executable(backend_loopback_readonly_demo ../../tools/loopback_readonly_demo.cpp)
+target_include_directories(backend_loopback_readonly_demo PRIVATE ../../include)
+target_link_libraries(backend_loopback_readonly_demo PRIVATE Threads::Threads)
+if(WIN32)
+  target_link_libraries(backend_loopback_readonly_demo PRIVATE ws2_32)
+endif()
