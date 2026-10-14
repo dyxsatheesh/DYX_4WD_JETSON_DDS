@@ -95,7 +95,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     backend_loopback_get_native_smoke
     backend_loopback_commands_native_smoke
     backend_loopback_security_native_smoke
-    backend_loopback_auth_restart_native_smoke)
+    backend_loopback_auth_restart_native_smoke
+    backend_ingress_lease_native_smoke
+    backend_ingress_expiry_native_smoke
+    backend_ingress_epoch_native_smoke
+    backend_ingress_wire_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
@@ -113,7 +117,11 @@ find_package(Threads REQUIRED)
 foreach(test_name IN ITEMS backend_loopback_get_native_smoke
                            backend_loopback_commands_native_smoke
                            backend_loopback_security_native_smoke
-                           backend_loopback_auth_restart_native_smoke)
+                           backend_loopback_auth_restart_native_smoke
+    backend_ingress_lease_native_smoke
+    backend_ingress_expiry_native_smoke
+    backend_ingress_epoch_native_smoke
+    backend_ingress_wire_native_smoke)
   target_link_libraries(${test_name} PRIVATE Threads::Threads)
   if(WIN32)
     target_link_libraries(${test_name} PRIVATE ws2_32)
