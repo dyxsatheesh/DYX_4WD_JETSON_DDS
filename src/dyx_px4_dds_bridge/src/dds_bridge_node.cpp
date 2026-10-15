@@ -105,6 +105,17 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
   }
 
   void publish_setpoint() {
+    // An opt-in DISABLED test bridge must not send even zeroed PX4 Offboard
+    // keepalives. This mode is not a certified physical stop mechanism.
+    if (!enable_motion_) {
+      have_rpp_ = false;
+      if (++tick_count_ % 50 == 0) {
+        std_msgs::msg::String status;
+        status.data = "INHIBITED:enable_motion_false";
+        status_pub_->publish(status);
+      }
+      return;
+    }
     const auto now_us = static_cast<uint64_t>(
         get_clock()->now().nanoseconds() / 1000LL);
 

@@ -1,0 +1,3 @@
+# Keep Ubuntu entry scripts readable by Bash after Windows Git checkout.
+scripts/DYX_PREJETSON_CUTOVER_AUDIT.sh text eol=lf
+scripts/DYX_PHASE2H5Z_UBUNTU_OFFLINE_TEST.sh text eol=lf
