@@ -279,6 +279,9 @@ class NativeOfflineAndroidMissionEditor final {
     have_screen_=false;requires_sync_=true;screen_={};
     return true; // sequence deliberately not reset
   }
+  bool has_active_screen_for_mission(const std::string& mission_run_id) const {
+    return have_screen_ && screen_.mission_run_id == mission_run_id;
+  }
   bool pending() const { return pending_; }
   bool requires_resync() const { return requires_sync_; }
   bool clock_fault_latched() const { return clock_fault_; }
