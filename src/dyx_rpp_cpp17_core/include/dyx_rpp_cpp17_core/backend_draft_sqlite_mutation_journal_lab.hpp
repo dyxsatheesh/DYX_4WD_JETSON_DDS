@@ -345,6 +345,20 @@ class NativeDraftSqliteMutationJournalLab final {
     return sqlite3_step(st.st)==SQLITE_DONE;
   }
 
+  // Conservative startup gate: even a completed journal record indicates
+  // process-local mission backend state has not been restored. Never silently
+  // initialize an empty NativeBackendMissionUpload against recorded history.
+  bool has_history(bool& exists) {
+    std::lock_guard<std::mutex> lock(mu_);
+    draft_journal_lab_detail::Statement stmt(db_,
+        "SELECT 1 FROM dyx_mission_mutations LIMIT 1");
+    if (!stmt) return false;
+    const int step=sqlite3_step(stmt.st);
+    if (step!=SQLITE_ROW && step!=SQLITE_DONE) return false;
+    exists=step==SQLITE_ROW;
+    return true;
+  }
+
   bool has_pending(bool& pending) {
     using namespace draft_journal_lab_detail;
     std::lock_guard<std::mutex> lock(mu_);
