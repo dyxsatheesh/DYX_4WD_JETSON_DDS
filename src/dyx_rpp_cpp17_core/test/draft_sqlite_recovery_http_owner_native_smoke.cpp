@@ -188,6 +188,119 @@ static void retired() {
   assert(owner.handle_http(http_request("POST",kBackendMissionStartPath)).status==423);
   assert(!owner.has_active_mission());
 }
+// H5P: exercise the canonical owner-bound recovery ingress rather than
+// calling mission and draft handlers through separate simulated adapters.
+static BackendTrustedUploadHttpRequest ingress(const std::string& method,
+                                                const std::string& path) {
+  BackendTrustedUploadHttpRequest v;
+  v.http=http_request(method,path);
+  return v;
+}
+static void ingress_status() {
+  TempDb db("ingress_status");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  auto r=owner.handle_recovery_ingress(ingress("GET",kBackendMissionStatusPath),review());
+  assert(r.status==200 && r.body.find("\"recovery_quarantined\":true")!=std::string::npos);
+  assert(!r.physical_command_emitted && !r.network_io_performed);
+  assert(r.http11_bytes().find("HTTP/1.1 200 OK\r\n")==0);
+  assert(owner.status().quarantined);
+}
+static void ingress_commands() {
+  TempDb db("ingress_commands");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  for(const char* path:{kBackendMissionStartPath,kBackendMissionPausePath,
+                       kBackendMissionResumePath,kBackendMissionNextPath,
+                       kBackendMissionSkipPath}) {
+    const auto r=owner.handle_recovery_ingress(ingress("POST",path),review());
+    assert(r.status==423 && r.body.find("MISSION_RECOVERY_QUARANTINED")!=std::string::npos);
+    assert(!r.physical_command_emitted);
+  }
+  assert(!owner.has_active_mission() && !owner.has_live_backend_draft());
+}
+static void ingress_mutations() {
+  TempDb db("ingress_mutations");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  for(const char* path:{kBackendMissionUploadPath,kBackendMissionUpdatePath,
+                        kBackendMissionLoadPath,kBackendMissionDraftPath}) {
+    auto q=ingress("POST",path);
+    q.trusted_px4_disarmed=true; // still no permission to upload/load
+    const auto r=owner.handle_recovery_ingress(q,review());
+    assert(r.status==423 && r.body.find("RECOVERY_QUARANTINE_COMMANDS_LOCKED")!=std::string::npos);
+    assert(r.http11_bytes().find("HTTP/1.1 423 Locked\r\n")==0);
+    assert(!r.physical_command_emitted && !r.network_io_performed);
+    q.http.method="GET";q.http.body.clear();
+    assert(owner.handle_recovery_ingress(q,review()).status==423);
+  }
+  assert(!owner.has_active_mission() && !owner.has_live_backend_draft());
+}
+static void ingress_preview() {
+  TempDb db("ingress_preview");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  const auto result=owner.handle_recovery_ingress(draft_request(),review());
+  assert(result.status==200);
+  assert(result.body.find("\"preview_only\":true")!=std::string::npos);
+  assert(result.body.find("marking_points")==std::string::npos);
+  assert(!owner.has_active_mission() && !owner.has_live_backend_draft());
+}
+static void ingress_auth() {
+  TempDb db("ingress_auth");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  auto q=ingress("POST",kBackendMissionLoadPath);
+  q.http.principal.authenticated=false;
+  assert(owner.handle_recovery_ingress(q,review()).status==401);
+  q=ingress("POST",kBackendMissionStartPath);
+  q.http.principal.authenticated=false;
+  assert(owner.handle_recovery_ingress(q,review()).status==401);
+  auto d=draft_request();d.http.principal.can_read_mission=false;
+  assert(owner.handle_recovery_ingress(d,review()).status==403);
+  d=draft_request();d.http.principal.operator_session_id="FORGED";
+  assert(owner.handle_recovery_ingress(d,review()).status==403);
+}
+static void ingress_stop() {
+  TempDb db("ingress_stop");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  auto q=ingress("POST",kBackendMissionStopPath);
+  q.http.principal.owns_control_lease=false;
+  q.http.host_received_sec=-1.0;
+  const auto r=owner.handle_recovery_ingress(q,review());
+  assert(r.status==200 && r.body.find("\"safe_stop_intent\":true")!=std::string::npos);
+  assert(owner.status().quarantined);
+  assert(owner.handle_recovery_ingress(ingress("POST",kBackendMissionStartPath),review()).status==423);
+  assert(!owner.emits_hardware_commands());
+}
+static void ingress_invalid() {
+  TempDb db("ingress_invalid");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  auto q=ingress("POST","/api/v1/mission/nonexistent");
+  assert(owner.handle_recovery_ingress(q,review()).status==404);
+  q=ingress("POST",kBackendMissionUploadPath);q.http.method="DELETE";
+  assert(owner.handle_recovery_ingress(q,review()).status==405);
+  q=draft_request();q.http.path+="&duplicate=true";
+  assert(owner.handle_recovery_ingress(q,review()).status==400);
+  q=draft_request();q.http.method="POST";
+  assert(owner.handle_recovery_ingress(q,review()).status==405);
+  q=draft_request();q.http.body="{}";
+  assert(owner.handle_recovery_ingress(q,review()).status==400);
+  assert(owner.status().quarantined);
+}
+static void ingress_tamper() {
+  TempDb db("ingress_tamper");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  assert(owner.handle_recovery_ingress(draft_request(),review()).status==200);
+  sql(db,"UPDATE dyx_mission_recovery_staging SET last_sequence=999");
+  assert(owner.handle_recovery_ingress(draft_request(),review()).status==423);
+  assert(owner.handle_recovery_ingress(draft_request(),review()).status==423);
+  assert(owner.handle_recovery_ingress(ingress("POST",kBackendMissionStartPath),review()).status==423);
+}
+static void ingress_retired() {
+  TempDb db("ingress_retired");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  owner.retire();
+  assert(owner.handle_recovery_ingress(draft_request(),review()).status==423);
+  assert(owner.handle_recovery_ingress(ingress("POST",kBackendMissionStartPath),review()).status==423);
+  assert(owner.handle_recovery_ingress(ingress("POST",kBackendMissionLoadPath),review()).status==423);
+  assert(!owner.has_active_mission());
+}
 int main(int argc,char** argv) {
   if(argc!=2)return 2;
   const std::string m=argv[1];
@@ -200,6 +313,15 @@ int main(int argc,char** argv) {
   else if(m=="tamper")tamper();
   else if(m=="locked")locked();
   else if(m=="retired")retired();
+  else if(m=="ingress_status")ingress_status();
+  else if(m=="ingress_commands")ingress_commands();
+  else if(m=="ingress_mutations")ingress_mutations();
+  else if(m=="ingress_preview")ingress_preview();
+  else if(m=="ingress_auth")ingress_auth();
+  else if(m=="ingress_stop")ingress_stop();
+  else if(m=="ingress_invalid")ingress_invalid();
+  else if(m=="ingress_tamper")ingress_tamper();
+  else if(m=="ingress_retired")ingress_retired();
   else return 2;
   std::cout<<"PASS H5O "<<m<<"\n";
 }

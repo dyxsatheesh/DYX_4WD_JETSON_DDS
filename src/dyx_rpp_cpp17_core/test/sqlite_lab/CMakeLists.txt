@@ -283,3 +283,12 @@ foreach(mode IN ITEMS status commands stop preview auth malformed tamper locked 
   add_test(NAME draft_sqlite_recovery_http_${mode}_native_smoke
       COMMAND "$<TARGET_FILE:draft_sqlite_recovery_http_owner_native_smoke>" ${mode})
 endforeach()
+
+# Phase 2H5P: canonical owner-bound recovery HTTP route policy (offline).
+# Reuses H5O's existing test executable: nine new test cases, no new actuator.
+foreach(mode IN ITEMS ingress_status ingress_commands ingress_mutations
+                      ingress_preview ingress_auth ingress_stop ingress_invalid
+                      ingress_tamper ingress_retired)
+  add_test(NAME draft_sqlite_recovery_h5p_${mode}_native_smoke
+      COMMAND "$<TARGET_FILE:draft_sqlite_recovery_http_owner_native_smoke>" ${mode})
+endforeach()

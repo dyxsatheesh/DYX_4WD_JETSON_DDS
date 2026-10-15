@@ -144,6 +144,49 @@ class NativeOfflineRecoveryStartupOwnerLab final {
     }
   }
 
+  // H5P: one canonical recovery-only routing entry for trusted, typed
+  // requests. No unquarantined backend or mutable draft wire is created.
+  // Caller MUST supply independently authenticated provenance/time/review;
+  // this offline component is NOT a network-facing trust boundary.
+  BackendHttpWireResponse handle_recovery_ingress(
+      const BackendTrustedUploadHttpRequest& input,
+      const DraftQuarantinedReviewLabRequest& independently_verified_review) {
+    const auto& r = input.http;
+    const std::string prefix = std::string(kBackendMissionDraftPath) +
+        "?mission_run_id=";
+
+    // This is the sole read-only recovery draft path. All other requests to
+    // draft/upload/update/load must remain locked, even if disarm is claimed.
+    if (r.path.compare(0, prefix.size(), prefix) == 0)
+      return handle_recovered_draft_http(input, independently_verified_review);
+
+    if (r.path == kBackendMissionUploadPath ||
+        r.path == kBackendMissionUpdatePath ||
+        r.path == kBackendMissionLoadPath ||
+        r.path == kBackendMissionDraftPath) {
+      if (!r.principal.authenticated)
+        return http_error(401, "AUTHENTICATION_REQUIRED");
+      if (r.method != "GET" && r.method != "POST")
+        return http_error(405, "METHOD_NOT_ALLOWED");
+      return http_error(423, "RECOVERY_QUARANTINE_COMMANDS_LOCKED");
+    }
+
+    // Allowlisted mission status, telemetry and command routes use the exact
+    // same H5L-quarantined gateway via H5O's typed HTTP adapter. An unknown
+    // request never falls through to an upload backend or separate gateway.
+    if (r.path == kBackendMissionStatusPath ||
+        r.path == kBackendLiveStatusPath ||
+        r.path == kBackendMissionStartPath ||
+        r.path == kBackendMissionPausePath ||
+        r.path == kBackendMissionResumePath ||
+        r.path == kBackendMissionNextPath ||
+        r.path == kBackendMissionSkipPath ||
+        r.path == kBackendMissionStopPath)
+      return handle_http(r);
+
+    return http_error(404, "UNKNOWN_API_ROUTE");
+  }
+
   // Retiring the owner is irreversible. It does NOT release the durable fence
   // or the process-local gateway quarantine. Restart with a new owner only.
   void retire() { boot_.retire(); }
