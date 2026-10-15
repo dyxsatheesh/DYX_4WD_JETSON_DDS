@@ -119,7 +119,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     backend_android_controls_nominal_native_smoke
     backend_android_controls_safety_native_smoke
     backend_android_controls_timeout_native_smoke
-    backend_android_controls_epoch_native_smoke)
+    backend_android_controls_epoch_native_smoke
+    backend_android_editor_nominal_native_smoke
+    backend_android_editor_safety_native_smoke
+    backend_android_editor_timeout_native_smoke
+    backend_android_editor_epoch_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
