@@ -143,7 +143,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     backend_draft_ingress_lab_nominal_native_smoke
     backend_draft_ingress_lab_security_native_smoke
     backend_draft_ingress_lab_replay_native_smoke
-    backend_draft_ingress_lab_recovery_native_smoke)
+    backend_draft_ingress_lab_recovery_native_smoke
+    backend_draft_framing_nominal_native_smoke
+    backend_draft_framing_smuggling_native_smoke
+    backend_draft_framing_binding_native_smoke
+    backend_draft_framing_recovery_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
