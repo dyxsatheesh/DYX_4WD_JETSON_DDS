@@ -1,0 +1,41 @@
+# OPT-IN ONLY. DO NOT ENABLE for live mission control. Requires manual review.
+[Unit]
+Description=DYX observation-only C++17 Jetson preflight
+After=local-fs.target
+StartLimitIntervalSec=300
+StartLimitBurst=4
+
+[Service]
+Type=notify
+NotifyAccess=main
+# Install manually into /opt/dyx/preflight; no rover launch or DDS bridge.
+ExecStart=/opt/dyx/preflight/bin/dyx_jetson_preflight --run
+User=dyx-preflight
+Group=dyx-preflight
+WorkingDirectory=/var/lib/dyx-preflight
+StateDirectory=dyx-preflight
+RuntimeDirectory=dyx-preflight
+UMask=0077
+Restart=on-failure
+RestartSec=10s
+WatchdogSec=15s
+TimeoutStartSec=10s
+TimeoutStopSec=10s
+KillSignal=SIGTERM
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+DevicePolicy=closed
+CapabilityBoundingSet=
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+StandardOutput=journal
+StandardError=journal
+
+# Deliberately no [Install] section: never accidentally enable on boot.
