@@ -318,3 +318,13 @@ foreach(mode IN ITEMS boot_closed status forged_client unauth identity replay
       COMMAND "$<TARGET_FILE:draft_sqlite_recovery_http_owner_native_smoke>"
               trusted_${mode})
 endforeach()
+
+# Phase 2H5T: OFFLINE host admission/heartbeat/shutdown simulation only.
+# The host never creates a process, listener, DDS publisher or actuator.
+foreach(mode IN ITEMS boot_closed bad_config bad_start admission commands
+                      preview identity watchdog heartbeat clock receipt_time
+                      shutdown restart parallel shutdown_race)
+  add_test(NAME draft_sqlite_recovery_h5t_${mode}_native_smoke
+      COMMAND "$<TARGET_FILE:draft_sqlite_recovery_http_owner_native_smoke>"
+              host_${mode})
+endforeach()

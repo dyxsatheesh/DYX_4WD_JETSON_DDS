@@ -3,6 +3,7 @@
 #include "dyx_rpp_cpp17_core/backend_recovery_startup_owner_lab.hpp"
 #include "dyx_rpp_cpp17_core/backend_recovery_service_lifecycle_lab.hpp"
 #include "dyx_rpp_cpp17_core/backend_recovery_trusted_ingress_lab.hpp"
+#include "dyx_rpp_cpp17_core/backend_recovery_host_supervisor_lab.hpp"
 #include "dyx_rpp_cpp17_core/backend_draft_sqlite_store_lab.hpp"
 #include <cassert>
 #include <atomic>
@@ -785,6 +786,233 @@ static void ingress_h5s_restart() {
     svc.shutdown();
   }
 }
+
+// H5T: offline host supervision; no actual process, listener, watchdog thread,
+// PX4, motor, spray or physical STOP. Trusted facts are test-only contracts.
+static RecoveryHostStartupEvidenceLab host_start(double now=100.0) {
+  RecoveryHostStartupEvidenceLab e;
+  e.independent_recovery_review_approved=true;
+  e.independent_outputs_quiesced=true;
+  e.verified_operator_session_id="SESSION_H4E_OPERATOR";
+  e.trusted_monotonic_now_sec=now;
+  return e;
+}
+static BackendHttpWireResponse host_get(NativeOfflineRecoveryHostSupervisorLab& host,
+                                         std::uint64_t id=1, double rx=100.1,
+                                         double now=100.2) {
+  return host.dispatch(ingress("GET",kBackendMissionStatusPath),proof(id,rx),now);
+}
+static void host_boot_closed() {
+  TempDb db("h5t_boot_closed");prepare(db);
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+  auto before=host.snapshot();
+  assert(before.state==RecoveryHostSupervisorLabState::initial_closed);
+  assert(!before.accepts_recovery_requests && !before.hardware_command_emitted);
+  assert(host_get(host).status==423);
+  assert(!host.observe_heartbeat(100.0));
+  host.shutdown();
+  assert(host.snapshot().state==RecoveryHostSupervisorLabState::permanently_closed);
+}
+static void host_bad_config() {
+  TempDb db("h5t_bad_config");prepare(db);
+  std::vector<RecoveryHostSupervisorLabConfig> invalid;
+  auto c=RecoveryHostSupervisorLabConfig{};
+  c.offline_no_listener_attached=false;invalid.push_back(c);
+  c={};c.offline_no_dds_publisher_attached=false;invalid.push_back(c);
+  c={};c.offline_no_actuator_attached=false;invalid.push_back(c);
+  c={};c.max_heartbeat_gap_sec=0.0;invalid.push_back(c);
+  c={};c.max_heartbeat_gap_sec=61.0;invalid.push_back(c);
+  c={};c.max_heartbeat_gap_sec=std::numeric_limits<double>::quiet_NaN();
+  invalid.push_back(c);
+  for(const auto& config: invalid) {
+    NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review(),config);
+    assert(!host.start_recovery_only(host_start()));
+    assert(host.snapshot().state==RecoveryHostSupervisorLabState::permanently_closed);
+    assert(host_get(host).status==423);
+    assert(!host.start_recovery_only(host_start()));
+  }
+}
+static void host_bad_start() {
+  TempDb db("h5t_bad_start");prepare(db);
+  auto verify_failed=[&](const RecoveryHostStartupEvidenceLab& e) {
+    NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+    assert(!host.start_recovery_only(e));
+    assert(!host.start_recovery_only(host_start()));
+    assert(host.snapshot().state==RecoveryHostSupervisorLabState::permanently_closed);
+  };
+  auto e=host_start();e.independent_recovery_review_approved=false;
+  verify_failed(e);
+  e=host_start();e.independent_outputs_quiesced=false;verify_failed(e);
+  e=host_start();e.verified_operator_session_id="OTHER";verify_failed(e);
+  e=host_start();e.trusted_monotonic_now_sec=-1;verify_failed(e);
+  e=host_start();e.trusted_monotonic_now_sec=std::numeric_limits<double>::infinity();
+  verify_failed(e);
+}
+static void host_admission() {
+  TempDb db("h5t_admission");prepare(db);
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+  assert(host.start_recovery_only(host_start()));
+  assert(!host.start_recovery_only(host_start()));
+  auto r=host_get(host);
+  assert(r.status==200 && r.body.find("\"recovery_quarantined\":true")!=std::string::npos);
+  auto snap=host.snapshot();
+  assert(snap.accepts_recovery_requests);
+  assert(!snap.can_issue_motion && !snap.can_upload_or_load);
+  assert(!snap.hardware_command_emitted && !snap.network_io_performed &&
+         !snap.physical_stop_confirmed);
+}
+static void host_commands() {
+  TempDb db("h5t_commands");prepare(db);
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+  assert(host.start_recovery_only(host_start()));
+  std::uint64_t id=1;
+  for(const auto* path:{kBackendMissionStartPath,kBackendMissionPausePath,
+      kBackendMissionResumePath,kBackendMissionNextPath,kBackendMissionSkipPath,
+      kBackendMissionUploadPath,kBackendMissionUpdatePath,kBackendMissionLoadPath}) {
+    auto q=ingress("POST",path);q.trusted_px4_disarmed=true;
+    auto r=host.dispatch(q,proof(id++,100.1),100.2);
+    assert(r.status==423 && !r.physical_command_emitted && !r.network_io_performed);
+  }
+  const auto stop=host.dispatch(ingress("POST",kBackendMissionStopPath),
+                                proof(id++,100.1),100.2);
+  assert(stop.status==200 && stop.body.find("\"safe_stop_intent\":true")!=std::string::npos);
+  assert(!host.snapshot().physical_stop_confirmed);
+}
+static void host_preview() {
+  TempDb db("h5t_preview");prepare(db);
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+  assert(host.start_recovery_only(host_start()));
+  auto r=host.dispatch(draft_request(),proof(1,100.1),100.2);
+  assert(r.status==200 && r.body.find("\"preview_only\":true")!=std::string::npos);
+  assert(r.body.find("marking_points")==std::string::npos);
+  sql(db,"UPDATE dyx_mission_recovery_staging SET last_sequence=999");
+  assert(host.dispatch(draft_request(),proof(2,100.2),100.3).status==423);
+  assert(host.dispatch(ingress("POST",kBackendMissionStartPath),
+                       proof(3,100.3),100.4).status==423);
+}
+static void host_identity() {
+  TempDb db("h5t_identity");prepare(db);
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+  assert(host.start_recovery_only(host_start()));
+  auto q=draft_request();q.trusted_px4_disarmed=true;
+  q.http.principal.authenticated=false;
+  q.http.principal.operator_session_id="CLIENT_FORGED";
+  q.http.host_received_sec=-1000;
+  assert(host.dispatch(q,proof(1,100.1),100.2).status==200);
+  auto e=proof(2,100.2);e.verified_transport_authenticated=false;
+  assert(host.dispatch(q,e,100.3).status==401);
+  e=proof(2,100.2);e.verified_operator_session_id="OTHER";
+  assert(host.dispatch(q,e,100.3).status==403);
+  assert(host.snapshot().accepts_recovery_requests);
+}
+static void host_watchdog() {
+  TempDb db("h5t_watchdog");prepare(db);
+  RecoveryHostSupervisorLabConfig cfg;cfg.max_heartbeat_gap_sec=2.0;
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review(),cfg);
+  assert(host.start_recovery_only(host_start()));
+  assert(host_get(host,1,100.1,101.0).status==200);
+  // No automatic thread: simulated host loop checks the deadline explicitly.
+  assert(!host.observe_heartbeat(102.01));
+  assert(host.snapshot().state==RecoveryHostSupervisorLabState::permanently_closed);
+  assert(host_get(host,2,102.1,102.2).status==423);
+  assert(!host.start_recovery_only(host_start()));
+}
+static void host_heartbeat() {
+  TempDb db("h5t_heartbeat");prepare(db);
+  RecoveryHostSupervisorLabConfig cfg;cfg.max_heartbeat_gap_sec=2.0;
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review(),cfg);
+  assert(host.start_recovery_only(host_start()));
+  for(int i=1;i<=18;++i)assert(host.observe_heartbeat(100.0+i));
+  assert(host.dispatch(ingress("GET",kBackendMissionStatusPath),
+                       proof(1,118.0),118.1).status==200);
+  assert(host.snapshot().last_heartbeat_sec==118.0);
+  assert(!host.observe_heartbeat(120.1));
+  assert(host.snapshot().state==RecoveryHostSupervisorLabState::permanently_closed);
+}
+static void host_clock() {
+  TempDb db("h5t_clock");prepare(db);
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+  assert(host.start_recovery_only(host_start()));
+  assert(host.observe_heartbeat(101.0));
+  assert(host_get(host,1,101.0,100.9).status==423);
+  assert(host.snapshot().state==RecoveryHostSupervisorLabState::permanently_closed);
+  NativeOfflineRecoveryHostSupervisorLab other(db.file.string(),review());
+  assert(other.start_recovery_only(host_start()));
+  assert(!other.observe_heartbeat(std::numeric_limits<double>::quiet_NaN()));
+  assert(other.snapshot().state==RecoveryHostSupervisorLabState::permanently_closed);
+}
+static void host_receipt_time() {
+  TempDb db("h5t_receipt");prepare(db);
+  auto deny_case=[&](double received, double now) {
+    NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+    assert(host.start_recovery_only(host_start()));
+    assert(host.dispatch(draft_request(),proof(1,received),now).status==423);
+    assert(host.snapshot().state==RecoveryHostSupervisorLabState::permanently_closed);
+  };
+  deny_case(99.0,100.1); // before boot
+  deny_case(101.0,100.1); // claimed time in future
+  deny_case(std::numeric_limits<double>::infinity(),100.1);
+}
+static void host_shutdown() {
+  TempDb db("h5t_shutdown");prepare(db);
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+  assert(host.start_recovery_only(host_start()));
+  host.shutdown();host.shutdown();
+  assert(host.snapshot().state==RecoveryHostSupervisorLabState::permanently_closed);
+  assert(host_get(host).status==423 && !host.observe_heartbeat(101));
+  assert(!host.start_recovery_only(host_start()));
+}
+static void host_restart() {
+  TempDb db("h5t_restart");prepare(db);
+  for(int i=0;i<4;++i) {
+    NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+    assert(host_get(host).status==423);
+    assert(host.start_recovery_only(host_start()));
+    assert(host.dispatch(draft_request(),proof(1,100.1),100.2).status==200);
+    assert(host.dispatch(ingress("POST",kBackendMissionStartPath),
+                         proof(2,100.2),100.3).status==423);
+    host.shutdown();
+  }
+  // A new instance intentionally has a NEW in-memory request ID fence.
+  // Cross-process durable replay protection is a separate unsolved need.
+}
+static void host_parallel() {
+  TempDb db("h5t_parallel");prepare(db);
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+  assert(host.start_recovery_only(host_start()));
+  std::atomic<std::uint64_t> ids{1};std::atomic<int> good{0};
+  std::vector<std::thread> workers;
+  for(int t=0;t<5;++t)workers.emplace_back([&] {
+    for(int i=0;i<9;++i) {
+      const auto id=ids.fetch_add(1);
+      const auto r=host_get(host,id,100.1,100.2);
+      assert(r.status==200 || r.status==409);
+      assert(!r.physical_command_emitted && !r.network_io_performed);
+      if(r.status==200)++good;
+    }
+  });
+  for(auto& w:workers)w.join();
+  assert(good.load()>0 && host.snapshot().accepts_recovery_requests);
+}
+static void host_shutdown_race() {
+  TempDb db("h5t_shutdown_race");prepare(db);
+  NativeOfflineRecoveryHostSupervisorLab host(db.file.string(),review());
+  assert(host.start_recovery_only(host_start()));
+  std::atomic<std::uint64_t> ids{1};
+  std::vector<std::thread> workers;
+  for(int t=0;t<4;++t)workers.emplace_back([&] {
+    for(int i=0;i<10;++i) {
+      const auto r=host_get(host,ids.fetch_add(1),100.1,100.2);
+      assert(r.status==200 || r.status==409 || r.status==423);
+      assert(!r.physical_command_emitted);
+    }
+  });
+  workers.emplace_back([&]{host.shutdown();});
+  for(auto& w:workers)w.join();
+  assert(host.snapshot().state==RecoveryHostSupervisorLabState::permanently_closed);
+  assert(host_get(host,1000).status==423);
+}
+
 int main(int argc,char** argv) {
   if(argc!=2)return 2;
   const std::string m=argv[1];
@@ -841,6 +1069,21 @@ int main(int argc,char** argv) {
   else if(m=="trusted_shutdown")ingress_h5s_shutdown();
   else if(m=="trusted_race")ingress_h5s_race();
   else if(m=="trusted_restart")ingress_h5s_restart();
+  else if(m=="host_boot_closed")host_boot_closed();
+  else if(m=="host_bad_config")host_bad_config();
+  else if(m=="host_bad_start")host_bad_start();
+  else if(m=="host_admission")host_admission();
+  else if(m=="host_commands")host_commands();
+  else if(m=="host_preview")host_preview();
+  else if(m=="host_identity")host_identity();
+  else if(m=="host_watchdog")host_watchdog();
+  else if(m=="host_heartbeat")host_heartbeat();
+  else if(m=="host_clock")host_clock();
+  else if(m=="host_receipt_time")host_receipt_time();
+  else if(m=="host_shutdown")host_shutdown();
+  else if(m=="host_restart")host_restart();
+  else if(m=="host_parallel")host_parallel();
+  else if(m=="host_shutdown_race")host_shutdown_race();
   else return 2;
   std::cout<<"PASS H5O "<<m<<"\n";
 }
