@@ -170,12 +170,15 @@ static void active() {
   NativeMissionCommandGateway g;NativeBackendMissionUpload b(g);
   NativeOfflineQuarantinedBootGuardLab guard(db.file.string(),g,b);
   assert(guard.begin(review()).can_read_preview);
-  // External *direct* backend mutation bypasses this lab, proving why the
-  // production ingress MUST enforce sole ownership of backend mutation.
-  assert(b.handle(upload_req(kBackendMissionUploadPath,1,11)).http_status==200);
-  assert(guard.handle(get(),review()).http_status==423);
-  assert(guard.state()==DraftQuarantinedBootGuardLabState::locked_permanently);
-  assert(b.has_draft());
+  // H5L closes the demonstrated H5K direct-backend bypass on the SAME
+  // gateway: a second upload backend referring to g is also quarantined.
+  assert(g.recovery_quarantined() && b.recovery_quarantined());
+  assert(b.handle(upload_req(kBackendMissionUploadPath,1,11)).http_status==423);
+  NativeBackendMissionUpload alternate(g);
+  assert(alternate.handle(upload_req(kBackendMissionUploadPath,1,11)).http_status==423);
+  assert(guard.handle(get(),review()).http_status==200);
+  assert(guard.state()==DraftQuarantinedBootGuardLabState::read_only_preview);
+  assert(!b.has_draft());
 }
 static void failed_boot() {
   TempDb db("failed_boot");prepare(db,false);

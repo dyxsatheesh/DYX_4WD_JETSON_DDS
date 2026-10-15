@@ -157,6 +157,20 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     backend_draft_restart_store_fault_native_smoke
     backend_draft_restart_recovery_native_smoke)
 
+# Phase 2H5L: real C++17 gateway/backend quarantine bypass regression tests.
+add_executable(backend_recovery_quarantine_native_smoke
+    ../backend_recovery_quarantine_native_smoke.cpp)
+target_include_directories(backend_recovery_quarantine_native_smoke PRIVATE ../../include)
+if(MSVC)
+  target_compile_options(backend_recovery_quarantine_native_smoke PRIVATE /W4 /UNDEBUG)
+else()
+  target_compile_options(backend_recovery_quarantine_native_smoke PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+endif()
+foreach(mode IN ITEMS legacy upload alternate load actions stop epoch active sticky)
+  add_test(NAME backend_recovery_quarantine_${mode}_native_smoke
+      COMMAND "$<TARGET_FILE:backend_recovery_quarantine_native_smoke>" ${mode})
+endforeach()
+
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
   target_include_directories(${test_name} PRIVATE ../../include)

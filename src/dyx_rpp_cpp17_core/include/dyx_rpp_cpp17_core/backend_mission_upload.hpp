@@ -63,7 +63,13 @@ class NativeBackendMissionUpload final {
   explicit NativeBackendMissionUpload(NativeMissionCommandGateway &gateway)
       : gateway_(gateway) {}
 
+  // One-way latch shared with every upload backend using the same gateway.
+  void latch_recovery_quarantine() { gateway_.latch_recovery_quarantine(); }
+  bool recovery_quarantined() const { return gateway_.recovery_quarantined(); }
+
   BackendMissionUploadResponse handle(const BackendMissionUploadRequest &req) {
+    if (gateway_.recovery_quarantined())
+      return reply(423, "RECOVERY_QUARANTINE_COMMANDS_LOCKED");
     const bool upload = req.path == kBackendMissionUploadPath;
     const bool update = req.path == kBackendMissionUpdatePath;
     const bool load = req.path == kBackendMissionLoadPath;
@@ -115,6 +121,7 @@ class NativeBackendMissionUpload final {
   // Explicit authorized discard is only possible BEFORE LOAD. Cancel never
   // stops an active rover mission: use authenticated STOP and PX4 safe-stop.
   bool discard_unloaded(bool verified_operator, bool verified_disarmed) {
+    if (gateway_.recovery_quarantined()) return false;
     if (!verified_operator || !verified_disarmed || !draft_ || draft_->loaded)
       return false;
     draft_.reset();
@@ -123,6 +130,7 @@ class NativeBackendMissionUpload final {
   bool has_draft() const { return draft_.has_value(); }
   bool loaded() const { return draft_ && draft_->loaded; }
   const PreparedPathSnapshot *preview_snapshot() const {
+    if (gateway_.recovery_quarantined()) return nullptr;
     return draft_ ? &draft_->snapshot : nullptr;  // immutable read-only preview
   }
 

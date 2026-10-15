@@ -31,8 +31,8 @@ struct DraftQuarantinedBootGuardLabResult {
 class NativeOfflineQuarantinedBootGuardLab final {
  public:
   NativeOfflineQuarantinedBootGuardLab(
-      std::string file, const NativeMissionCommandGateway& gateway,
-      const NativeBackendMissionUpload& backend)
+      std::string file, NativeMissionCommandGateway& gateway,
+      NativeBackendMissionUpload& backend)
       : review_(std::move(file)), gateway_(gateway), backend_(backend) {}
   NativeOfflineQuarantinedBootGuardLab(
       const NativeOfflineQuarantinedBootGuardLab&) = delete;
@@ -46,6 +46,16 @@ class NativeOfflineQuarantinedBootGuardLab final {
     if (state_!=DraftQuarantinedBootGuardLabState::new_instance)
       return make_result(DraftQuarantinedReviewLabState::denied);
     state_=DraftQuarantinedBootGuardLabState::locked_permanently;
+    // First reject an already-active live backend BEFORE latching STOP so
+    // a stopped active mission can never masquerade as a clean startup.
+    if (gateway_.has_active_mission() || backend_.has_draft()) {
+      backend_.latch_recovery_quarantine();
+      return make_result(DraftQuarantinedReviewLabState::backend_active);
+    }
+    // This closes direct backend.handle()/gateway.load()/dispatch() bypasses
+    // using THESE SAME objects. A separate fresh gateway remains a separate
+    // authority; production must enforce exclusive construction/ownership.
+    backend_.latch_recovery_quarantine();
     const auto audit=review_.inspect(request,gateway_,backend_);
     if (audit.state!=DraftQuarantinedReviewLabState::reviewed_preview_only ||
         !audit.read_only_snapshot || !audit.mission_mode)
@@ -133,6 +143,7 @@ class NativeOfflineQuarantinedBootGuardLab final {
   // Irreversible for this instance; it never authorizes new commands.
   void retire() {
     state_=DraftQuarantinedBootGuardLabState::locked_permanently;
+    backend_.latch_recovery_quarantine();
     pin_=Pin{};
   }
   DraftQuarantinedBootGuardLabState state() const { return state_; }
@@ -151,8 +162,8 @@ class NativeOfflineQuarantinedBootGuardLab final {
     return result;
   }
   NativeOfflineQuarantinedPreviewReviewLab review_;
-  const NativeMissionCommandGateway& gateway_;
-  const NativeBackendMissionUpload& backend_;
+  NativeMissionCommandGateway& gateway_;
+  NativeBackendMissionUpload& backend_;
   DraftQuarantinedBootGuardLabState state_{
       DraftQuarantinedBootGuardLabState::new_instance};
   Pin pin_{};

@@ -22,7 +22,7 @@ enum class ClientMissionAction { start, pause, resume, next, skip, stop };
 enum class ClientCommandStatus {
   accepted, unauthorized, invalid_identity, wrong_run, no_mission,
   duplicate_or_reordered, invalid_clock, stale_or_consumed_safety,
-  invalid_stage, runtime_rejected, run_id_reused
+  invalid_stage, runtime_rejected, run_id_reused, recovery_quarantined
 };
 inline const char *client_command_status_name(ClientCommandStatus s) {
   switch(s) {
@@ -37,6 +37,7 @@ inline const char *client_command_status_name(ClientCommandStatus s) {
     case ClientCommandStatus::invalid_stage: return "INVALID_MISSION_STAGE";
     case ClientCommandStatus::runtime_rejected: return "RUNTIME_REJECTED";
     case ClientCommandStatus::run_id_reused: return "RUN_ID_REUSED";
+    case ClientCommandStatus::recovery_quarantined: return "RECOVERY_QUARANTINED";
   }
   return "INVALID_STATUS";
 }
@@ -76,6 +77,7 @@ class NativeMissionCommandGateway final {
                            bool trusted_upload_authorized,
                            bool trusted_control_lease,
                            bool trusted_px4_disarmed) {
+    if (recovery_quarantined_) return ClientCommandStatus::recovery_quarantined;
     if (!trusted_upload_authorized || !trusted_control_lease ||
         !trusted_px4_disarmed) return ClientCommandStatus::unauthorized;
     if (!valid_native_mission_run_id(run_id) ||
@@ -112,6 +114,13 @@ class NativeMissionCommandGateway final {
                                bool operator_motion_enabled,
                                bool physical_emergency_stop,
                                MissionSequenceInput evidence) {
+    // A quarantined gateway cannot advance an active mission, even if a
+    // caller supplies an independently healthy-looking telemetry tick.
+    if (recovery_quarantined_) {
+      mission_session_active=false;
+      operator_motion_enabled=false;
+      physical_emergency_stop=true;
+    }
     auto result=runtime_.step(host_now_sec,mission_session_active,
                               operator_motion_enabled,physical_emergency_stop,
                               std::move(evidence));
@@ -130,6 +139,10 @@ class NativeMissionCommandGateway final {
     // or a valid time. It DOES require an authenticated operator session;
     // the separate unconditional force_stop() is for safety hardware/software.
     if (!request.authenticated_operator) return reply(ClientCommandStatus::unauthorized);
+    // STOP stays on its independent authenticated path; no other command can
+    // use a quarantined gateway, even by bypassing the HTTP ingress wrapper.
+    if (recovery_quarantined_ && request.action!=ClientMissionAction::stop)
+      return reply(ClientCommandStatus::recovery_quarantined);
     if (!valid_native_mission_run_id(request.operator_session_id) ||
         !valid_native_mission_run_id(request.mission_run_id) ||
         request.session_sequence==0) return reply(ClientCommandStatus::invalid_identity);
@@ -198,6 +211,7 @@ class NativeMissionCommandGateway final {
   void force_stop() {safe_stop();}
   bool begin_new_disarmed_px4_epoch(bool trusted_authorized,
                                     bool trusted_px4_disarmed){
+    if (recovery_quarantined_) return false;
     const bool success=runtime_.begin_new_disarmed_px4_epoch(
         trusted_authorized,trusted_px4_disarmed);
     if (success) {
@@ -207,6 +221,14 @@ class NativeMissionCommandGateway final {
     }
     return success;
   }
+  // Process-local, one-way safety latch. It is NOT a substitute for the
+  // durable SQLite quarantine or an exclusive production ingress owner.
+  // All gateway calls must be serialized by the owning application.
+  void latch_recovery_quarantine() {
+    recovery_quarantined_=true;
+    safe_stop(); // decision-side STOP; physical STOP is independent.
+  }
+  bool recovery_quarantined() const {return recovery_quarantined_;}
   const MissionSequencer &mission() const {return runtime_.mission();}
   bool safe_stop_requested() const {return stop_requested_;}
   bool has_active_mission() const {return runtime_.has_active_mission();}
@@ -238,6 +260,7 @@ class NativeMissionCommandGateway final {
   std::optional<std::uint64_t> highest_sequence_{};
   std::optional<double> last_command_time_{};
   bool control_tick_consumed_{true},stop_requested_{false};
+  bool recovery_quarantined_{false};
 };
 
 } // namespace dyx::rpp
