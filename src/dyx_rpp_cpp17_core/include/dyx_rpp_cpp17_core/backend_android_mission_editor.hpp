@@ -267,6 +267,11 @@ class NativeOfflineAndroidMissionEditor final {
     requires_sync_=false;
     return true;
   }
+  // Any undecidable outcome (codec failure, lost reply, untrusted response)
+  // must clear the pending UI proposal and require an authoritative GET.
+  // This never accepts an action, starts a mission or resets its sequence.
+  void abandon_pending_as_unknown() { pending_=false; requires_sync_=true; }
+
   void disconnected() {
     pending_=false;requires_sync_=true;
     screen_.ui_network_connected=false;
