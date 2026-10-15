@@ -173,7 +173,10 @@ inline bool journal_schema_ok(sqlite3* db) {
   Statement st(db,"SELECT nonce,session_id,epoch,mission_run_id,sequence,route,"
                   "request_json,status,http_status,response_json,snapshot_json,stage "
                   "FROM dyx_mission_mutations LIMIT 0");
-  return static_cast<bool>(st);
+  Statement barrier(db,"SELECT session_id,old_epoch,new_epoch,nonce,old_generation,"
+                       "new_generation,mission_run_id,signature,revision,"
+                       "last_sequence,phase FROM dyx_mission_recovery_epoch_barrier LIMIT 0");
+  return static_cast<bool>(st) && static_cast<bool>(barrier);
 }
 } // namespace draft_journal_lab_detail
 
@@ -203,6 +206,17 @@ class NativeDraftSqliteMutationJournalLab final {
         "snapshot_json TEXT NOT NULL DEFAULT '',"
         "stage TEXT NOT NULL DEFAULT '',"
         "UNIQUE(session_id,epoch,mission_run_id,sequence))") &&
+         exec(db,"CREATE TABLE IF NOT EXISTS dyx_mission_recovery_epoch_barrier("
+           "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+           "session_id TEXT NOT NULL,old_epoch INTEGER NOT NULL CHECK(old_epoch>0),"
+           "new_epoch INTEGER NOT NULL CHECK(new_epoch>old_epoch),"
+           "nonce INTEGER NOT NULL CHECK(nonce>0),"
+           "old_generation INTEGER NOT NULL CHECK(old_generation>0),"
+           "new_generation INTEGER NOT NULL CHECK(new_generation=old_generation+1),"
+           "mission_run_id TEXT NOT NULL,signature TEXT NOT NULL,"
+           "revision INTEGER NOT NULL CHECK(revision>0),"
+           "last_sequence INTEGER NOT NULL CHECK(last_sequence>0),"
+           "phase TEXT NOT NULL CHECK(phase='QUARANTINED'))") &&
          exec(db,"INSERT OR IGNORE INTO dyx_journal_meta(singleton,version) VALUES(1,1)") &&
          journal_schema_ok(db);
       if (ok) ok=exec(db,"COMMIT");
@@ -231,6 +245,12 @@ class NativeDraftSqliteMutationJournalLab final {
     if (!proposal(p)) return false;
     std::lock_guard<std::mutex> lock(mu_);
     if (!exec(db_,"BEGIN IMMEDIATE")) return false;
+    // H5H permanent quarantine barrier: deny ALL journal writes, including
+    // proposals carrying the freshly rotated epoch. Missing table fails shut.
+    Statement barrier(db_,"SELECT 1 FROM dyx_mission_recovery_epoch_barrier LIMIT 1");
+    if (!barrier || sqlite3_step(barrier.st)!=SQLITE_DONE) {
+      exec(db_,"ROLLBACK"); return false;
+    }
     Fence f;
     bool ok=read_fence(db_,f) && f.session==p.operator_session_id &&
        f.epoch==p.session_epoch && p.ingress_nonce>f.nonce &&
@@ -277,6 +297,11 @@ class NativeDraftSqliteMutationJournalLab final {
         key.ingress_nonce==0) return false;
     std::lock_guard<std::mutex> lock(mu_);
     if (!exec(db_,"BEGIN IMMEDIATE")) return false;
+    // No late conclusion may mutate the journal after epoch quarantine.
+    Statement barrier(db_,"SELECT 1 FROM dyx_mission_recovery_epoch_barrier LIMIT 1");
+    if (!barrier || sqlite3_step(barrier.st)!=SQLITE_DONE) {
+      exec(db_,"ROLLBACK"); return false;
+    }
     Statement check(db_,"SELECT route FROM dyx_mission_mutations "
                         "WHERE nonce=? AND session_id=? AND epoch=? AND status='PENDING'");
     std::string route_name;
