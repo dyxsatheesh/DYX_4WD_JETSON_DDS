@@ -138,3 +138,20 @@ foreach(mode IN ITEMS nominal reopen stale ready pending tamper)
   add_test(NAME draft_sqlite_checkpoint_${mode}_native_smoke
       COMMAND "$<TARGET_FILE:draft_sqlite_preview_checkpoint_native_smoke>" ${mode})
 endforeach()
+
+# Phase 2H5F: offline PREVIEW recovery preflight. Read-only, no restore.
+add_executable(draft_sqlite_recovery_preflight_native_smoke
+    ../draft_sqlite_recovery_preflight_native_smoke.cpp)
+target_include_directories(draft_sqlite_recovery_preflight_native_smoke PRIVATE ../../include)
+target_link_libraries(draft_sqlite_recovery_preflight_native_smoke
+    PRIVATE SQLite::SQLite3 Threads::Threads)
+if(MSVC)
+  target_compile_options(draft_sqlite_recovery_preflight_native_smoke PRIVATE /W4 /UNDEBUG)
+else()
+  target_compile_options(draft_sqlite_recovery_preflight_native_smoke
+      PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+endif()
+foreach(mode IN ITEMS nominal reopen authorization stale pending ready no_checkpoint)
+  add_test(NAME draft_sqlite_preflight_${mode}_native_smoke
+      COMMAND "$<TARGET_FILE:draft_sqlite_recovery_preflight_native_smoke>" ${mode})
+endforeach()
