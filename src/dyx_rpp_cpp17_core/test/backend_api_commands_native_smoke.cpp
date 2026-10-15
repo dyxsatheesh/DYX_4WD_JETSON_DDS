@@ -24,4 +24,23 @@ int main() {
   const auto stopped=api.handle(stop);
   assert(stopped.http_status==200 && stopped.safe_stop_intent &&
          stopped.stage==MissionStage::stopped && !stopped.hardware_command_emitted);
+
+  // H5L: API responses must explicitly report a latched recovery quarantine.
+  // No mission is loaded, so other preflight checks must not hide the result.
+  NativeMissionCommandGateway qgateway;
+  NativeBackendMissionApi qapi(qgateway);
+  qgateway.latch_recovery_quarantine();
+  auto rejected=qapi.handle(api_req(kBackendMissionStartPath,1,2.0));
+  assert(rejected.http_status==423 && rejected.code=="MISSION_RECOVERY_QUARANTINED");
+  assert(rejected.decision_only && !rejected.hardware_command_emitted);
+
+  // Mission status stays read-only, and authenticated STOP is still accepted
+  // without a control lease or a valid monotonic timestamp.
+  auto qstatus=qapi.handle(api_status_req());
+  assert(qstatus.http_status==200 && qstatus.decision_only);
+  auto qstop=api_req(kBackendMissionStopPath,2,-1.0);
+  qstop.principal.owns_control_lease=false;
+  auto qstopped=qapi.handle(qstop);
+  assert(qstopped.http_status==200 && qstopped.safe_stop_intent);
+  assert(!qstopped.hardware_command_emitted);
 }

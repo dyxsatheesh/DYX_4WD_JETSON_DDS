@@ -106,6 +106,7 @@ class NativeBackendMissionApi final {
       case ClientCommandStatus::invalid_stage: return reply(409, "INVALID_MISSION_STAGE");
       case ClientCommandStatus::runtime_rejected: return reply(412, "RUNTIME_SAFETY_REJECTED");
       case ClientCommandStatus::run_id_reused: return reply(409, "MISSION_RUN_ID_REUSED");
+      case ClientCommandStatus::recovery_quarantined: return reply(423, "MISSION_RECOVERY_QUARANTINED");
     }
     return reply(500, "UNRECOGNIZED_GATEWAY_RESULT");
   }
