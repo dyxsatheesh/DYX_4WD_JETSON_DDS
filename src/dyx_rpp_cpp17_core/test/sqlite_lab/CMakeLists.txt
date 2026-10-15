@@ -301,3 +301,12 @@ foreach(mode IN ITEMS restart review identity tamper missing replays stop parall
       COMMAND "$<TARGET_FILE:draft_sqlite_recovery_http_owner_native_smoke>"
               lifecycle_${mode})
 endforeach()
+
+# Phase 2H5R: offline service admission and shutdown gate. No OS service,
+# HTTP listener, authentication provider, DDS or hardware output exists.
+foreach(mode IN ITEMS boot_closed open_status locked_actions preview missing_db
+                      auth tamper shutdown restart parallel shutdown_race)
+  add_test(NAME draft_sqlite_recovery_h5r_${mode}_native_smoke
+      COMMAND "$<TARGET_FILE:draft_sqlite_recovery_http_owner_native_smoke>"
+              service_${mode})
+endforeach()

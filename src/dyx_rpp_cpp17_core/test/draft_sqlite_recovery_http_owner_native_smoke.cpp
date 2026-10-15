@@ -1,6 +1,7 @@
 // DYX H5K synthetic SQLite laboratory; no hardware, no real HTTP network.
 #include "backend_upload_fixture.hpp"
 #include "dyx_rpp_cpp17_core/backend_recovery_startup_owner_lab.hpp"
+#include "dyx_rpp_cpp17_core/backend_recovery_service_lifecycle_lab.hpp"
 #include "dyx_rpp_cpp17_core/backend_draft_sqlite_store_lab.hpp"
 #include <cassert>
 #include <atomic>
@@ -466,6 +467,144 @@ static void lifecycle_retire_restart() {
       ingress("POST",kBackendMissionStartPath),review()).status==423);
   assert(!fresh.has_active_mission() && !fresh.has_live_backend_draft());
 }
+// H5R: offline process-service admission modeled above one quarantined owner.
+// This is not a real socket listener or a privileged authentication service.
+static void service_boot_closed() {
+  TempDb db("h5r_boot_closed");prepare(db);
+  NativeOfflineRecoveryServiceLifecycleLab svc(db.file.string(),review());
+  assert(svc.snapshot().state==RecoveryServiceLifecycleLabState::admission_closed);
+  for (const auto* route:{kBackendMissionStatusPath,kBackendMissionStartPath,
+                           kBackendMissionStopPath,kBackendMissionUploadPath}) {
+    const auto r=svc.dispatch_recovery_request(ingress("POST",route),review());
+    assert(r.status==423 && r.body.find("RECOVERY_SERVICE_NOT_ACCEPTING")!=std::string::npos);
+    assert(!r.physical_command_emitted && !r.network_io_performed);
+  }
+  assert(svc.dispatch_recovery_request(draft_request(),review()).status==423);
+}
+static void service_open_status() {
+  TempDb db("h5r_open");prepare(db);
+  NativeOfflineRecoveryServiceLifecycleLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  assert(!svc.admit_recovery_only());
+  const auto st=svc.snapshot();
+  assert(st.accepts_recovery_only && !st.can_issue_motion && !st.can_upload_or_load);
+  assert(!st.hardware_command_emitted && !st.physical_stop_confirmed);
+  auto r=svc.dispatch_recovery_request(ingress("GET",kBackendMissionStatusPath),review());
+  assert(r.status==200 && r.body.find("\"recovery_quarantined\":true")!=std::string::npos);
+  assert(!r.physical_command_emitted && !r.network_io_performed);
+}
+static void service_locked_actions() {
+  TempDb db("h5r_locked");prepare(db);
+  NativeOfflineRecoveryServiceLifecycleLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  for(const auto* p:{kBackendMissionStartPath,kBackendMissionPausePath,
+       kBackendMissionResumePath,kBackendMissionNextPath,kBackendMissionSkipPath,
+       kBackendMissionUploadPath,kBackendMissionUpdatePath,kBackendMissionLoadPath}) {
+    auto r=svc.dispatch_recovery_request(ingress("POST",p),review());
+    assert(r.status==423 && !r.physical_command_emitted && !r.network_io_performed);
+  }
+  auto q=ingress("POST",kBackendMissionStopPath);
+  q.http.principal.owns_control_lease=false;
+  const auto r=svc.dispatch_recovery_request(q,review());
+  assert(r.status==200 && r.body.find("\"safe_stop_intent\":true")!=std::string::npos);
+}
+static void service_preview() {
+  TempDb db("h5r_preview");prepare(db);
+  NativeOfflineRecoveryServiceLifecycleLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  auto r=svc.dispatch_recovery_request(draft_request(),review());
+  assert(r.status==200 && r.body.find("\"preview_only\":true")!=std::string::npos);
+  assert(r.body.find("marking_points")==std::string::npos);
+  assert(!r.physical_command_emitted && !r.network_io_performed);
+}
+static void service_missing_db() {
+  TempDb db("h5r_missing");prepare(db);
+  const auto missing=db.dir/"never-created.sqlite";
+  NativeOfflineRecoveryServiceLifecycleLab svc(missing.string(),review());
+  assert(svc.admit_recovery_only()); // Status/STOP only; preview still denied.
+  assert(svc.dispatch_recovery_request(draft_request(),review()).status==423);
+  assert(svc.dispatch_recovery_request(ingress("POST",kBackendMissionStartPath),review()).status==423);
+  assert(svc.dispatch_recovery_request(ingress("GET",kBackendMissionStatusPath),review()).status==200);
+}
+static void service_auth() {
+  TempDb db("h5r_auth");prepare(db);
+  NativeOfflineRecoveryServiceLifecycleLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  auto q=ingress("POST",kBackendMissionStopPath);q.http.principal.authenticated=false;
+  assert(svc.dispatch_recovery_request(q,review()).status==401);
+  q=draft_request();q.http.principal.can_read_mission=false;
+  assert(svc.dispatch_recovery_request(q,review()).status==403);
+  q=draft_request();q.http.principal.operator_session_id="FORGED";
+  assert(svc.dispatch_recovery_request(q,review()).status==403);
+  assert(svc.dispatch_recovery_request(ingress("GET","/api/v1/unknown"),review()).status==404);
+}
+static void service_tamper() {
+  TempDb db("h5r_tamper");prepare(db);
+  NativeOfflineRecoveryServiceLifecycleLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  assert(svc.dispatch_recovery_request(draft_request(),review()).status==200);
+  sql(db,"UPDATE dyx_mission_recovery_staging SET last_sequence=999");
+  for(int i=0;i<3;++i)
+    assert(svc.dispatch_recovery_request(draft_request(),review()).status==423);
+  assert(svc.dispatch_recovery_request(ingress("POST",kBackendMissionStartPath),review()).status==423);
+}
+static void service_shutdown() {
+  TempDb db("h5r_shutdown");prepare(db);
+  NativeOfflineRecoveryServiceLifecycleLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  svc.shutdown();svc.shutdown();
+  assert(svc.snapshot().state==RecoveryServiceLifecycleLabState::permanently_closed);
+  assert(!svc.admit_recovery_only());
+  for (const auto* route:{kBackendMissionStatusPath,kBackendMissionStartPath,
+                          kBackendMissionStopPath,kBackendMissionLoadPath})
+    assert(svc.dispatch_recovery_request(ingress("POST",route),review()).status==423);
+  assert(svc.dispatch_recovery_request(draft_request(),review()).status==423);
+}
+static void service_restart() {
+  TempDb db("h5r_restart");prepare(db);
+  for(int i=0;i<3;++i) {
+    NativeOfflineRecoveryServiceLifecycleLab svc(db.file.string(),review());
+    assert(svc.dispatch_recovery_request(draft_request(),review()).status==423);
+    assert(svc.admit_recovery_only());
+    assert(svc.dispatch_recovery_request(draft_request(),review()).status==200);
+    assert(svc.dispatch_recovery_request(ingress("POST",kBackendMissionResumePath),review()).status==423);
+    svc.shutdown();
+    assert(svc.dispatch_recovery_request(draft_request(),review()).status==423);
+  }
+}
+static void service_parallel() {
+  TempDb db("h5r_parallel");prepare(db);
+  NativeOfflineRecoveryServiceLifecycleLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  std::atomic<int> ok{0};std::vector<std::thread> workers;
+  for(int j=0;j<8;++j)workers.emplace_back([&svc,&ok,j]{
+    for(int i=0;i<15;++i) {
+      auto q=j%2?ingress("POST",kBackendMissionStartPath):draft_request();
+      const auto r=svc.dispatch_recovery_request(q,review());
+      if((j%2 && r.status==423) || (!(j%2) && r.status==200)) ++ok;
+      assert(!r.physical_command_emitted && !r.network_io_performed);
+    }
+  });
+  for(auto& t:workers)t.join();
+  assert(ok==120 && svc.snapshot().accepts_recovery_only);
+}
+static void service_shutdown_race() {
+  TempDb db("h5r_shutdown_race");prepare(db);
+  NativeOfflineRecoveryServiceLifecycleLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  std::atomic<bool> run{true};std::thread reader([&]{
+    while(run.load()) {
+      auto r=svc.dispatch_recovery_request(ingress("POST",kBackendMissionStopPath),review());
+      assert(r.status==200 || r.status==423);
+      assert(!r.physical_command_emitted && !r.network_io_performed);
+    }
+  });
+  std::thread closer([&]{svc.shutdown();run.store(false);});
+  closer.join();reader.join();
+  assert(svc.snapshot().state==RecoveryServiceLifecycleLabState::permanently_closed);
+  assert(svc.dispatch_recovery_request(draft_request(),review()).status==423);
+  assert(!svc.admit_recovery_only());
+}
 int main(int argc,char** argv) {
   if(argc!=2)return 2;
   const std::string m=argv[1];
@@ -497,6 +636,17 @@ int main(int argc,char** argv) {
   else if(m=="lifecycle_parallel")lifecycle_parallel();
   else if(m=="lifecycle_retire_race")lifecycle_retire_race();
   else if(m=="lifecycle_retire_restart")lifecycle_retire_restart();
+  else if(m=="service_boot_closed")service_boot_closed();
+  else if(m=="service_open_status")service_open_status();
+  else if(m=="service_locked_actions")service_locked_actions();
+  else if(m=="service_preview")service_preview();
+  else if(m=="service_missing_db")service_missing_db();
+  else if(m=="service_auth")service_auth();
+  else if(m=="service_tamper")service_tamper();
+  else if(m=="service_shutdown")service_shutdown();
+  else if(m=="service_restart")service_restart();
+  else if(m=="service_parallel")service_parallel();
+  else if(m=="service_shutdown_race")service_shutdown_race();
   else return 2;
   std::cout<<"PASS H5O "<<m<<"\n";
 }
