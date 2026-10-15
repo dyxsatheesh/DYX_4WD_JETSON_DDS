@@ -127,7 +127,11 @@ set(DYX_CPP_ONLY_SMOKE_TESTS
     backend_upload_http_nominal_native_smoke
     backend_upload_http_security_native_smoke
     backend_upload_http_parser_native_smoke
-    backend_upload_http_safety_native_smoke)
+    backend_upload_http_safety_native_smoke
+    backend_android_draft_codec_roundtrip_native_smoke
+    backend_android_draft_codec_security_native_smoke
+    backend_android_draft_codec_ordering_native_smoke
+    backend_android_draft_codec_tamper_native_smoke)
 
 foreach(test_name IN LISTS DYX_CPP_ONLY_SMOKE_TESTS)
   add_executable(${test_name} ../${test_name}.cpp)
