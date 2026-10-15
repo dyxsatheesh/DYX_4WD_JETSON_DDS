@@ -93,6 +93,12 @@ class NativeOfflineAndroidMissionControls final {
     if (changed || !context.ui_network_connected ||
         context.live.requires_resync || !context.live.connected)
       pending_ = false;
+    // A trusted status indicating recovery quarantine fences pending motion
+    // proposals. A later healthy-looking status must never clear this latch.
+    if (context.mission.recovery_quarantined) {
+      recovery_quarantine_latched_ = true;
+      pending_ = false;
+    }
     ctx_ = std::move(context);
     have_context_ = true;
   }
@@ -110,6 +116,8 @@ class NativeOfflineAndroidMissionControls final {
     if (!ctx_.ui_network_connected)
       return denied(is_stop ? "ANDROID_STOP_DELIVERY_UNAVAILABLE" :
                               "ANDROID_NETWORK_UNAVAILABLE");
+    if (recovery_quarantine_latched_ && !is_stop)
+      return denied("ANDROID_RECOVERY_QUARANTINED");
 
     // Clock faults never obstruct preparation of the STOP advisory request.
     if (!check_clock(trusted_host_sec) && !is_stop)
@@ -179,6 +187,11 @@ class NativeOfflineAndroidMissionControls final {
     pending_=false;
     if (response.hardware_command_emitted || !response.decision_only)
       return ack("ANDROID_UNSAFE_REPLY_REJECTED");
+    if (response.http_status == 423 &&
+        response.code == "MISSION_RECOVERY_QUARANTINED") {
+      recovery_quarantine_latched_ = true;
+      return {"ANDROID_RECOVERY_QUARANTINED",true,false,false,false};
+    }
     if (response.http_status == 200 && response.code=="MISSION_DECISION_ACCEPTED")
       return {"ANDROID_BACKEND_DECISION_ACCEPTED_NOT_ACTUATED",true,false,false,false};
     return {"ANDROID_BACKEND_DECISION_DENIED_OR_UNKNOWN",true,false,false,false};
@@ -222,6 +235,7 @@ class NativeOfflineAndroidMissionControls final {
   }
 
   bool request_pending() const { return pending_; }
+  bool recovery_quarantine_latched() const { return recovery_quarantine_latched_; }
   bool clock_fault_latched() const { return fault_; }
   std::uint64_t last_proposed_sequence() const { return sequence_; }
  private:
@@ -278,6 +292,7 @@ class NativeOfflineAndroidMissionControls final {
   bool pending_{false};
   bool fault_{false};
   bool sequence_fault_{false};
+  bool recovery_quarantine_latched_{false};
   AndroidMissionIntent pending_intent_{AndroidMissionIntent::start};
   std::uint64_t sequence_{0};
   std::uint64_t pending_sequence_{0};

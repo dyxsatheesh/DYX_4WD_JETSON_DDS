@@ -54,6 +54,7 @@ struct BackendHttpWireResponse {
       case 412: reason = "Precondition Failed"; break;
       case 413: reason = "Content Too Large"; break;
       case 422: reason = "Unprocessable Content"; break;
+      case 423: reason = "Locked"; break;
       case 500: reason = "Internal Server Error"; break;
       default: throw std::invalid_argument("unknown HTTP status");
     }

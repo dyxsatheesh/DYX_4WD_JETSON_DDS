@@ -49,6 +49,7 @@ struct BackendMissionApiResponse {
   std::string active_marking_label{}; // display label only, no certificate/secret
   std::size_t total{0}, completed{0}, failed{0}, skipped{0}, pending{0};
   bool mission_loaded{false};
+  bool recovery_quarantined{false}; // Advisory UI state; not authorization
   bool safe_stop_intent{false}; // NOT an executed PX4/physical emergency stop
   bool decision_only{true};
   bool hardware_command_emitted{false}; // must always be false
@@ -145,6 +146,7 @@ class NativeBackendMissionApi final {
     if (mission.current_marking < records.size())
       out.active_marking_label = records[mission.current_marking].goal.goal_label;
     out.mission_loaded = gateway_.has_active_mission();
+    out.recovery_quarantined = gateway_.recovery_quarantined();
     out.safe_stop_intent = gateway_.safe_stop_requested();
     return out;
   }

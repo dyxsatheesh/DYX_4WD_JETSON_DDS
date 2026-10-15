@@ -92,6 +92,7 @@ inline std::string mission_json(const BackendMissionApiResponse& r) {
       ",\"failed\":" + std::to_string(r.failed) +
       ",\"skipped\":" + std::to_string(r.skipped) +
       ",\"loaded\":" + boolean(r.mission_loaded) +
+      ",\"recovery_quarantined\":" + boolean(r.recovery_quarantined) +
       "},\"safe_stop_intent\":" + boolean(r.safe_stop_intent) +
       ",\"decision_only\":true,\"hardware_command_emitted\":false}";
   return out;
