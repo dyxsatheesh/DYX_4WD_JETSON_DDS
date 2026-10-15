@@ -35,6 +35,17 @@ class NativeOfflineDraftHistoryScreenLab final {
       : file_(std::move(existing_file)) {}
 
   DraftHistoryScreenLabResult inspect(const DraftReconciliationLabIdentity& identity) const {
+    return inspect_impl(identity,false);
+  }
+  // H5I: inspect pre-rotation historical rows while an H5H barrier is
+  // present. This is a read-only audit, NOT an epoch rollback/unquarantine.
+  DraftHistoryScreenLabResult inspect_quarantined(
+      const DraftReconciliationLabIdentity& identity) const {
+    return inspect_impl(identity,true);
+  }
+ private:
+  DraftHistoryScreenLabResult inspect_impl(
+      const DraftReconciliationLabIdentity& identity,bool quarantined) const {
     using namespace draft_journal_lab_detail;
     DraftHistoryScreenLabResult result;
     if (!identity.authenticated || !identity.can_read_mission ||
@@ -60,10 +71,46 @@ class NativeOfflineDraftHistoryScreenLab final {
         !journal_schema_ok(db) || !exec(db,"BEGIN")) return result;
     struct Rollback {sqlite3* db;~Rollback(){sqlite3_exec(db,"ROLLBACK",nullptr,nullptr,nullptr);} } rollback{db};
     Fence fence;
-    if (!read_fence(db,fence) || fence.session!=identity.operator_session_id ||
-        fence.epoch!=identity.session_epoch) {
+    if (!read_fence(db,fence) || fence.session!=identity.operator_session_id) {
       result.state=DraftHistoryScreenLabState::access_denied;
       return result;
+    }
+    if (!quarantined) {
+      if (fence.epoch!=identity.session_epoch) {
+        result.state=DraftHistoryScreenLabState::access_denied;
+        return result;
+      }
+    } else {
+      Statement b(db,"SELECT session_id,old_epoch,new_epoch,nonce,"
+        "old_generation,new_generation,phase "
+        "FROM dyx_mission_recovery_epoch_barrier WHERE singleton=1");
+      if (!b || sqlite3_step(b.st)!=SQLITE_ROW ||
+          sqlite3_column_type(b.st,1)!=SQLITE_INTEGER ||
+          sqlite3_column_type(b.st,2)!=SQLITE_INTEGER ||
+          sqlite3_column_type(b.st,3)!=SQLITE_INTEGER ||
+          sqlite3_column_type(b.st,4)!=SQLITE_INTEGER ||
+          sqlite3_column_type(b.st,5)!=SQLITE_INTEGER) {
+        result.state=DraftHistoryScreenLabState::inconsistent_history;
+        return result;
+      }
+      std::string session,phase;
+      if (!text_col(b.st,0,session,128) ||
+          !text_col(b.st,6,phase,24) || phase!="QUARANTINED" ||
+          session!=fence.session ||
+          sqlite3_column_int64(b.st,1)<=0 ||
+          static_cast<std::uint64_t>(sqlite3_column_int64(b.st,1))!=identity.session_epoch ||
+          sqlite3_column_int64(b.st,2)<=0 ||
+          static_cast<std::uint64_t>(sqlite3_column_int64(b.st,2))!=fence.epoch ||
+          sqlite3_column_int64(b.st,3)<=0 ||
+          static_cast<std::uint64_t>(sqlite3_column_int64(b.st,3))!=fence.nonce ||
+          sqlite3_column_int64(b.st,4)<=0 ||
+          sqlite3_column_int64(b.st,5)<=0 ||
+          static_cast<std::uint64_t>(sqlite3_column_int64(b.st,5))!=fence.generation ||
+          sqlite3_column_int64(b.st,5)!=sqlite3_column_int64(b.st,4)+1 ||
+          sqlite3_step(b.st)!=SQLITE_DONE) {
+        result.state=DraftHistoryScreenLabState::inconsistent_history;
+        return result;
+      }
     }
     Statement st(db,"SELECT nonce,session_id,epoch,mission_run_id,sequence,route,"
        "request_json,status,http_status,response_json,snapshot_json,stage "

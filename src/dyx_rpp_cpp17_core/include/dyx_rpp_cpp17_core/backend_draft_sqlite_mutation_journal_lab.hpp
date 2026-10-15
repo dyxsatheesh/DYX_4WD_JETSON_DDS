@@ -176,7 +176,12 @@ inline bool journal_schema_ok(sqlite3* db) {
   Statement barrier(db,"SELECT session_id,old_epoch,new_epoch,nonce,old_generation,"
                        "new_generation,mission_run_id,signature,revision,"
                        "last_sequence,phase FROM dyx_mission_recovery_epoch_barrier LIMIT 0");
-  return static_cast<bool>(st) && static_cast<bool>(barrier);
+  Statement stage(db,"SELECT session_id,old_epoch,new_epoch,nonce,"
+                       "generation,mission_run_id,signature,revision,"
+                       "last_sequence,snapshot_json,phase "
+                       "FROM dyx_mission_recovery_staging LIMIT 0");
+  return static_cast<bool>(st) && static_cast<bool>(barrier) &&
+         static_cast<bool>(stage);
 }
 } // namespace draft_journal_lab_detail
 
@@ -217,6 +222,17 @@ class NativeDraftSqliteMutationJournalLab final {
            "revision INTEGER NOT NULL CHECK(revision>0),"
            "last_sequence INTEGER NOT NULL CHECK(last_sequence>0),"
            "phase TEXT NOT NULL CHECK(phase='QUARANTINED'))") &&
+         exec(db,"CREATE TABLE IF NOT EXISTS dyx_mission_recovery_staging("
+           "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+           "session_id TEXT NOT NULL,old_epoch INTEGER NOT NULL CHECK(old_epoch>0),"
+           "new_epoch INTEGER NOT NULL CHECK(new_epoch>old_epoch),"
+           "nonce INTEGER NOT NULL CHECK(nonce>0),"
+           "generation INTEGER NOT NULL CHECK(generation>0),"
+           "mission_run_id TEXT NOT NULL,signature TEXT NOT NULL,"
+           "revision INTEGER NOT NULL CHECK(revision>0),"
+           "last_sequence INTEGER NOT NULL CHECK(last_sequence>0),"
+           "snapshot_json TEXT NOT NULL,"
+           "phase TEXT NOT NULL CHECK(phase='STAGED'))") &&
          exec(db,"INSERT OR IGNORE INTO dyx_journal_meta(singleton,version) VALUES(1,1)") &&
          journal_schema_ok(db);
       if (ok) ok=exec(db,"COMMIT");

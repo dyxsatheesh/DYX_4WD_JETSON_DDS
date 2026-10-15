@@ -191,3 +191,21 @@ foreach(mode IN ITEMS nominal restart authorization stale pending ready failure 
   add_test(NAME draft_sqlite_epoch_${mode}_native_smoke
       COMMAND "$<TARGET_FILE:draft_sqlite_epoch_quarantine_native_smoke>" ${mode})
 endforeach()
+
+# Phase 2H5I: stage immutable PREVIEW under permanent H5H writer quarantine.
+# No backend recovery, live service or actuator commands.
+add_executable(draft_sqlite_quarantined_handoff_native_smoke
+    ../draft_sqlite_quarantined_handoff_native_smoke.cpp)
+target_include_directories(draft_sqlite_quarantined_handoff_native_smoke PRIVATE ../../include)
+target_link_libraries(draft_sqlite_quarantined_handoff_native_smoke
+    PRIVATE SQLite::SQLite3 Threads::Threads)
+if(MSVC)
+  target_compile_options(draft_sqlite_quarantined_handoff_native_smoke PRIVATE /W4 /UNDEBUG)
+else()
+  target_compile_options(draft_sqlite_quarantined_handoff_native_smoke
+      PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+endif()
+foreach(mode IN ITEMS nominal restart auth missing tamper history barrier failure conflict active)
+  add_test(NAME draft_sqlite_handoff_${mode}_native_smoke
+      COMMAND "$<TARGET_FILE:draft_sqlite_quarantined_handoff_native_smoke>" ${mode})
+endforeach()
