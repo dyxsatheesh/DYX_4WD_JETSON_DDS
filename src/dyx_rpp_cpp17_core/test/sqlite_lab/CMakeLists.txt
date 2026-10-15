@@ -292,3 +292,12 @@ foreach(mode IN ITEMS ingress_status ingress_commands ingress_mutations
   add_test(NAME draft_sqlite_recovery_h5p_${mode}_native_smoke
       COMMAND "$<TARGET_FILE:draft_sqlite_recovery_http_owner_native_smoke>" ${mode})
 endforeach()
+
+# H5Q: process-local lifecycle and concurrent canonical-ingress regressions.
+# Reuse H5O/H5P's SQLite test executable to avoid test-only duplicate owners.
+foreach(mode IN ITEMS restart review identity tamper missing replays stop parallel
+                      retire_race retire_restart)
+  add_test(NAME draft_sqlite_recovery_h5q_${mode}_native_smoke
+      COMMAND "$<TARGET_FILE:draft_sqlite_recovery_http_owner_native_smoke>"
+              lifecycle_${mode})
+endforeach()

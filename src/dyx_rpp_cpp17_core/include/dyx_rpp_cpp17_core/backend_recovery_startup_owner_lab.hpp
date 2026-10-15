@@ -10,6 +10,7 @@
 #include "dyx_rpp_cpp17_core/backend_upload_http_wire.hpp"
 #include <cmath>
 #include <exception>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -51,6 +52,7 @@ class NativeOfflineRecoveryStartupOwnerLab final {
       NativeOfflineRecoveryStartupOwnerLab&&) = delete;
 
   RecoveryStartupOwnerLabStatus status() const {
+    std::lock_guard<std::recursive_mutex> lk(owner_mutex_);
     RecoveryStartupOwnerLabStatus out;
     out.review_state = boot_.state();
     out.audit_state = boot_admission_.audit;
@@ -65,6 +67,7 @@ class NativeOfflineRecoveryStartupOwnerLab final {
   BackendMissionUploadResponse handle_draft(
       const BackendMissionUploadRequest& req,
       const DraftQuarantinedReviewLabRequest& verified_review) {
+    std::lock_guard<std::recursive_mutex> lk(owner_mutex_);
     return boot_.handle(req, verified_review);
   }
 
@@ -72,6 +75,7 @@ class NativeOfflineRecoveryStartupOwnerLab final {
   // All other commands go through the one-way H5L gateway quarantine.
   // This method does not send a real motor, PX4 or DDS command.
   ClientCommandResult handle_command(const ClientCommandRequest& req) {
+    std::lock_guard<std::recursive_mutex> lk(owner_mutex_);
     return gateway_.dispatch(req);
   }
 
@@ -80,6 +84,7 @@ class NativeOfflineRecoveryStartupOwnerLab final {
   // listener, TLS/auth verifier or physical STOP. Raw network input must never
   // populate BackendVerifiedPrincipal or host_received_sec directly.
   BackendHttpWireResponse handle_http(const BackendTrustedHttpRequest& request) {
+    std::lock_guard<std::recursive_mutex> lk(owner_mutex_);
     // Never publish a different/unquarantined gateway through any HTTP route.
     NativeBackendMissionApi mission_api(gateway_);
     NativeBackendLiveStatus live_status(gateway_);
@@ -94,6 +99,7 @@ class NativeOfflineRecoveryStartupOwnerLab final {
   BackendHttpWireResponse handle_recovered_draft_http(
       const BackendTrustedUploadHttpRequest& input,
       const DraftQuarantinedReviewLabRequest& independently_verified_review) {
+    std::lock_guard<std::recursive_mutex> lk(owner_mutex_);
     const auto& req=input.http;
     const std::string prefix=std::string(kBackendMissionDraftPath)+
         "?mission_run_id=";
@@ -151,6 +157,7 @@ class NativeOfflineRecoveryStartupOwnerLab final {
   BackendHttpWireResponse handle_recovery_ingress(
       const BackendTrustedUploadHttpRequest& input,
       const DraftQuarantinedReviewLabRequest& independently_verified_review) {
+    std::lock_guard<std::recursive_mutex> lk(owner_mutex_);
     const auto& r = input.http;
     const std::string prefix = std::string(kBackendMissionDraftPath) +
         "?mission_run_id=";
@@ -189,16 +196,30 @@ class NativeOfflineRecoveryStartupOwnerLab final {
 
   // Retiring the owner is irreversible. It does NOT release the durable fence
   // or the process-local gateway quarantine. Restart with a new owner only.
-  void retire() { boot_.retire(); }
+  void retire() {
+    std::lock_guard<std::recursive_mutex> lk(owner_mutex_);
+    boot_.retire();
+  }
 
-  bool has_active_mission() const { return gateway_.has_active_mission(); }
-  bool has_live_backend_draft() const { return backend_.has_draft(); }
+  bool has_active_mission() const {
+    std::lock_guard<std::recursive_mutex> lk(owner_mutex_);
+    return gateway_.has_active_mission();
+  }
+  bool has_live_backend_draft() const {
+    std::lock_guard<std::recursive_mutex> lk(owner_mutex_);
+    return backend_.has_draft();
+  }
   bool emits_hardware_commands() const { return false; }
 
  private:
   static BackendHttpWireResponse http_error(int status,const std::string& code) {
     return {status,http_json::error_json(code)};
   }
+  // H5Q: this single per-owner lock serializes ingress, SQLite preview,
+  // gateway access, status and retirement. Recursive only because canonical
+  // ingress calls the owner's compatibility adapters internally. Never hold
+  // this lock across a real network or hardware callback.
+  mutable std::recursive_mutex owner_mutex_;
   // Declaration order matters: gateway -> backend -> H5K guard.
   NativeMissionCommandGateway gateway_{};
   NativeBackendMissionUpload backend_;

@@ -3,6 +3,9 @@
 #include "dyx_rpp_cpp17_core/backend_recovery_startup_owner_lab.hpp"
 #include "dyx_rpp_cpp17_core/backend_draft_sqlite_store_lab.hpp"
 #include <cassert>
+#include <atomic>
+#include <thread>
+#include <vector>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -301,6 +304,168 @@ static void ingress_retired() {
   assert(owner.handle_recovery_ingress(ingress("POST",kBackendMissionLoadPath),review()).status==423);
   assert(!owner.has_active_mission());
 }
+// H5Q: lifecycle and same-owner concurrency regression (no actual listener).
+static void lifecycle_restart() {
+  TempDb db("h5q_restart");prepare(db);
+  for (int instance=0;instance<3;++instance) {
+    NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+    assert(owner.status().quarantined);
+    for (int iteration=0;iteration<4;++iteration) {
+      const auto status=owner.handle_recovery_ingress(
+          ingress("GET",kBackendMissionStatusPath),review());
+      assert(status.status==200 &&
+          status.body.find("\"recovery_quarantined\":true")!=std::string::npos);
+      assert(owner.handle_recovery_ingress(
+          ingress("POST",kBackendMissionStartPath),review()).status==423);
+    }
+    assert(!owner.has_active_mission() && !owner.has_live_backend_draft());
+  }
+}
+static void lifecycle_review() {
+  TempDb db("h5q_review");prepare(db);
+  for (int instance=0;instance<3;++instance) {
+    NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+    for (int iteration=0;iteration<3;++iteration) {
+      const auto r=owner.handle_recovery_ingress(draft_request(),review());
+      assert(r.status==200 && r.body.find("\"preview_only\":true")!=std::string::npos);
+      assert(r.body.find("marking_points")==std::string::npos);
+      assert(!r.physical_command_emitted && !r.network_io_performed);
+    }
+    assert(owner.status().quarantined && !owner.has_active_mission());
+  }
+}
+static void lifecycle_identity() {
+  TempDb db("h5q_identity");prepare(db);
+  auto forged=review();forged.current_identity.operator_session_id="FORGED";
+  NativeOfflineRecoveryStartupOwnerLab denied(db.file.string(),forged);
+  assert(denied.status().quarantined && !denied.status().read_only_preview_possible);
+  assert(denied.handle_recovery_ingress(draft_request(),review()).status==423);
+  assert(denied.handle_recovery_ingress(
+      ingress("POST",kBackendMissionResumePath),review()).status==423);
+  denied.retire();
+  NativeOfflineRecoveryStartupOwnerLab fresh(db.file.string(),review());
+  assert(fresh.status().quarantined);
+  assert(fresh.handle_recovery_ingress(
+      ingress("POST",kBackendMissionStartPath),review()).status==423);
+}
+static void lifecycle_tamper() {
+  TempDb db("h5q_tamper");prepare(db);
+  { NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+    assert(owner.handle_recovery_ingress(draft_request(),review()).status==200);
+  }
+  sql(db,"UPDATE dyx_mission_recovery_staging SET last_sequence=999");
+  for(int i=0;i<2;++i) {
+    NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+    assert(owner.status().quarantined);
+    assert(owner.handle_recovery_ingress(draft_request(),review()).status==423);
+    assert(owner.handle_recovery_ingress(
+        ingress("POST",kBackendMissionStartPath),review()).status==423);
+  }
+}
+static void lifecycle_missing() {
+  TempDb db("h5q_missing");prepare(db);
+  fs::remove(db.file);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  assert(owner.status().quarantined);
+  assert(owner.handle_recovery_ingress(draft_request(),review()).status==423);
+  assert(owner.handle_recovery_ingress(
+      ingress("POST",kBackendMissionStartPath),review()).status==423);
+  assert(!owner.has_active_mission() && !owner.has_live_backend_draft());
+}
+static void lifecycle_replays() {
+  TempDb db("h5q_replays");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  for(int i=0;i<32;++i) {
+    for(const char* route:{kBackendMissionStartPath,kBackendMissionResumePath,
+       kBackendMissionNextPath,kBackendMissionSkipPath,kBackendMissionPausePath}) {
+      const auto r=owner.handle_recovery_ingress(ingress("POST",route),review());
+      assert(r.status==423 && !r.physical_command_emitted);
+    }
+    for(const char* route:{kBackendMissionUploadPath,kBackendMissionLoadPath}) {
+      auto req=ingress("POST",route);req.trusted_px4_disarmed=true;
+      assert(owner.handle_recovery_ingress(req,review()).status==423);
+    }
+  }
+  assert(owner.status().quarantined && !owner.has_active_mission());
+}
+static void lifecycle_stop() {
+  TempDb db("h5q_stop");prepare(db);
+  for(int instance=0;instance<2;++instance) {
+    NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+    for(int i=0;i<20;++i) {
+      auto req=ingress("POST",kBackendMissionStopPath);
+      req.http.principal.owns_control_lease=false;
+      assert(owner.handle_recovery_ingress(req,review()).status==200);
+      assert(owner.handle_recovery_ingress(
+          ingress("POST",kBackendMissionStartPath),review()).status==423);
+    }
+    assert(owner.status().quarantined && !owner.emits_hardware_commands());
+  }
+}
+static void lifecycle_parallel() {
+  TempDb db("h5q_parallel");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  std::atomic<int> failures{0};
+  std::vector<std::thread> threads;
+  for(int worker=0;worker<6;++worker) threads.emplace_back([&,worker] {
+    for(int i=0;i<18;++i) {
+      const int mode=(worker+i)%5;
+      int actual=0;
+      if(mode==0) actual=owner.handle_recovery_ingress(
+          ingress("GET",kBackendMissionStatusPath),review()).status;
+      if(mode==1) actual=owner.handle_recovery_ingress(
+          ingress("POST",kBackendMissionStartPath),review()).status;
+      if(mode==2) actual=owner.handle_recovery_ingress(
+          ingress("POST",kBackendMissionLoadPath),review()).status;
+      if(mode==3) actual=owner.handle_recovery_ingress(draft_request(),review()).status;
+      if(mode==4) actual=owner.handle_recovery_ingress(
+          ingress("POST",kBackendMissionStopPath),review()).status;
+      const int expected=(mode==1||mode==2)?423:200;
+      if(actual!=expected)++failures;
+    }
+  });
+  for(auto& thread:threads)thread.join();
+  assert(failures.load()==0);
+  assert(owner.status().quarantined && !owner.has_active_mission());
+}
+static void lifecycle_retire_race() {
+  TempDb db("h5q_retire_race");prepare(db);
+  NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+  std::atomic<int> failures{0};
+  std::vector<std::thread> threads;
+  for(int worker=0;worker<4;++worker)threads.emplace_back([&] {
+    for(int i=0;i<24;++i) {
+      const auto preview=owner.handle_recovery_ingress(draft_request(),review());
+      if(preview.status!=200 && preview.status!=423)++failures;
+      const auto command=owner.handle_recovery_ingress(
+          ingress("POST",kBackendMissionResumePath),review());
+      if(command.status!=423)++failures;
+    }
+  });
+  threads.emplace_back([&] {
+    owner.retire();owner.retire();
+  });
+  for(auto& thread:threads)thread.join();
+  assert(failures.load()==0);
+  assert(owner.status().quarantined && !owner.status().read_only_preview_possible);
+  assert(owner.handle_recovery_ingress(draft_request(),review()).status==423);
+  assert(owner.handle_recovery_ingress(
+      ingress("POST",kBackendMissionStopPath),review()).status==200);
+  assert(!owner.has_active_mission());
+}
+static void lifecycle_retire_restart() {
+  TempDb db("h5q_retire_restart");prepare(db);
+  { NativeOfflineRecoveryStartupOwnerLab owner(db.file.string(),review());
+    assert(owner.handle_recovery_ingress(draft_request(),review()).status==200);
+    owner.retire();
+    assert(owner.handle_recovery_ingress(draft_request(),review()).status==423);
+  }
+  NativeOfflineRecoveryStartupOwnerLab fresh(db.file.string(),review());
+  assert(fresh.status().quarantined);
+  assert(fresh.handle_recovery_ingress(
+      ingress("POST",kBackendMissionStartPath),review()).status==423);
+  assert(!fresh.has_active_mission() && !fresh.has_live_backend_draft());
+}
 int main(int argc,char** argv) {
   if(argc!=2)return 2;
   const std::string m=argv[1];
@@ -322,6 +487,16 @@ int main(int argc,char** argv) {
   else if(m=="ingress_invalid")ingress_invalid();
   else if(m=="ingress_tamper")ingress_tamper();
   else if(m=="ingress_retired")ingress_retired();
+  else if(m=="lifecycle_restart")lifecycle_restart();
+  else if(m=="lifecycle_review")lifecycle_review();
+  else if(m=="lifecycle_identity")lifecycle_identity();
+  else if(m=="lifecycle_tamper")lifecycle_tamper();
+  else if(m=="lifecycle_missing")lifecycle_missing();
+  else if(m=="lifecycle_replays")lifecycle_replays();
+  else if(m=="lifecycle_stop")lifecycle_stop();
+  else if(m=="lifecycle_parallel")lifecycle_parallel();
+  else if(m=="lifecycle_retire_race")lifecycle_retire_race();
+  else if(m=="lifecycle_retire_restart")lifecycle_retire_restart();
   else return 2;
   std::cout<<"PASS H5O "<<m<<"\n";
 }
