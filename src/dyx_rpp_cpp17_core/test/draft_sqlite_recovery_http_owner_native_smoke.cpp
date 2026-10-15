@@ -2,6 +2,7 @@
 #include "backend_upload_fixture.hpp"
 #include "dyx_rpp_cpp17_core/backend_recovery_startup_owner_lab.hpp"
 #include "dyx_rpp_cpp17_core/backend_recovery_service_lifecycle_lab.hpp"
+#include "dyx_rpp_cpp17_core/backend_recovery_trusted_ingress_lab.hpp"
 #include "dyx_rpp_cpp17_core/backend_draft_sqlite_store_lab.hpp"
 #include <cassert>
 #include <atomic>
@@ -605,6 +606,185 @@ static void service_shutdown_race() {
   assert(svc.dispatch_recovery_request(draft_request(),review()).status==423);
   assert(!svc.admit_recovery_only());
 }
+// H5S: typed, independently-attested *offline* ingress handoff contract.
+static RecoveryTrustedIngressEvidenceLab proof(std::uint64_t request_id=1,
+                                               double received_sec=100.0) {
+  RecoveryTrustedIngressEvidenceLab e;
+  e.verified_transport_authenticated=true;
+  e.verified_operator_session_id="SESSION_H4E_OPERATOR";
+  e.verified_can_read_mission=true;
+  e.verified_owns_control_lease=true;
+  e.trusted_request_id=request_id;
+  e.trusted_monotonic_received_sec=received_sec;
+  return e;
+}
+static void ingress_h5s_boot_closed() {
+  TempDb db("h5s_boot_closed");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(!svc.snapshot().admitted);
+  const auto r=svc.dispatch(ingress("GET",kBackendMissionStatusPath),proof());
+  assert(r.status==423 && !r.physical_command_emitted);
+}
+static void ingress_h5s_status() {
+  TempDb db("h5s_status");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only() && !svc.admit_recovery_only());
+  auto r=svc.dispatch(ingress("GET",kBackendMissionStatusPath),proof());
+  assert(r.status==200);
+  assert(r.body.find("\"recovery_quarantined\":true")!=std::string::npos);
+  assert(svc.snapshot().last_accepted_request_id==1 && !r.network_io_performed);
+}
+static void ingress_h5s_forged_client() {
+  TempDb db("h5s_forged_client");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  auto q=draft_request();
+  q.http.principal.authenticated=false;
+  q.http.principal.operator_session_id="CLIENT_FORGED";
+  q.http.principal.can_read_mission=false;
+  q.http.host_received_sec=-987.0;
+  q.trusted_px4_disarmed=true;
+  auto r=svc.dispatch(q,proof());
+  assert(r.status==200 && r.body.find("\"preview_only\":true")!=std::string::npos);
+  // Forged transport evidence, unlike raw client claims, must be rejected.
+  auto e=proof(2,101);e.verified_operator_session_id="CLIENT_FORGED";
+  assert(svc.dispatch(q,e).status==403);
+}
+static void ingress_h5s_unauth() {
+  TempDb db("h5s_unauth");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  auto e=proof();e.verified_transport_authenticated=false;
+  assert(svc.dispatch(ingress("POST",kBackendMissionStopPath),e).status==401);
+  assert(svc.snapshot().last_accepted_request_id==0);
+  assert(svc.dispatch(ingress("POST",kBackendMissionStopPath),proof()).status==200);
+}
+static void ingress_h5s_identity() {
+  TempDb db("h5s_identity");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  auto e=proof();e.verified_operator_session_id="ANOTHER_SESSION";
+  assert(svc.dispatch(draft_request(),e).status==403);
+  e.verified_operator_session_id.clear();
+  assert(svc.dispatch(draft_request(),e).status==403);
+  e=proof();e.verified_can_read_mission=false;
+  assert(svc.dispatch(draft_request(),e).status==403);
+}
+static void ingress_h5s_replay() {
+  TempDb db("h5s_replay");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  assert(svc.dispatch(ingress("GET",kBackendMissionStatusPath),proof(1)).status==200);
+  assert(svc.dispatch(ingress("GET",kBackendMissionStatusPath),proof(1)).status==409);
+  assert(svc.dispatch(ingress("GET",kBackendMissionStatusPath),proof(0)).status==409);
+  assert(svc.dispatch(ingress("POST",kBackendMissionStartPath),proof(2)).status==423);
+  assert(svc.dispatch(ingress("GET",kBackendMissionStatusPath),proof(2)).status==409);
+  assert(svc.snapshot().last_accepted_request_id==2);
+}
+static void ingress_h5s_clock() {
+  TempDb db("h5s_clock");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  assert(svc.dispatch(ingress("GET",kBackendMissionStatusPath),proof(1,101)).status==200);
+  auto e=proof(2,100);
+  assert(svc.dispatch(ingress("GET",kBackendMissionStatusPath),e).status==400);
+  e.trusted_monotonic_received_sec=std::numeric_limits<double>::infinity();
+  assert(svc.dispatch(ingress("GET",kBackendMissionStatusPath),e).status==400);
+  e.trusted_monotonic_received_sec=std::numeric_limits<double>::quiet_NaN();
+  assert(svc.dispatch(ingress("GET",kBackendMissionStatusPath),e).status==400);
+  e.trusted_monotonic_received_sec=101;
+  assert(svc.dispatch(ingress("GET",kBackendMissionStatusPath),e).status==200);
+}
+static void ingress_h5s_limits() {
+  TempDb db("h5s_limits");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  auto q=ingress("POST",kBackendMissionUploadPath);
+  q.http.body=std::string(1025,'x');
+  assert(svc.dispatch(q,proof()).status==413);
+  assert(svc.snapshot().last_accepted_request_id==0);
+  q=ingress("POST",kBackendMissionUploadPath);q.http.path=std::string(513,'x');
+  assert(svc.dispatch(q,proof()).status==413);
+  q=ingress("POST",kBackendMissionUploadPath);q.http.path.clear();
+  assert(svc.dispatch(q,proof()).status==400);
+  assert(svc.dispatch(ingress("POST",kBackendMissionUploadPath),proof()).status==423);
+}
+static void ingress_h5s_commands() {
+  TempDb db("h5s_commands");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  std::uint64_t id=1;
+  for(const char* path:{kBackendMissionStartPath,kBackendMissionPausePath,
+      kBackendMissionResumePath,kBackendMissionNextPath,kBackendMissionSkipPath,
+      kBackendMissionUploadPath,kBackendMissionUpdatePath,kBackendMissionLoadPath}) {
+    auto q=ingress("POST",path);q.trusted_px4_disarmed=true;
+    const auto r=svc.dispatch(q,proof(id++));
+    assert(r.status==423 && !r.physical_command_emitted);
+  }
+  auto r=svc.dispatch(ingress("POST",kBackendMissionStopPath),proof(id++));
+  assert(r.status==200 && r.body.find("\"safe_stop_intent\":true")!=std::string::npos);
+  assert(!svc.snapshot().hardware_command_emitted);
+}
+static void ingress_h5s_preview() {
+  TempDb db("h5s_preview");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  auto r=svc.dispatch(draft_request(),proof());
+  assert(r.status==200 && r.body.find("\"preview_only\":true")!=std::string::npos);
+  assert(r.body.find("marking_points")==std::string::npos);
+  auto q=draft_request();q.http.path+="&override=1";
+  assert(svc.dispatch(q,proof(2)).status==400);
+}
+static void ingress_h5s_tamper() {
+  TempDb db("h5s_tamper");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  assert(svc.dispatch(draft_request(),proof()).status==200);
+  sql(db,"UPDATE dyx_mission_recovery_staging SET last_sequence=999");
+  assert(svc.dispatch(draft_request(),proof(2)).status==423);
+  assert(svc.dispatch(ingress("POST",kBackendMissionStartPath),proof(3)).status==423);
+}
+static void ingress_h5s_shutdown() {
+  TempDb db("h5s_shutdown");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  svc.shutdown();svc.shutdown();
+  assert(svc.snapshot().closed_permanently && !svc.snapshot().admitted);
+  assert(!svc.admit_recovery_only());
+  assert(svc.dispatch(ingress("POST",kBackendMissionStopPath),proof()).status==423);
+}
+static void ingress_h5s_race() {
+  TempDb db("h5s_race");prepare(db);
+  NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+  assert(svc.admit_recovery_only());
+  std::atomic<std::uint64_t> seq{1};
+  std::atomic<int> accepted{0};
+  std::vector<std::thread> threads;
+  for(int t=0;t<6;++t)threads.emplace_back([&] {
+    for(int i=0;i<12;++i) {
+      auto id=seq.fetch_add(1);
+      auto r=svc.dispatch(ingress("GET",kBackendMissionStatusPath),proof(id));
+      assert(r.status==200 || r.status==409);
+      if(r.status==200)++accepted;
+      assert(!r.physical_command_emitted && !r.network_io_performed);
+    }
+  });
+  for(auto& th:threads)th.join();
+  assert(accepted.load()>0 && svc.snapshot().admitted);
+  svc.shutdown();
+  assert(svc.dispatch(ingress("GET",kBackendMissionStatusPath),proof(1000)).status==423);
+}
+static void ingress_h5s_restart() {
+  TempDb db("h5s_restart");prepare(db);
+  for(int i=0;i<3;++i) {
+    NativeOfflineRecoveryTrustedIngressLab svc(db.file.string(),review());
+    assert(svc.dispatch(draft_request(),proof()).status==423);
+    assert(svc.admit_recovery_only());
+    assert(svc.dispatch(draft_request(),proof()).status==200);
+    assert(svc.dispatch(ingress("POST",kBackendMissionStartPath),proof(2)).status==423);
+    svc.shutdown();
+  }
+}
 int main(int argc,char** argv) {
   if(argc!=2)return 2;
   const std::string m=argv[1];
@@ -647,6 +827,20 @@ int main(int argc,char** argv) {
   else if(m=="service_restart")service_restart();
   else if(m=="service_parallel")service_parallel();
   else if(m=="service_shutdown_race")service_shutdown_race();
+  else if(m=="trusted_boot_closed")ingress_h5s_boot_closed();
+  else if(m=="trusted_status")ingress_h5s_status();
+  else if(m=="trusted_forged_client")ingress_h5s_forged_client();
+  else if(m=="trusted_unauth")ingress_h5s_unauth();
+  else if(m=="trusted_identity")ingress_h5s_identity();
+  else if(m=="trusted_replay")ingress_h5s_replay();
+  else if(m=="trusted_clock")ingress_h5s_clock();
+  else if(m=="trusted_limits")ingress_h5s_limits();
+  else if(m=="trusted_commands")ingress_h5s_commands();
+  else if(m=="trusted_preview")ingress_h5s_preview();
+  else if(m=="trusted_tamper")ingress_h5s_tamper();
+  else if(m=="trusted_shutdown")ingress_h5s_shutdown();
+  else if(m=="trusted_race")ingress_h5s_race();
+  else if(m=="trusted_restart")ingress_h5s_restart();
   else return 2;
   std::cout<<"PASS H5O "<<m<<"\n";
 }

@@ -310,3 +310,11 @@ foreach(mode IN ITEMS boot_closed open_status locked_actions preview missing_db
       COMMAND "$<TARGET_FILE:draft_sqlite_recovery_http_owner_native_smoke>"
               service_${mode})
 endforeach()
+
+# H5S: offline server-verified ingress evidence contract (no live verifier).
+foreach(mode IN ITEMS boot_closed status forged_client unauth identity replay
+                      clock limits commands preview tamper shutdown race restart)
+  add_test(NAME draft_sqlite_recovery_h5s_${mode}_native_smoke
+      COMMAND "$<TARGET_FILE:draft_sqlite_recovery_http_owner_native_smoke>"
+              trusted_${mode})
+endforeach()
