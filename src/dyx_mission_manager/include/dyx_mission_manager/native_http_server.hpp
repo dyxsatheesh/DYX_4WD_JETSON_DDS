@@ -4,8 +4,10 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <nlohmann/json.hpp>
+#include "dyx_mission_manager/native_session_auth.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -67,9 +69,11 @@ class HttpSession final
  public:
   HttpSession(
       tcp::socket socket,
-      std::shared_ptr<NativeStatusSnapshot> snapshot)
+      std::shared_ptr<NativeStatusSnapshot> snapshot,
+      std::shared_ptr<NativeSessionAuth> sessions)
       : stream_(std::move(socket)),
-        snapshot_(std::move(snapshot)) {}
+        snapshot_(std::move(snapshot)),
+        sessions_(std::move(sessions)) {}
 
   void start() {
     parser_.body_limit(8192);
@@ -115,6 +119,38 @@ class HttpSession final
           {"motor_commands_enabled", false},
           {"spray_commands_enabled", false}
       }.dump();
+    } else if (request.method() == http::verb::get &&
+               request.target() == "/api/native/auth/session") {
+      if (!sessions_->configured()) {
+        response->result(http::status::service_unavailable);
+        response->body() = R"({"detail":"NATIVE_SESSION_DB_NOT_CONFIGURED"})";
+      } else {
+        std::string token;
+        const auto bearer = request.find(http::field::authorization);
+        if (bearer != request.end()) {
+          std::string value = bearer->value().to_string();
+          if (value.size()>=7 && value.compare(0,7,"Bearer ")==0)
+            token = value.substr(7);
+        }
+        if (token.empty()) {
+          const auto header = request.find("X-Rover-Token");
+          if (header!=request.end()) token=header->value().to_string();
+        }
+        const auto session = sessions_->verify(token);
+        if (!session.authenticated) {
+          response->result(http::status::unauthorized);
+          response->body() = R"({"detail":"AUTHENTICATION_REQUIRED"})";
+        } else {
+          response->result(http::status::ok);
+          response->body() = nlohmann::json{
+              {"authenticated",true},
+              {"session",{{"session_id",session.session_id},
+                          {"username",session.username}}},
+              {"decision_only",true},
+              {"mission_commands_enabled",false}}
+              .dump();
+        }
+      }
     } else if (
         request.method() == http::verb::get &&
         request.target() == "/api/native/mission/status") {
@@ -158,6 +194,7 @@ class HttpSession final
 
   beast::tcp_stream stream_;
   std::shared_ptr<NativeStatusSnapshot> snapshot_;
+  std::shared_ptr<NativeSessionAuth> sessions_;
   beast::flat_buffer buffer_;
   http::request_parser<http::string_body> parser_;
 };
@@ -167,7 +204,10 @@ class NativeHttpServer final {
   NativeHttpServer(
       std::uint16_t port,
       std::shared_ptr<NativeStatusSnapshot> snapshot)
-      : acceptor_(ioc_), snapshot_(std::move(snapshot)) {
+      : acceptor_(ioc_), snapshot_(std::move(snapshot)),
+        sessions_(std::make_shared<NativeSessionAuth>(
+            std::getenv("DYX_CPP17_AUTH_DB") ?
+            std::getenv("DYX_CPP17_AUTH_DB") : "")) {
     if (!snapshot_)
       throw std::invalid_argument("HTTP status snapshot required");
     if (port == 0)
@@ -209,7 +249,7 @@ class NativeHttpServer final {
             tcp::socket socket) {
           if (!ec) {
             std::make_shared<HttpSession>(
-                std::move(socket), snapshot_)->start();
+                std::move(socket), snapshot_, sessions_)->start();
           }
 
           if (acceptor_.is_open())
@@ -218,6 +258,7 @@ class NativeHttpServer final {
   }
 
   std::shared_ptr<NativeStatusSnapshot> snapshot_;
+  std::shared_ptr<NativeSessionAuth> sessions_;
   asio::io_context ioc_{1};
   tcp::acceptor acceptor_;
   std::thread worker_;

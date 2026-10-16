@@ -33,6 +33,8 @@ install(
 find_package(px4_msgs REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 add_executable(
   dyx_mission_dds_runtime_node
@@ -55,6 +57,8 @@ target_link_libraries(
   dyx_mission_dds_runtime_node
   Boost::system
   Threads::Threads
+  OpenSSL::Crypto
+  SQLite::SQLite3
 )
 
 install(
