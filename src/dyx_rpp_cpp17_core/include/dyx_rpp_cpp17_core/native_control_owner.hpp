@@ -2,8 +2,12 @@
 
 #include "dyx_rpp_cpp17_core/mission_command_gateway.hpp"
 #include "dyx_rpp_cpp17_core/native_mission_rpp_pipeline.hpp"
+#include "dyx_rpp_cpp17_core/trajectory_builder.hpp"
+#include "dyx_rpp_cpp17_core/mission_runtime_install.hpp"
 
 #include <cstdint>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,6 +42,57 @@ class NativeControlOwner final {
         trusted_upload_authorized,
         trusted_control_lease,
         trusted_px4_disarmed);
+  }
+
+  // Production geometry-to-mission binding. Authorization/disarm
+  // attestations MUST come from a trusted backend/PX4 adapter.
+  ClientCommandStatus load_prepared(
+      const std::string& run_id,
+      const std::string& session_id,
+      const std::vector<Point2D>& marking_points,
+      MissionMode mode,
+      bool upload_authorized,
+      bool control_lease_verified,
+      bool px4_disarmed_verified,
+      TrajectoryBuildConfig trajectory_cfg = {}) {
+
+    if (!upload_authorized || !control_lease_verified ||
+        !px4_disarmed_verified)
+      return ClientCommandStatus::unauthorized;
+
+    if (prepared_ || gateway_.has_active_mission())
+      return ClientCommandStatus::invalid_stage;
+
+    try {
+      // Keep the trajectory and semantic goals in the same
+      // immutable prepared-path snapshot.
+      auto trajectory =
+          NativeTrajectoryBuilder(trajectory_cfg).build(marking_points);
+
+      auto snapshot =
+          signed_snapshot(trajectory.navigation, marking_points);
+
+      auto candidate = std::make_unique<NativeMissionInstallation>(
+          std::move(snapshot), run_id, mode);
+
+      auto status = gateway_.load(
+          run_id, session_id, candidate->marking_goals, mode,
+          upload_authorized, control_lease_verified,
+          px4_disarmed_verified);
+
+      if (status != ClientCommandStatus::accepted)
+        return status;
+
+      prepared_ = std::move(candidate);
+      return ClientCommandStatus::accepted;
+
+    } catch (const std::exception&) {
+      return ClientCommandStatus::runtime_rejected;
+    }
+  }
+
+  const NativeMissionInstallation* prepared_mission() const {
+    return prepared_.get();
   }
 
   DdsTelemetryDecision observe_battery(const DdsBatteryFrame& f) {
@@ -146,6 +201,7 @@ class NativeControlOwner final {
 
  private:
   NativeMissionCommandGateway gateway_{};
+  std::unique_ptr<NativeMissionInstallation> prepared_{};
   NativeMissionRppPipeline pipeline_{};
 };
 
