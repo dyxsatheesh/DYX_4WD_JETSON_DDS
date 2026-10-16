@@ -152,7 +152,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     // Android's existing production endpoint.
     native_http_ =
         std::make_unique<dyx::http_backend::NativeHttpServer>(
-            18766, native_status_);
+            18766, native_status_, command_mailbox_);
 
     timer_ = create_wall_timer(20ms, [this]() { tick(); });
 
@@ -404,7 +404,9 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         {"mailbox_normal_queued", command_mailbox_.queued_normal()},
         {"mailbox_stop_latched", command_mailbox_.stopped_latched()},
         {"mailbox_commands_processed", processed_commands_},
-        {"http_command_ingress_ready", false},
+        {"http_command_ingress_ready", true},
+        {"http_stop_only", true},
+        {"physical_stop_confirmed", false},
         {"control_timing_fault", timing_fault_},
         {"control_missed_cycles", missed_cycle_count_},
         {"authentication_ready", false},

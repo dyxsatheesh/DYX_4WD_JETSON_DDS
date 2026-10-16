@@ -5,6 +5,7 @@
 #include <boost/beast/http.hpp>
 #include <nlohmann/json.hpp>
 #include "dyx_mission_manager/native_session_auth.hpp"
+#include "dyx_mission_manager/native_command_mailbox.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -70,10 +71,11 @@ class HttpSession final
   HttpSession(
       tcp::socket socket,
       std::shared_ptr<NativeStatusSnapshot> snapshot,
-      std::shared_ptr<NativeSessionAuth> sessions)
+      std::shared_ptr<NativeSessionAuth> sessions,
+      NativeCommandMailbox& mailbox)
       : stream_(std::move(socket)),
         snapshot_(std::move(snapshot)),
-        sessions_(std::move(sessions)) {}
+        sessions_(std::move(sessions)), mailbox_(mailbox) {}
 
   void start() {
     parser_.body_limit(8192);
@@ -151,6 +153,46 @@ class HttpSession final
               .dump();
         }
       }
+    } else if (request.method() == http::verb::post &&
+               request.target() == "/api/native/mission/stop") {
+      // Dedicated authenticated decision-side STOP; no positive action access.
+      if (!sessions_->configured()) {
+        response->result(http::status::service_unavailable);
+        response->body() = R"({"detail":"NATIVE_SESSION_DB_NOT_CONFIGURED"})";
+      } else {
+        std::string token;
+        auto auth = request.find(http::field::authorization);
+        if (auth != request.end()) {
+          auto v = auth->value().to_string();
+          if (v.size() >= 7 && v.compare(0,7,"Bearer ") == 0)
+            token = v.substr(7);
+        }
+        if (token.empty()) {
+          auto t = request.find("X-Rover-Token");
+          if (t != request.end()) token = t->value().to_string();
+        }
+        auto session = sessions_->verify(token);
+        if (!session.authenticated) {
+          response->result(http::status::unauthorized);
+          response->body() = R"({"detail":"AUTHENTICATION_REQUIRED"})";
+        } else {
+          dyx::rpp::BackendMissionApiRequest command{};
+          command.method = "POST";
+          command.path = dyx::rpp::kBackendMissionStopPath;
+          command.principal.authenticated = true;
+          command.principal.operator_session_id = session.session_id;
+          command.mission_run_id = "native_stop";
+          command.sequence = 1;
+          auto result = mailbox_.submit_verified(std::move(command), true);
+          if (result != NativeCommandMailbox::SubmitResult::accepted) {
+            response->result(http::status::service_unavailable);
+            response->body() = R"({"detail":"STOP_ENQUEUE_REJECTED"})";
+          } else {
+            response->result(http::status::accepted);
+            response->body() = R"({"state":"STOP_QUEUED_DECISION_ONLY","physical_stop_confirmed":false,"px4_stop_confirmed":false})";
+          }
+        }
+      }
     } else if (
         request.method() == http::verb::get &&
         request.target() == "/api/native/mission/status") {
@@ -195,6 +237,7 @@ class HttpSession final
   beast::tcp_stream stream_;
   std::shared_ptr<NativeStatusSnapshot> snapshot_;
   std::shared_ptr<NativeSessionAuth> sessions_;
+  NativeCommandMailbox& mailbox_;
   beast::flat_buffer buffer_;
   http::request_parser<http::string_body> parser_;
 };
@@ -203,8 +246,9 @@ class NativeHttpServer final {
  public:
   NativeHttpServer(
       std::uint16_t port,
-      std::shared_ptr<NativeStatusSnapshot> snapshot)
-      : acceptor_(ioc_), snapshot_(std::move(snapshot)),
+      std::shared_ptr<NativeStatusSnapshot> snapshot,
+      NativeCommandMailbox& mailbox)
+      : acceptor_(ioc_), snapshot_(std::move(snapshot)), mailbox_(mailbox),
         sessions_(std::make_shared<NativeSessionAuth>(
             std::getenv("DYX_CPP17_AUTH_DB") ?
             std::getenv("DYX_CPP17_AUTH_DB") : "")) {
@@ -249,7 +293,7 @@ class NativeHttpServer final {
             tcp::socket socket) {
           if (!ec) {
             std::make_shared<HttpSession>(
-                std::move(socket), snapshot_, sessions_)->start();
+                std::move(socket), snapshot_, sessions_, mailbox_)->start();
           }
 
           if (acceptor_.is_open())
@@ -259,6 +303,7 @@ class NativeHttpServer final {
 
   std::shared_ptr<NativeStatusSnapshot> snapshot_;
   std::shared_ptr<NativeSessionAuth> sessions_;
+  NativeCommandMailbox& mailbox_;
   asio::io_context ioc_{1};
   tcp::acceptor acceptor_;
   std::thread worker_;
