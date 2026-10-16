@@ -152,6 +152,9 @@ private:
                 const auto decision = evaluate_safety();
                 mission_.resume(decision.start_resume_allowed);
             } else if (value == "NEXT") {
+                const auto decision = evaluate_safety();
+                if (!decision.continue_allowed)
+                    throw std::logic_error("Safety gate denies NEXT");
                 mission_.next();
             } else if (value == "SKIP") {
                 const auto decision = evaluate_safety();
