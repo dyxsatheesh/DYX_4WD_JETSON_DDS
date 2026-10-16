@@ -31,10 +31,16 @@ install(
 
 
 find_package(px4_msgs REQUIRED)
+find_package(Boost REQUIRED COMPONENTS system)
+find_package(Threads REQUIRED)
 
 add_executable(
   dyx_mission_dds_runtime_node
   src/dyx_mission_dds_runtime_node.cpp
+)
+
+target_include_directories(
+  dyx_mission_dds_runtime_node PRIVATE include
 )
 
 ament_target_dependencies(
@@ -43,6 +49,12 @@ ament_target_dependencies(
   px4_msgs
   std_msgs
   dyx_rpp_cpp17_core
+)
+
+target_link_libraries(
+  dyx_mission_dds_runtime_node
+  Boost::system
+  Threads::Threads
 )
 
 install(

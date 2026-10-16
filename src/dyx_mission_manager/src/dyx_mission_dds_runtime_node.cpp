@@ -1,4 +1,5 @@
 #include "dyx_rpp_cpp17_core/native_control_owner.hpp"
+#include "dyx_mission_manager/native_http_server.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -145,6 +146,13 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
 
     // Target scheduling rate: 50 Hz. This does not guarantee
     // real-time scheduling or PX4 command delivery.
+    // Start the native HTTP transport within this ROS 2 process.
+    // Initially localhost-only, non-actuating, and separate from
+    // Android's existing production endpoint.
+    native_http_ =
+        std::make_unique<dyx::http_backend::NativeHttpServer>(
+            18766);
+
     timer_ = create_wall_timer(20ms, [this]() { tick(); });
 
     RCLCPP_WARN(
@@ -355,6 +363,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   }
 
   NativeControlOwner owner_{};
+  std::unique_ptr<dyx::http_backend::NativeHttpServer> native_http_{};
   bool telemetry_fault_{false};
   std::uint64_t control_sequence_{0};
   double last_tick_sec_{-1.0};
