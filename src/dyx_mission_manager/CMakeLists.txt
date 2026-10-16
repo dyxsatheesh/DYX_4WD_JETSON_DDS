@@ -29,4 +29,25 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
+
+find_package(px4_msgs REQUIRED)
+
+add_executable(
+  dyx_mission_dds_runtime_node
+  src/dyx_mission_dds_runtime_node.cpp
+)
+
+ament_target_dependencies(
+  dyx_mission_dds_runtime_node
+  rclcpp
+  px4_msgs
+  std_msgs
+  dyx_rpp_cpp17_core
+)
+
+install(
+  TARGETS dyx_mission_dds_runtime_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
