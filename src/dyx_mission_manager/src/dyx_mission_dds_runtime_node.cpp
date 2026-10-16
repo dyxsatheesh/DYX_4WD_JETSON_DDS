@@ -1,4 +1,5 @@
 #include "dyx_rpp_cpp17_core/native_control_owner.hpp"
+#include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/battery_status.hpp>
@@ -8,6 +9,9 @@
 #include <std_msgs/msg/string.hpp>
 
 #include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <stdexcept>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -20,6 +24,18 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
  public:
   DyxMissionDdsRuntime()
       : Node("dyx_mission_dds_runtime") {
+    // Configurable lever arm, disabled until actually measured.
+    // Configuration alone does NOT certify a marking reference.
+    lever_.forward_m =
+        declare_parameter<double>("imu_to_rear_master_forward_m", 0.0);
+    lever_.right_m =
+        declare_parameter<double>("imu_to_rear_master_right_m", 0.0);
+
+    if (!std::isfinite(lever_.forward_m) ||
+        !std::isfinite(lever_.right_m) ||
+        std::hypot(lever_.forward_m, lever_.right_m) > 2.0)
+      throw std::invalid_argument("Invalid rear master lever arm");
+
     const auto qos = rclcpp::SensorDataQoS();
 
     battery_sub_ =
@@ -86,6 +102,27 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.y_m = m->y;
               f.heading_rad = m->heading;
               inspect(owner_.observe_estimator(f));
+
+              if (position_seen_ &&
+                  (m->timestamp_sample <= last_position_sample_us_ ||
+                   m->xy_reset_counter != initial_xy_reset_ ||
+                   m->heading_reset_counter != initial_heading_reset_)) {
+                position_fault_ = true;
+                owner_.force_stop();
+              }
+
+              if (!position_seen_) {
+                initial_xy_reset_ = m->xy_reset_counter;
+                initial_heading_reset_ = m->heading_reset_counter;
+              }
+
+              if (m->timestamp_sample == 0)
+                position_fault_ = true;
+
+              position_seen_ = true;
+              last_position_sample_us_ = m->timestamp_sample;
+              last_position_received_sec_ = f.received_sec;
+              last_position_ = f;
             });
 
     status_pub_ = create_publisher<std_msgs::msg::String>(
@@ -148,6 +185,31 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     std_msgs::msg::String status{};
     std::ostringstream out;
 
+    const bool position_fresh =
+        position_seen_ && !position_fault_ &&
+        std::isfinite(last_position_received_sec_) &&
+        now >= last_position_received_sec_ &&
+        now - last_position_received_sec_ <= 0.25 &&
+        last_position_.xy_valid &&
+        last_position_.heading_good_for_control;
+
+    bool reference_available = false;
+    dyx::rpp::RearMarkingPosition rear{};
+
+    if (position_fresh) {
+      try {
+        rear = dyx::rpp::compute_rear_marking_reference(
+            last_position_.x_m,
+            last_position_.y_m,
+            last_position_.heading_rad,
+            lever_);
+        reference_available = true;
+      } catch (const std::invalid_argument&) {
+        position_fault_ = true;
+        owner_.force_stop();
+      }
+    }
+
     out << "NATIVE_DDS_MISSION_RUNTIME"
         << ";stage="
         << dyx::rpp::mission_stage_name(
@@ -163,6 +225,11 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
             result.mission.telemetry_fault_latched)
         << ";rpp_motion_permitted="
         << result.motion.permitted
+        << ";rear_reference_available=" << reference_available
+        << ";rear_reference_north_m=" << rear.north_m
+        << ";rear_reference_east_m=" << rear.east_m
+        << ";rear_reference_calibrated=false"
+        << ";position_fault=" << position_fault_
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -174,6 +241,17 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   NativeControlOwner owner_{};
   bool telemetry_fault_{false};
   std::uint64_t control_sequence_{0};
+
+  dyx::rpp::RearMarkingLeverArm lever_{};
+  dyx::rpp::DdsEstimatorFrame last_position_{};
+
+  bool position_seen_{false};
+  bool position_fault_{false};
+  std::uint64_t last_position_sample_us_{0};
+  double last_position_received_sec_{0.0};
+
+  std::uint8_t initial_xy_reset_{0};
+  std::uint8_t initial_heading_reset_{0};
 
   rclcpp::Subscription<
       px4_msgs::msg::BatteryStatus>::SharedPtr battery_sub_;
