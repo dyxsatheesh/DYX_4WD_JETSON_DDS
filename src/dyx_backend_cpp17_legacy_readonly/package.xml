@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>dyx_backend_cpp17_legacy_readonly</name>
+  <version>0.1.0</version>
+  <description>H6E2A header-only non-actuating read-only legacy API snapshot adapter.</description>
+  <maintainer email="noreply@dyxautonomous.com">DYX Autonomous</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

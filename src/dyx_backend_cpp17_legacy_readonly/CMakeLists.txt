@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(dyx_backend_cpp17_legacy_readonly LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(ament_cmake REQUIRED)
+install(DIRECTORY include/ DESTINATION include)
+ament_export_include_directories(include)
+ament_package()
