@@ -5,7 +5,10 @@
 #include <boost/beast/http.hpp>
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <cstdint>
+#include <functional>
+#include <mutex>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -20,11 +23,53 @@ namespace http = beast::http;
 
 using tcp = asio::ip::tcp;
 
+// Written only by the ROS executor. Read only by HTTP workers.
+// A stale ROS control loop must never appear as live telemetry.
+class NativeStatusSnapshot final {
+ public:
+  void publish(nlohmann::json value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    value_ = std::move(value);
+    updated_ = std::chrono::steady_clock::now();
+    available_ = true;
+  }
+
+  std::pair<bool, nlohmann::json> read() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!available_)
+      return {false, {{"detail", "ROS_STATUS_NOT_READY"}}};
+
+    const double age = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - updated_).count();
+
+    if (age > 0.50)
+      return {false, {
+          {"detail", "ROS_STATUS_STALE"},
+          {"snapshot_age_sec", age}
+      }};
+
+    auto result = value_;
+    result["snapshot_age_sec"] = age;
+    result["ros_loop_fresh"] = true;
+    return {true, std::move(result)};
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  nlohmann::json value_{};
+  std::chrono::steady_clock::time_point updated_{};
+  bool available_{false};
+};
+
 class HttpSession final
     : public std::enable_shared_from_this<HttpSession> {
  public:
-  explicit HttpSession(tcp::socket socket)
-      : stream_(std::move(socket)) {}
+  HttpSession(
+      tcp::socket socket,
+      std::shared_ptr<NativeStatusSnapshot> snapshot)
+      : stream_(std::move(socket)),
+        snapshot_(std::move(snapshot)) {}
 
   void start() {
     parser_.body_limit(8192);
@@ -70,6 +115,18 @@ class HttpSession final
           {"motor_commands_enabled", false},
           {"spray_commands_enabled", false}
       }.dump();
+    } else if (
+        request.method() == http::verb::get &&
+        request.target() == "/api/native/mission/status") {
+      // This endpoint is a localhost-only, read-only diagnostic.
+      // It exposes no authenticated mission control or secrets.
+      const auto snapshot = snapshot_->read();
+
+      response->result(
+          snapshot.first
+              ? http::status::ok
+              : http::status::service_unavailable);
+      response->body() = snapshot.second.dump();
     } else {
       // No unauthenticated mission, E-stop release,
       // spray or GNSS configuration API is exposed.
@@ -100,14 +157,19 @@ class HttpSession final
   }
 
   beast::tcp_stream stream_;
+  std::shared_ptr<NativeStatusSnapshot> snapshot_;
   beast::flat_buffer buffer_;
   http::request_parser<http::string_body> parser_;
 };
 
 class NativeHttpServer final {
  public:
-  explicit NativeHttpServer(std::uint16_t port)
-      : acceptor_(ioc_) {
+  NativeHttpServer(
+      std::uint16_t port,
+      std::shared_ptr<NativeStatusSnapshot> snapshot)
+      : acceptor_(ioc_), snapshot_(std::move(snapshot)) {
+    if (!snapshot_)
+      throw std::invalid_argument("HTTP status snapshot required");
     if (port == 0)
       throw std::invalid_argument("invalid HTTP port");
 
@@ -147,7 +209,7 @@ class NativeHttpServer final {
             tcp::socket socket) {
           if (!ec) {
             std::make_shared<HttpSession>(
-                std::move(socket))->start();
+                std::move(socket), snapshot_)->start();
           }
 
           if (acceptor_.is_open())
@@ -155,6 +217,7 @@ class NativeHttpServer final {
         });
   }
 
+  std::shared_ptr<NativeStatusSnapshot> snapshot_;
   asio::io_context ioc_{1};
   tcp::acceptor acceptor_;
   std::thread worker_;

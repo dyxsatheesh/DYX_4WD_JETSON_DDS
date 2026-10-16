@@ -151,7 +151,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     // Android's existing production endpoint.
     native_http_ =
         std::make_unique<dyx::http_backend::NativeHttpServer>(
-            18766);
+            18766, native_status_);
 
     timer_ = create_wall_timer(20ms, [this]() { tick(); });
 
@@ -360,9 +360,43 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
 
     status.data = out.str();
     status_pub_->publish(status);
+
+    // Single-writer, read-only telemetry snapshot for HTTP.
+    // Neither HTTP status nor this snapshot can authorize movement.
+    native_status_->publish({
+        {"service", "dyx_cpp17_http"},
+        {"mission_stage",
+         dyx::rpp::mission_stage_name(owner_.mission().stage())},
+        {"mission_loaded", owner_.has_active_mission()},
+        {"safe_stop_requested", owner_.safe_stop_requested()},
+        {"px4_vehicle_fresh", result.mission.telemetry.px4_vehicle_fresh},
+        {"gps_fresh", result.mission.telemetry.gps_sample_fresh},
+        {"battery_fresh", result.mission.telemetry.battery_sample_fresh},
+        {"telemetry_fault",
+         telemetry_fault_ ||
+         result.mission.telemetry_fault_latched},
+        {"position_fault", position_fault_},
+        {"rear_reference_available", reference_available},
+        {"rear_reference_calibrated", false},
+        {"control_target_hz", 50},
+        {"control_timing_fault", timing_fault_},
+        {"control_missed_cycles", missed_cycle_count_},
+        {"authentication_ready", false},
+        {"mission_commands_enabled", false},
+        {"motor_commands_enabled", false},
+        {"spray_commands_enabled", false},
+        {"physical_command_emitted", false}
+    });
   }
 
   NativeControlOwner owner_{};
+
+  // Construct the shared snapshot before the HTTP server so
+  // it remains available throughout the server's lifetime.
+  std::shared_ptr<dyx::http_backend::NativeStatusSnapshot>
+      native_status_{
+          std::make_shared<dyx::http_backend::NativeStatusSnapshot>()};
+
   std::unique_ptr<dyx::http_backend::NativeHttpServer> native_http_{};
   bool telemetry_fault_{false};
   std::uint64_t control_sequence_{0};
