@@ -143,7 +143,9 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         "/dyx/native/mission_dds_runtime/status",
         rclcpp::QoS(5));
 
-    timer_ = create_wall_timer(50ms, [this]() { tick(); });
+    // Target scheduling rate: 50 Hz. This does not guarantee
+    // real-time scheduling or PX4 command delivery.
+    timer_ = create_wall_timer(20ms, [this]() { tick(); });
 
     RCLCPP_WARN(
         get_logger(),
@@ -170,6 +172,20 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   void tick() {
     const double now = now_sec();
 
+    double cycle_dt_sec = 0.02;
+    if (last_tick_sec_ >= 0.0) {
+      cycle_dt_sec = now - last_tick_sec_;
+      if (!std::isfinite(cycle_dt_sec) ||
+          cycle_dt_sec <= 0.0 ||
+          cycle_dt_sec > 0.10) {
+        timing_fault_ = true;
+        owner_.force_stop();
+      } else if (cycle_dt_sec > 0.04) {
+        ++missed_cycle_count_;
+      }
+    }
+    last_tick_sec_ = now;
+
     dyx::rpp::MissionSequenceInput evidence{};
     evidence.monotonic_time_sec = now;
     evidence.emergency_stop = true;
@@ -179,7 +195,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     dyx::rpp::NativeMissionRppInput guidance{};
     guidance.sequence = ++control_sequence_;
     guidance.guidance.now_sec = now;
-    guidance.guidance.dt_sec = 0.05;
+    guidance.guidance.dt_sec = cycle_dt_sec;
 
     // No trusted mission upload, control lease, GNSS calibration,
     // obstacle clearance or physical E-stop adapter yet.
@@ -227,7 +243,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     dyx::rpp::MissionLegPreviewInput leg_input{};
 
     leg_input.now_sec = now;
-    leg_input.dt_sec = 0.05;
+    leg_input.dt_sec = cycle_dt_sec;
 
     leg_input.position_sample_time_sec =
         last_position_received_sec_;
@@ -253,16 +269,36 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               last_velocity_north_mps_,
               last_velocity_east_mps_);
 
-      // Diagnostic magnitude only. No positive actuator
-      // decision is allowed from this estimate.
-      leg_input.measured_forward_speed_mps =
-          leg_input.position_derived_speed_mps;
+      // PX4 heading is clockwise from North.
+      // Project NED velocity onto the rover's forward axis:
+      // forward = North*cos(heading) + East*sin(heading).
+      const double forward =
+          last_velocity_north_mps_ *
+              std::cos(last_position_.heading_rad) +
+          last_velocity_east_mps_ *
+              std::sin(last_position_.heading_rad);
+
+      signed_forward_speed_mps_ = forward;
+
+      // Never represent reverse motion as positive forward speed.
+      // The preview API currently requires a nonnegative input,
+      // so reverse velocity invalidates its diagnostic health.
+      if (!std::isfinite(forward) || forward < -0.01) {
+        forward_speed_valid_ = false;
+        leg_input.measured_forward_speed_mps = 0.0;
+      } else {
+        forward_speed_valid_ = true;
+        leg_input.measured_forward_speed_mps =
+            std::max(0.0, forward);
+      }
     }
 
     leg_input.telemetry_fresh =
         position_fresh &&
         reference_available &&
-        last_velocity_valid_;
+        last_velocity_valid_ &&
+        forward_speed_valid_ &&
+        !timing_fault_;
 
     // Deliberate fail-closed placeholders until real trusted
     // production adapters are integrated.
@@ -296,6 +332,13 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         << ";rear_reference_east_m=" << rear.east_m
         << ";rear_reference_calibrated=false"
         << ";position_fault=" << position_fault_
+        << ";control_target_hz=50"
+        << ";control_cycle_dt_sec=" << cycle_dt_sec
+        << ";control_missed_cycles=" << missed_cycle_count_
+        << ";control_timing_fault=" << timing_fault_
+        << ";signed_forward_speed_mps="
+        << signed_forward_speed_mps_
+        << ";forward_speed_valid=" << forward_speed_valid_
         << ";rpp_preview_valid=" << leg.valid
         << ";rpp_preview_hold_zero=" << leg.hold_zero
         << ";rpp_preview_reason=" << leg.reason
@@ -314,6 +357,9 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   NativeControlOwner owner_{};
   bool telemetry_fault_{false};
   std::uint64_t control_sequence_{0};
+  double last_tick_sec_{-1.0};
+  std::uint64_t missed_cycle_count_{0};
+  bool timing_fault_{false};
 
   dyx::rpp::RearMarkingLeverArm lever_{};
   dyx::rpp::DdsEstimatorFrame last_position_{};
@@ -321,6 +367,8 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   double last_velocity_north_mps_{0.0};
   double last_velocity_east_mps_{0.0};
   bool last_velocity_valid_{false};
+  double signed_forward_speed_mps_{0.0};
+  bool forward_speed_valid_{false};
 
   bool position_seen_{false};
   bool position_fault_{false};
