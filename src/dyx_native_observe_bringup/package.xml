@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>dyx_native_observe_bringup</name>
+  <version>0.1.0</version>
+  <description>Phase H6A isolated read-only C++17 DDS observer launch. No PX4 command publishers.</description>
+  <maintainer email="engineering@dyxautonomous.com">DYX Autonomous Engineering</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>launch_xml</exec_depend>
+  <exec_depend>dyx_jetson_readonly_dds</exec_depend>
+  <exec_depend>dyx_rpp_cpp17_shadow</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

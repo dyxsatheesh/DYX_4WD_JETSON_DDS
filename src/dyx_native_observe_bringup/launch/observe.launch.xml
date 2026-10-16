@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- H6A offline staged DDS observation only. NEVER publish PX4 commands. -->
+<launch>
+  <node pkg="dyx_jetson_readonly_dds" exec="dyx_jetson_readonly_dds_node" name="dyx_jetson_readonly_px4" output="screen" />
+  <node pkg="dyx_rpp_cpp17_shadow" exec="dyx_rpp_cpp17_shadow_node" name="dyx_rpp_cpp17_shadow" output="screen">
+    <param name="shadow_enabled" value="false" />
+  </node>
+</launch>
