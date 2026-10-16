@@ -11,4 +11,22 @@ add_executable(dyx_mission_manager_node src/dyx_mission_manager_node.cpp)
 target_include_directories(dyx_mission_manager_node PRIVATE include)
 ament_target_dependencies(dyx_mission_manager_node rclcpp std_msgs geometry_msgs dyx_rpp_cpp17_core)
 install(TARGETS dyx_mission_manager_node DESTINATION lib/${PROJECT_NAME})
+
+add_executable(
+  dyx_mission_lifecycle_test_node
+  src/dyx_mission_lifecycle_test_node.cpp
+)
+
+ament_target_dependencies(
+  dyx_mission_lifecycle_test_node
+  rclcpp
+  std_msgs
+  dyx_rpp_cpp17_core
+)
+
+install(
+  TARGETS dyx_mission_lifecycle_test_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
