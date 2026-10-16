@@ -4,6 +4,7 @@
 #include "dyx_rpp_cpp17_core/native_mission_rpp_pipeline.hpp"
 #include "dyx_rpp_cpp17_core/trajectory_builder.hpp"
 #include "dyx_rpp_cpp17_core/mission_runtime_install.hpp"
+#include "dyx_rpp_cpp17_core/mission_leg_preview.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -95,6 +96,79 @@ class NativeControlOwner final {
     return prepared_.get();
   }
 
+  // Diagnostic-only active-leg calculation. Neither this function
+  // nor its output can authorize PX4 motor or spray commands.
+  //
+  // P1 is intentionally excluded: the first marking point has
+  // no inbound mission segment, and must be acquired/certified
+  // by a separate initial-position state machine.
+  MissionLegPreviewResult preview_active_leg(
+      const MissionLegPreviewInput& input) {
+    MissionLegPreviewResult denied{};
+
+    if (!prepared_ || !gateway_.has_active_mission() ||
+        gateway_.safe_stop_requested() ||
+        gateway_.recovery_quarantined()) {
+      denied.reason = "NO_ACTIVE_PREPARED_MISSION";
+      return denied;
+    }
+
+    const auto& status = gateway_.mission().status();
+
+    if (status.stage != MissionStage::approaching ||
+        status.current_marking >= prepared_->marking_goals.size()) {
+      denied.reason = "MISSION_NOT_APPROACHING";
+      return denied;
+    }
+
+    if (status.current_marking == 0) {
+      denied.reason = "P1_INITIAL_ACQUISITION_REQUIRED";
+      return denied;
+    }
+
+    const auto& goal =
+        prepared_->marking_goals.at(status.current_marking);
+
+    if (status.active_terminal_identity != goal.terminal_identity) {
+      denied.reason = "ACTIVE_GOAL_IDENTITY_MISMATCH";
+      return denied;
+    }
+
+    if (active_preview_marking_ != status.current_marking) {
+      // A previously latched preview must not silently restart.
+      // A verified disarmed recovery boundary is required.
+      if (active_preview_ && active_preview_->latched()) {
+        denied.reason = "PREVIEW_RECOVERY_REQUIRED";
+        return denied;
+      }
+
+      try {
+        auto candidate = std::make_unique<MissionLegPreview>(
+            prepared_->snapshot.raw_navigation(),
+            goal.raw_path_index);
+        if (candidate->goal_identity() != goal.goal_label) {
+          denied.reason = "PREVIEW_GOAL_LABEL_MISMATCH";
+          return denied;
+        }
+        active_preview_ = std::move(candidate);
+        active_preview_marking_ = status.current_marking;
+      } catch (const std::exception&) {
+        denied.reason = "PREVIEW_CONSTRUCTION_FAILED";
+        return denied;
+      }
+    }
+
+    // A caller-controlled boolean is not evidence of calibration.
+    // This result is diagnostic only until calibration and
+    // authenticated safety adapters are implemented.
+    return active_preview_->step(input);
+  }
+
+  void invalidate_preview() {
+    active_preview_.reset();
+    active_preview_marking_ = 0;
+  }
+
   DdsTelemetryDecision observe_battery(const DdsBatteryFrame& f) {
     return gateway_.observe_battery(f);
   }
@@ -133,8 +207,11 @@ class NativeControlOwner final {
         gateway_.recovery_quarantined())
       return false;
 
-    return pipeline_.begin_new_disarmed_run(
+    const bool accepted = pipeline_.begin_new_disarmed_run(
         trusted_authorization, verified_px4_disarmed);
+
+    if (accepted) invalidate_preview();
+    return accepted;
   }
 
   NativeOwnedControlOutput tick(
@@ -177,6 +254,7 @@ class NativeControlOwner final {
 
   void force_stop() {
     gateway_.force_stop();
+    invalidate_preview();
   }
 
   void quarantine() {
@@ -203,6 +281,8 @@ class NativeControlOwner final {
   NativeMissionCommandGateway gateway_{};
   std::unique_ptr<NativeMissionInstallation> prepared_{};
   NativeMissionRppPipeline pipeline_{};
+  std::unique_ptr<MissionLegPreview> active_preview_{};
+  std::size_t active_preview_marking_{0};
 };
 
 } // namespace dyx::rpp
