@@ -5,6 +5,8 @@
 #include "dyx_rpp_cpp17_core/trajectory_builder.hpp"
 #include "dyx_rpp_cpp17_core/mission_runtime_install.hpp"
 #include "dyx_rpp_cpp17_core/mission_leg_preview.hpp"
+#include "dyx_rpp_cpp17_core/backend_mission_api.hpp"
+#include "dyx_rpp_cpp17_core/backend_mission_upload.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -26,6 +28,69 @@ struct NativeOwnedControlOutput {
 class NativeControlOwner final {
  public:
   NativeControlOwner() = default;
+
+  // This API receives ONLY authenticated, backend-verified
+  // principal and PX4-disarm evidence from a trusted ingress.
+  // Untrusted HTTP/JSON fields must never populate these facts.
+  BackendMissionUploadResponse handle_backend_upload(
+      const BackendMissionUploadRequest& request) {
+
+    if (request.path == kBackendMissionLoadPath &&
+        prepared_ != nullptr)
+      return {409, "MISSION_ALREADY_INSTALLED"};
+
+    const auto response = uploader_.handle(request);
+
+    if (response.accepted() &&
+        request.path == kBackendMissionLoadPath) {
+      // The same saved snapshot that was loaded into the
+      // gateway must be retained for RPP navigation.
+      try {
+        const auto* snapshot = uploader_.preview_snapshot();
+
+        if (!snapshot || !uploader_.loaded())
+          throw std::logic_error("loaded snapshot unavailable");
+
+        auto candidate = std::make_unique<NativeMissionInstallation>(
+            *snapshot, request.mission_run_id,
+            request.mission_mode);
+
+        if (candidate->marking_goals.size() !=
+            gateway_.mission().records().size())
+          throw std::logic_error("mission goal count mismatch");
+
+        const auto& records = gateway_.mission().records();
+
+        for (std::size_t i = 0;
+             i < candidate->marking_goals.size(); ++i) {
+          if (candidate->marking_goals[i].terminal_identity !=
+              records[i].goal.terminal_identity)
+            throw std::logic_error("mission goal identity mismatch");
+        }
+
+        prepared_ = std::move(candidate);
+
+      } catch (const std::exception&) {
+        gateway_.latch_recovery_quarantine();
+        invalidate_preview();
+        return {423, "MISSION_INSTALL_QUARANTINED"};
+      }
+    }
+    return response;
+  }
+
+  BackendMissionApiResponse handle_backend_action(
+      const BackendMissionApiRequest& request) {
+    const auto response = backend_api_.handle(request);
+
+    if (response.accepted() &&
+        (request.path == kBackendMissionStopPath ||
+         request.path == kBackendMissionPausePath)) {
+      invalidate_preview();
+    }
+
+    return response;
+  }
 
   NativeControlOwner(const NativeControlOwner&) = delete;
   NativeControlOwner& operator=(const NativeControlOwner&) = delete;
@@ -279,6 +344,8 @@ class NativeControlOwner final {
 
  private:
   NativeMissionCommandGateway gateway_{};
+  NativeBackendMissionUpload uploader_{gateway_};
+  NativeBackendMissionApi backend_api_{gateway_};
   std::unique_ptr<NativeMissionInstallation> prepared_{};
   NativeMissionRppPipeline pipeline_{};
   std::unique_ptr<MissionLegPreview> active_preview_{};
