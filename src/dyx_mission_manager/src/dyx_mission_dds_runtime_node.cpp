@@ -123,6 +123,20 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               last_position_sample_us_ = m->timestamp_sample;
               last_position_received_sec_ = f.received_sec;
               last_position_ = f;
+
+              // PX4 local velocity is North/East in the NED frame.
+              // A speed magnitude alone is not proof of forward motion.
+              last_velocity_north_mps_ = m->vx;
+              last_velocity_east_mps_ = m->vy;
+              last_velocity_valid_ =
+                  m->v_xy_valid &&
+                  std::isfinite(m->vx) &&
+                  std::isfinite(m->vy);
+
+              if (!last_velocity_valid_) {
+                position_fault_ = true;
+                owner_.force_stop();
+              }
             });
 
     status_pub_ = create_publisher<std_msgs::msg::String>(
@@ -210,6 +224,58 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
       }
     }
 
+    dyx::rpp::MissionLegPreviewInput leg_input{};
+
+    leg_input.now_sec = now;
+    leg_input.dt_sec = 0.05;
+
+    leg_input.position_sample_time_sec =
+        last_position_received_sec_;
+
+    // Path coordinates are local ENU: X=East, Y=North.
+    leg_input.marking_reference_enu = {
+        rear.east_m,
+        rear.north_m
+    };
+
+    // PX4 NED heading: zero=North, clockwise positive.
+    // RPP ENU yaw: zero=East, counterclockwise positive.
+    if (position_fresh) {
+      leg_input.rover_yaw_enu_rad =
+          dyx::rpp::wrap_angle(
+              dyx::rpp::pi / 2.0 -
+              last_position_.heading_rad);
+    }
+
+    if (last_velocity_valid_) {
+      leg_input.position_derived_speed_mps =
+          std::hypot(
+              last_velocity_north_mps_,
+              last_velocity_east_mps_);
+
+      // Diagnostic magnitude only. No positive actuator
+      // decision is allowed from this estimate.
+      leg_input.measured_forward_speed_mps =
+          leg_input.position_derived_speed_mps;
+    }
+
+    leg_input.telemetry_fresh =
+        position_fresh &&
+        reference_available &&
+        last_velocity_valid_;
+
+    // Deliberate fail-closed placeholders until real trusted
+    // production adapters are integrated.
+    leg_input.marking_reference_calibrated = false;
+    leg_input.rtk_fixed = false;
+    leg_input.mission_enabled = false;
+    leg_input.battery_ok = false;
+    leg_input.obstacle_clear = false;
+    leg_input.emergency_stop = true;
+    leg_input.stationary_pivot_permitted = false;
+
+    const auto leg = owner_.preview_active_leg(leg_input);
+
     out << "NATIVE_DDS_MISSION_RUNTIME"
         << ";stage="
         << dyx::rpp::mission_stage_name(
@@ -230,6 +296,13 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         << ";rear_reference_east_m=" << rear.east_m
         << ";rear_reference_calibrated=false"
         << ";position_fault=" << position_fault_
+        << ";rpp_preview_valid=" << leg.valid
+        << ";rpp_preview_hold_zero=" << leg.hold_zero
+        << ";rpp_preview_reason=" << leg.reason
+        << ";rpp_preview_forward_mps="
+        << leg.forward_preview_mps
+        << ";rpp_preview_yaw_rate_radps="
+        << leg.yaw_rate_enu_preview_radps
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -244,6 +317,10 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
 
   dyx::rpp::RearMarkingLeverArm lever_{};
   dyx::rpp::DdsEstimatorFrame last_position_{};
+
+  double last_velocity_north_mps_{0.0};
+  double last_velocity_east_mps_{0.0};
+  bool last_velocity_valid_{false};
 
   bool position_seen_{false};
   bool position_fault_{false};
