@@ -1,5 +1,6 @@
 #include "dyx_rpp_cpp17_core/native_control_owner.hpp"
 #include "dyx_mission_manager/native_http_server.hpp"
+#include "dyx_mission_manager/native_command_mailbox.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -180,6 +181,24 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   void tick() {
     const double now = now_sec();
 
+    // Only the ROS executor handles the mailbox. A bounded maximum of
+    // four decisions per cycle prevents unbounded request processing.
+    // HTTP command ingress is NOT enabled in this batch: no HTTP thread
+    // can dispatch mission actions or claim an authenticated session.
+    // STOP is decision-side only; physical E-stop still required.
+    for (int i = 0; i < 4; ++i) {
+      auto command = command_mailbox_.pop_for_ros();
+      if (!command) break;
+      if (command->path == dyx::rpp::kBackendMissionStopPath) {
+        owner_.force_stop();
+      } else {
+        // The installed network listener deliberately cannot submit here.
+        // Even a future privileged producer cannot bypass gateway checks.
+        (void)owner_.handle_backend_action(*command);
+      }
+      ++processed_commands_;
+    }
+
     double cycle_dt_sec = 0.02;
     if (last_tick_sec_ >= 0.0) {
       cycle_dt_sec = now - last_tick_sec_;
@@ -340,6 +359,9 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         << ";rear_reference_east_m=" << rear.east_m
         << ";rear_reference_calibrated=false"
         << ";position_fault=" << position_fault_
+        << ";mailbox_normal_queued=" << command_mailbox_.queued_normal()
+        << ";mailbox_stop_latched=" << command_mailbox_.stopped_latched()
+        << ";mailbox_commands_processed=" << processed_commands_
         << ";control_target_hz=50"
         << ";control_cycle_dt_sec=" << cycle_dt_sec
         << ";control_missed_cycles=" << missed_cycle_count_
@@ -379,6 +401,10 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         {"rear_reference_available", reference_available},
         {"rear_reference_calibrated", false},
         {"control_target_hz", 50},
+        {"mailbox_normal_queued", command_mailbox_.queued_normal()},
+        {"mailbox_stop_latched", command_mailbox_.stopped_latched()},
+        {"mailbox_commands_processed", processed_commands_},
+        {"http_command_ingress_ready", false},
         {"control_timing_fault", timing_fault_},
         {"control_missed_cycles", missed_cycle_count_},
         {"authentication_ready", false},
@@ -390,6 +416,8 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   }
 
   NativeControlOwner owner_{};
+  dyx::http_backend::NativeCommandMailbox command_mailbox_{};
+  std::uint64_t processed_commands_{0};
 
   // Construct the shared snapshot before the HTTP server so
   // it remains available throughout the server's lifetime.
