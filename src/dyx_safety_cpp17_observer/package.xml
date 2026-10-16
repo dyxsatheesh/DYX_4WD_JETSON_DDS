@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>dyx_safety_cpp17_observer</name>
+  <version>0.1.0</version>
+  <description>H6D non-actuating ROS2 DDS safety telemetry observer with unverified RTCM and obstacle sources.</description>
+  <maintainer email="noreply@dyxautonomous.com">DYX Autonomous Engineering</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>px4_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>dyx_rpp_cpp17_core</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- H6D opt-in observation ONLY. Never launch motor/servo or Offboard publishers. -->
+<launch>
+  <node pkg="dyx_safety_cpp17_observer" exec="dyx_safety_cpp17_observer_node" name="dyx_h6d_safety_observer" output="screen">
+    <param name="observe_enabled" value="false" />
+    <param name="gps_topic" value="/fmu/out/vehicle_gps_position" />
+  </node>
+</launch>
