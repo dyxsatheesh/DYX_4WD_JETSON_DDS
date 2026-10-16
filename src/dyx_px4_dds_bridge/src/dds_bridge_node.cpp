@@ -1,4 +1,5 @@
 #include "dyx_px4_dds_bridge/geometry.hpp"
+#include "dyx_px4_dds_bridge/safety_freshness.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
@@ -31,11 +32,16 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     command_timeout_s_ = declare_parameter<double>("command_timeout_s", 0.15);
     heartbeat_timeout_s_ =
         declare_parameter<double>("backend_heartbeat_timeout_s", 1.5);
+    safety_input_timeout_s_ =
+        declare_parameter<double>("safety_input_timeout_s", 0.30);
 
     if (!(maximum_speed_mps_ > 0.0 && maximum_speed_mps_ <= 1.0 &&
           maximum_yaw_rate_radps_ > 0.0 && maximum_yaw_rate_radps_ <= 0.18 &&
           command_timeout_s_ > 0.0 && command_timeout_s_ <= 0.5 &&
-          heartbeat_timeout_s_ > 0.0)) {
+          heartbeat_timeout_s_ > 0.0 &&
+          std::isfinite(safety_input_timeout_s_) &&
+          safety_input_timeout_s_ > 0.0 &&
+          safety_input_timeout_s_ <= 0.5)) {
       throw std::runtime_error("Invalid bridge safety parameters");
     }
 
@@ -65,11 +71,15 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         "/emergency_stop", input_qos,
         [this](const std_msgs::msg::Bool::SharedPtr msg) {
           emergency_stop_ = msg->data;
+          have_estop_ = true;
+          estop_received_ = Steady::now();
         });
     mission_sub_ = create_subscription<std_msgs::msg::Bool>(
         "/mission_enable", input_qos,
         [this](const std_msgs::msg::Bool::SharedPtr msg) {
           mission_enabled_ = msg->data;
+          have_mission_ = true;
+          mission_received_ = Steady::now();
         });
     heartbeat_sub_ = create_subscription<std_msgs::msg::UInt64>(
         "/rover_backend/heartbeat", input_qos,
@@ -135,8 +145,16 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     const char *reason = "allowed";
     if (!enable_motion_) {
       reason = "enable_motion_false";
+    } else if (!dyx::bridge::safety_evidence_fresh(
+                       have_estop_, estop_received_,
+                       Steady::now(), safety_input_timeout_s_)) {
+      reason = "emergency_stop_evidence_stale";
     } else if (emergency_stop_) {
       reason = "emergency_stop";
+    } else if (!dyx::bridge::safety_evidence_fresh(
+                       have_mission_, mission_received_,
+                       Steady::now(), safety_input_timeout_s_)) {
+      reason = "mission_authorization_stale";
     } else if (!mission_enabled_) {
       reason = "mission_disabled";
     } else if (!fresh(have_heartbeat_, heartbeat_received_, heartbeat_timeout_s_)) {
@@ -184,15 +202,20 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
   bool armed_{false};
   bool in_offboard_{false};
   bool have_heartbeat_{false};
+  bool have_estop_{false};
+  bool have_mission_{false};
   bool have_px4_status_{false};
   bool have_rpp_{false};
   double maximum_speed_mps_{1.0};
   double maximum_yaw_rate_radps_{0.18};
   double command_timeout_s_{0.15};
   double heartbeat_timeout_s_{1.5};
+  double safety_input_timeout_s_{0.30};
   size_t tick_count_{0};
   dyx::NedCommand latest_rpp_{};
   Steady::time_point heartbeat_received_{};
+  Steady::time_point estop_received_{};
+  Steady::time_point mission_received_{};
   Steady::time_point px4_status_received_{};
   Steady::time_point rpp_received_{};
 
