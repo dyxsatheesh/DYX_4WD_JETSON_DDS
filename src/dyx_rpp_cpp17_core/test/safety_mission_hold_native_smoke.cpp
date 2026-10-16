@@ -24,14 +24,14 @@ int main(){
   assert(hold.mission.stage==MissionStage::verify_hold && hold.mission.hold_zero);
   for(int i=1;i<=5;++i){auto s=good(i);s.gnss_fix_type=5;
     auto o=bridge.step(s,frame(i));
-    assert(o.mission.stage==MissionStage::verify_hold && !o.preview_forward_permitted);
+    assert(o.mission.stage==MissionStage::paused && !o.preview_forward_permitted);
   }
   auto f=good(6);f.gnss_fix_type=5;
   auto paused=bridge.step(f,frame(6));
   assert(paused.mission.stage==MissionStage::paused && paused.mission.hold_zero);
   assert(!paused.float_pause_owned); // do not auto-resume while verifying marking
   auto fix=bridge.step(good(7),frame(7));
-  assert(fix.safety.auto_resume_rtk_float && !fix.auto_resumed_float);
+  assert(!fix.safety.auto_resume_rtk_float && !fix.auto_resumed_float);
   assert(fix.mission.stage==MissionStage::paused);
   assert(!fix.preview_forward_permitted);
   assert(bridge.resume_manually(7.1)); // new operator decision required

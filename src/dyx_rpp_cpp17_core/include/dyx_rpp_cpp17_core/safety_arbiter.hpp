@@ -9,7 +9,7 @@
 
 namespace dyx::rpp {
 enum class SafetyHold { none, disabled, emergency_stop, bad_clock,
-  battery_stale, battery_critical, gnss_stale, rtk_lost, rtk_float_paused,
+  battery_stale, battery_critical, gnss_stale, rtk_lost, rtk_float_confirming, rtk_float_paused,
   corrections_stale, obstacle_stale, obstacle_detected, px4_stale,
   px4_not_offboard, estimator_invalid, manual_ack_required };
 inline const char *safety_hold_name(SafetyHold h) {
@@ -22,6 +22,7 @@ inline const char *safety_hold_name(SafetyHold h) {
     case SafetyHold::battery_critical: return "BATTERY_CRITICAL_LOCKOUT";
     case SafetyHold::gnss_stale: return "GNSS_TELEMETRY_STALE";
     case SafetyHold::rtk_lost: return "RTK_LOST_MANUAL_RECOVERY";
+    case SafetyHold::rtk_float_confirming: return "RTK_FLOAT_CONFIRMING";
     case SafetyHold::rtk_float_paused: return "RTK_FLOAT_CONFIRMED";
     case SafetyHold::corrections_stale: return "RTCM_CORRECTIONS_STALE";
     case SafetyHold::obstacle_stale: return "OBSTACLE_TELEMETRY_STALE";
@@ -124,9 +125,7 @@ class NativeSafetyArbiter final {
       last_gnss_sample_=s.gnss_sample_time_sec;
     }
     if (!gnss_fresh){float_since_.reset();last_gnss_sample_.reset();}
-    bool recovered_float=false;
     if (gnss_fresh && s.gnss_fix_type==cfg_.required_fix_type){
-      recovered_float=float_paused_;
       float_paused_=false;float_since_.reset();
     }else if (gnss_fresh && s.gnss_fix_type==cfg_.float_fix_type){
       if (!float_since_) float_since_=s.gnss_sample_time_sec;
@@ -144,6 +143,12 @@ class NativeSafetyArbiter final {
     if (s.gnss_fix_type!=cfg_.required_fix_type && s.gnss_fix_type!=cfg_.float_fix_type){
       manual_ack_=true;return block(o,SafetyHold::rtk_lost);
     }
+    // H8F: FLOAT never authorizes autonomous motion, including during
+    // the five-second confirmation window.
+    if (s.gnss_fix_type == cfg_.float_fix_type)
+      return block(o, float_paused_
+          ? SafetyHold::rtk_float_paused
+          : SafetyHold::rtk_float_confirming);
     if (float_paused_) return block(o,SafetyHold::rtk_float_paused);
     if (!s.correction_stream_healthy || !fresh_age(s.correction_age_sec,cfg_.rtcm_max_age_sec)){
       manual_ack_=true;return block(o,SafetyHold::corrections_stale);
@@ -159,7 +164,7 @@ class NativeSafetyArbiter final {
     if (!s.estimator_valid){manual_ack_=true;return block(o,SafetyHold::estimator_invalid);}
     if (manual_ack_) return block(o,SafetyHold::manual_ack_required);
     o.motion_allowed=true;o.start_resume_next_skip_allowed=true;
-    o.auto_resume_rtk_float=recovered_float;
+    o.auto_resume_rtk_float=false;
     o.hold=SafetyHold::none;
     o.reason=o.rtk_float_confirming?"RTK_FLOAT_CONFIRMING_GRACE":"READY";
     return o;

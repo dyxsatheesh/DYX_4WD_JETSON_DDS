@@ -33,24 +33,24 @@ int main() {
     auto s=good(static_cast<double>(t));s.gnss_fix_type=5;
     auto x=b.step(s,frame(s.now_sec));
     assert(x.safety.rtk_float_confirming);
-    assert(x.preview_forward_permitted);
-    assert(x.mission.stage==MissionStage::approaching);
+    assert(!x.preview_forward_permitted);
+    assert(x.mission.stage==MissionStage::paused);
   }
   auto s=good(6.0);s.gnss_fix_type=5;
   auto paused=b.step(s,frame(6.0));
   assert(paused.safety.hold==SafetyHold::rtk_float_paused);
   assert(paused.mission.stage==MissionStage::paused && paused.mission.hold_zero);
-  assert(paused.float_pause_owned && !paused.preview_forward_permitted);
+  assert(!paused.float_pause_owned && !paused.preview_forward_permitted);
   assert(!b.resume_manually(6.1));  // automatic recovery only after RTK FIXED
   s=good(6.2);s.gnss_fix_type=5;
   auto still_paused=b.step(s,frame(6.2));
   assert(still_paused.mission.stage==MissionStage::paused);
   s=good(7.0);
   const auto recovered=b.step(s,frame(7.0));
-  assert(recovered.safety.motion_allowed && recovered.safety.auto_resume_rtk_float);
-  assert(recovered.auto_resumed_float && !recovered.float_pause_owned);
-  assert(recovered.mission.stage==MissionStage::approaching);
-  assert(recovered.preview_forward_permitted && !recovered.mission.hold_zero);
+  assert(recovered.safety.motion_allowed && !recovered.safety.auto_resume_rtk_float);
+  assert(!recovered.auto_resumed_float && !recovered.float_pause_owned);
+  assert(recovered.mission.stage==MissionStage::paused);
+  assert(!recovered.preview_forward_permitted && recovered.mission.hold_zero);
   assert(!b.start(7.01)); // cannot restart an already running mission
   b.stop();
   assert(b.mission().stage()==MissionStage::stopped);

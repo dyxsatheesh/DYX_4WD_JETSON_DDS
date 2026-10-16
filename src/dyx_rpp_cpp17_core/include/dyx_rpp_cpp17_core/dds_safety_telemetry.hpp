@@ -271,7 +271,12 @@ class NativeDdsSafetyTelemetry final {
   DdsTelemetryDecision accept_host_stamp(double rx, std::optional<double> &last) {
     const auto clock = accept_clock(rx);
     if (clock != DdsTelemetryDecision::accepted) return clock;
-    if (last && rx == *last) return DdsTelemetryDecision::duplicate;
+    // Use a nonmatching sentinel when no prior sample exists.
+    // accept_clock() already rejects nonfinite receive times.
+    const double previous_rx = last.value_or(
+        std::numeric_limits<double>::quiet_NaN());
+    if (rx == previous_rx)
+      return DdsTelemetryDecision::duplicate;
     last = rx;
     return DdsTelemetryDecision::accepted;
   }

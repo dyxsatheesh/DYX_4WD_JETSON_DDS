@@ -12,10 +12,10 @@ int main(){
  NativeSafetyArbiter a;
  assert(a.step(good(0)).motion_allowed);
  for(int t=1;t<=6;++t){auto s=good(t);s.gnss_fix_type=5;auto r=a.step(s);
-   if(t<6){assert(r.motion_allowed&&r.rtk_float_confirming);}
+   if(t<6){assert(!r.motion_allowed&&r.rtk_float_confirming&&r.hold==SafetyHold::rtk_float_confirming&&!r.start_resume_next_skip_allowed);}
    else assert(r.hold==SafetyHold::rtk_float_paused&&!r.motion_allowed);
  }
- auto recovered=a.step(good(7));assert(recovered.motion_allowed&&recovered.auto_resume_rtk_float);
+ auto recovered=a.step(good(7));assert(recovered.motion_allowed&&!recovered.auto_resume_rtk_float);
  assert(a.step(good(8)).motion_allowed);
  auto s=good(9);s.gnss_fix_type=4;
  assert(a.step(s).hold==SafetyHold::rtk_lost);
@@ -27,9 +27,9 @@ int main(){
  assert(a.step(s).hold==SafetyHold::gnss_stale);
  assert(a.step(good(13)).hold==SafetyHold::manual_ack_required);
  NativeSafetyArbiter gap;assert(gap.step(good(0)).motion_allowed);
- s=good(1);s.gnss_fix_type=5;assert(gap.step(s).motion_allowed);
- s=good(6);s.gnss_fix_type=5;assert(gap.step(s).motion_allowed); // no 5 sec proof
- s=good(7);s.gnss_fix_type=5;assert(gap.step(s).motion_allowed);
+ s=good(1);s.gnss_fix_type=5;assert(!gap.step(s).motion_allowed);
+ s=good(6);s.gnss_fix_type=5;assert(!gap.step(s).motion_allowed); // no 5 sec proof
+ s=good(7);s.gnss_fix_type=5;assert(!gap.step(s).motion_allowed);
  s=good(8);s.gnss_sample_time_sec=6.9;
  assert(gap.step(s).hold==SafetyHold::gnss_stale); // out-of-order
  return 0;

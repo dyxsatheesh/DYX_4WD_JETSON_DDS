@@ -3,8 +3,8 @@
 // Combines the native arbiter and mission sequencer. This class NEVER publishes
 // PX4 setpoints, arms/disarms, changes modes, operates spray, or drives wheels.
 // The runtime adapter must supply monotonic and validated per-source telemetry.
-// CRITICAL: auto-resume is permitted only for a previously verified RTK FLOAT
-// pause that began during APPROACHING. Any other hold requires manual recovery.
+// H8F: RTK FLOAT immediately inhibits autonomous mission progression.
+// RTK FIXED recovery requires explicit manual RESUME after fresh safety checks.
 
 #include "dyx_rpp_cpp17_core/mission_sequence.hpp"
 #include "dyx_rpp_cpp17_core/safety_arbiter.hpp"
@@ -99,15 +99,8 @@ class NativeSafetyMissionBridge final {
           stage_before == MissionStage::verify_hold ||
           stage_before == MissionStage::spray_ack ||
           stage_before == MissionStage::resolved) {
-        const bool recoverable_float =
-            safety.hold == SafetyHold::rtk_float_paused &&
-            stage_before == MissionStage::approaching &&
-            !safety.manual_ack_required && s.mission_running &&
-            s.operator_motion_enabled;
         mission_.pause();
-        float_pause_owned_ = recoverable_float &&
-            mission_.stage() == MissionStage::paused;
-      } else if (safety.hold != SafetyHold::rtk_float_paused) {
+        float_pause_owned_ = false;      } else if (safety.hold != SafetyHold::rtk_float_paused) {
         // E.g. FLOAT pause followed by obstacle, missing PX4, dead RTK, or
         // operator-disable: revoke the special auto-resume permission.
         float_pause_owned_ = false;
@@ -115,24 +108,13 @@ class NativeSafetyMissionBridge final {
       return make(safety, mission_.step(m), false, "SAFETY_HOLD");
     }
 
-    bool auto_resumed = false;
-    if (mission_.stage() == MissionStage::paused && float_pause_owned_) {
-      if (safety.auto_resume_rtk_float && !safety.manual_ack_required &&
-          s.gnss_fix_type == 6 && s.mission_running &&
-          s.operator_motion_enabled) {
-        mission_.resume(true);
-        auto_resumed = true;
-        float_pause_owned_ = false;
-      } else {
-        // Never auto-clear a FLOAT pause solely because health is green.
-        return make(safety, mission_.step(m), false, "FLOAT_PAUSED_AWAIT_FIXED_EDGE");
-      }
-    }
+    // H8F: Returning RTK FIXED never resumes a paused mission.
+    // The operator must explicitly invoke resume_manually() using a
+    // new, positive safety decision.
     const auto result = mission_.step(m);
     // Sequencer's preview permission can only be asserted in APPROACHING and
     // only with a fresh positive arbiter sample and no emergency stop.
-    return make(safety, result, auto_resumed,
-                auto_resumed ? "AUTO_RESUMED_APPROACH_RTK_FIXED" : "SAFETY_VERIFIED");
+    return make(safety, result, false, "SAFETY_VERIFIED");
   }
 
   // All movement-authorizing operator commands require a fresh positive
