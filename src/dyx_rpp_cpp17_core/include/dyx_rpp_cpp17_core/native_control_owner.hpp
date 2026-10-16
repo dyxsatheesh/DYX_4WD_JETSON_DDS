@@ -128,6 +128,10 @@ class NativeControlOwner final {
     gateway_.latch_recovery_quarantine();
   }
 
+  const MissionSequencer& mission() const {
+    return gateway_.mission();
+  }
+
   bool has_active_mission() const {
     return gateway_.has_active_mission();
   }

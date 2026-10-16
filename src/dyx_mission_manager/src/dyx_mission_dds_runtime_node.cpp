@@ -1,4 +1,4 @@
-#include "dyx_rpp_cpp17_core/mission_command_gateway.hpp"
+#include "dyx_rpp_cpp17_core/native_control_owner.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/battery_status.hpp>
@@ -13,7 +13,7 @@
 #include <string>
 
 using namespace std::chrono_literals;
-using dyx::rpp::NativeMissionCommandGateway;
+using dyx::rpp::NativeControlOwner;
 using dyx::rpp::DdsTelemetryDecision;
 
 class DyxMissionDdsRuntime final : public rclcpp::Node {
@@ -34,7 +34,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.powering_off = m->is_powering_off;
               f.cell_count = m->cell_count;
               f.warning = m->warning;
-              inspect(gateway_.observe_battery(f));
+              inspect(owner_.observe_battery(f));
             });
 
     gps_sub_ =
@@ -50,7 +50,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.fix_type = m->fix_type;
               f.rtcm_crc_failed = m->rtcm_crc_failed;
               f.system_error = m->system_error;
-              inspect(gateway_.observe_gps(f));
+              inspect(owner_.observe_gps(f));
             });
 
     vehicle_sub_ =
@@ -66,7 +66,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.failsafe = m->failsafe;
               f.failure_detector_status =
                   m->failure_detector_status;
-              inspect(gateway_.observe_vehicle(f));
+              inspect(owner_.observe_vehicle(f));
             });
 
     position_sub_ =
@@ -85,7 +85,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.x_m = m->x;
               f.y_m = m->y;
               f.heading_rad = m->heading;
-              inspect(gateway_.observe_estimator(f));
+              inspect(owner_.observe_estimator(f));
             });
 
     status_pub_ = create_publisher<std_msgs::msg::String>(
@@ -111,7 +111,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   void inspect(DdsTelemetryDecision decision) {
     if (decision != DdsTelemetryDecision::accepted &&
         decision != DdsTelemetryDecision::duplicate) {
-      gateway_.force_stop();
+      owner_.force_stop();
       telemetry_fault_ = true;
     }
   }
@@ -125,12 +125,25 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
 
     // No trusted operator or physical E-stop adapter is connected.
     // Never permit motion or mission execution in this build.
-    const auto result = gateway_.tick(
+    dyx::rpp::NativeMissionRppInput guidance{};
+    guidance.sequence = ++control_sequence_;
+    guidance.guidance.now_sec = now;
+    guidance.guidance.dt_sec = 0.05;
+
+    // No trusted mission upload, control lease, GNSS calibration,
+    // obstacle clearance or physical E-stop adapter yet.
+    // These values must not be inferred from DDS status alone.
+    guidance.guidance.motion_enabled = false;
+    guidance.guidance.telemetry_fresh = false;
+    guidance.guidance.stop_requested = true;
+
+    const auto result = owner_.tick(
         now,
         false,
         false,
         true,
-        evidence);
+        evidence,
+        guidance);
 
     std_msgs::msg::String status{};
     std::ostringstream out;
@@ -138,16 +151,18 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     out << "NATIVE_DDS_MISSION_RUNTIME"
         << ";stage="
         << dyx::rpp::mission_stage_name(
-               gateway_.mission().stage())
+               owner_.mission().stage())
         << ";px4_vehicle_fresh="
-        << result.telemetry.px4_vehicle_fresh
+        << result.mission.telemetry.px4_vehicle_fresh
         << ";gps_fresh="
-        << result.telemetry.gps_sample_fresh
+        << result.mission.telemetry.gps_sample_fresh
         << ";battery_fresh="
-        << result.telemetry.battery_sample_fresh
+        << result.mission.telemetry.battery_sample_fresh
         << ";telemetry_fault="
         << (telemetry_fault_ ||
-            result.telemetry_fault_latched)
+            result.mission.telemetry_fault_latched)
+        << ";rpp_motion_permitted="
+        << result.motion.permitted
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -156,8 +171,9 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     status_pub_->publish(status);
   }
 
-  NativeMissionCommandGateway gateway_{};
+  NativeControlOwner owner_{};
   bool telemetry_fault_{false};
+  std::uint64_t control_sequence_{0};
 
   rclcpp::Subscription<
       px4_msgs::msg::BatteryStatus>::SharedPtr battery_sub_;
