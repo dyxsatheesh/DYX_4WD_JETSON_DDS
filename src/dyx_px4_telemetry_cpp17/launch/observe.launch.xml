@@ -1,0 +1,3 @@
+<launch>
+  <node pkg="dyx_px4_telemetry_cpp17" exec="dyx_px4_telemetry_node" name="dyx_px4_telemetry" output="screen"/>
+</launch>
