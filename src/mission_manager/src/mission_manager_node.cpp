@@ -4,6 +4,7 @@
 #include "dyx_mission_manager/native_mission_command_executor.hpp"
 #include "dyx_mission_manager/native_telemetry_safety_component.hpp"
 #include "dyx_mission_manager/rtk_safety_snapshot.hpp"
+#include "dyx_mission_manager/receiver_age_diagnostic.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -163,6 +164,13 @@ class MissionManagerNode final : public rclcpp::Node {
           // Only diagnostic status; never interpreted as authorization.
           trajectory_seen_ = true;
           trajectory_status_ = m->data.substr(0, 160);
+        });
+    receiver_age_diagnostic_sub_ = create_subscription<std_msgs::msg::String>(
+        "/rtk_correction_bridge/status", rclcpp::QoS(10),
+        [this](std_msgs::msg::String::ConstSharedPtr m) {
+          // Unauthenticated ROS status is diagnostic ONLY; never feeds the
+          // independently trusted NativeRtcmAgeGuard or motion gates.
+          receiver_age_diagnostic_.observe(m->data, now_sec());
         });
     status_pub_ = create_publisher<std_msgs::msg::String>(
         "/dyx/native/mission_dds_runtime/status",
@@ -493,6 +501,9 @@ class MissionManagerNode final : public rclcpp::Node {
         << ";rtk_correction_age_verified=" << rtk_snapshot.correction_age_verified
         << ";rtk_motion_ready=" << rtk_snapshot.motion_ready
         << ";rtk_safety_reason=" << rtk_snapshot.reason
+        << ";receiver_age_ros_diagnostic_fresh=" << receiver_age_diagnostic_.fresh(now)
+        << ";receiver_age_ros_under_20s=" << receiver_age_diagnostic_.diagnostic_under_20s(now)
+        << ";receiver_age_ros_provenance_verified=false"
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -543,6 +554,12 @@ class MissionManagerNode final : public rclcpp::Node {
         {"rtk_safety_reason", rtk_snapshot.reason},
         {"rtk_motion_ready", rtk_snapshot.motion_ready},
         {"rtk_receiver_age_provenance_verified", false},
+        {"receiver_age_ros_diagnostic_fresh", receiver_age_diagnostic_.fresh(now)},
+        {"receiver_age_ros_diagnostic_sec",
+          std::isfinite(receiver_age_diagnostic_.age(now)) ?
+          nlohmann::json(receiver_age_diagnostic_.age(now)) : nlohmann::json(nullptr)},
+        {"receiver_age_ros_under_20s", receiver_age_diagnostic_.diagnostic_under_20s(now)},
+        {"receiver_age_ros_motion_authorized", false},
         {"telemetry_fault",
          telemetry_fault_ ||
          result.mission.telemetry_fault_latched},
@@ -596,6 +613,8 @@ class MissionManagerNode final : public rclcpp::Node {
   bool trajectory_seen_{false};
   std::string trajectory_status_{"UNAVAILABLE"};
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr trajectory_status_sub_;
+  dyx::http_backend::ReceiverAgeDiagnostic receiver_age_diagnostic_{};
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr receiver_age_diagnostic_sub_;
   NativeControlOwner owner_{};
   dyx::http_backend::NativeTelemetrySafetyComponent telemetry_safety_{};
   dyx::http_backend::NativeMissionCommandExecutor mission_command_executor_{};
