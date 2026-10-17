@@ -3,6 +3,7 @@
 #include "semantic_metadata.hpp"
 #include "active_leg_diagnostic.hpp"
 #include "active_leg_execution.hpp"
+#include "monotonic_leg_tracking.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
@@ -47,7 +48,7 @@ public:
     const auto now=std::chrono::steady_clock::now();
     if(seen_ && (p->xy_reset_counter!=xy_reset_ || p->heading_reset_counter!=heading_reset_ ||
        (p->timestamp_sample!=0 && last_sample_!=0 && p->timestamp_sample<=last_sample_))) {
-      position_fault_=true; tracker_.reset();
+      position_fault_=true; leg_tracker_.reset();
     }
     if(!seen_) {xy_reset_=p->xy_reset_counter;heading_reset_=p->heading_reset_counter;}
     seen_=true;last_sample_=p->timestamp_sample;position_time_=now;
@@ -97,8 +98,8 @@ public:
       // diagnostics; no START or actuation authority is derived from metadata.
       rebuild_semantics_locked();
       path_frame_=p->header.frame_id;path_error_.clear();path_time_=std::chrono::steady_clock::now();
-      tracker_.reset();++path_revision_;
-    } catch(const std::exception& e){geometry_.reset();tracker_.reset();last_path_points_.clear();path_error_=e.what();}
+      leg_tracker_.reset();++path_revision_;
+    } catch(const std::exception& e){geometry_.reset();leg_tracker_.reset();last_path_points_.clear();path_error_=e.what();}
   });
   types_sub_ = create_subscription<std_msgs::msg::UInt8MultiArray>(
     "/trajectory_generator/path_types", q,
@@ -116,7 +117,7 @@ public:
     "/dyx/mission/active_marking_index",q,
     [this](std_msgs::msg::Int32::ConstSharedPtr m){
       std::lock_guard<std::mutex> g(mu_);
-      if(m->data != active_index_){active_index_=m->data;tracker_.reset();}
+      if(m->data != active_index_){active_index_=m->data;leg_tracker_.reset();}
     });
   goal_=create_subscription<geometry_msgs::msg::PointStamped>("/dyx/mission/preview_goal_ned",5,
     [this](geometry_msgs::msg::PointStamped::ConstSharedPtr p){
@@ -136,14 +137,14 @@ public:
      auto tagged=dyx::rpp::attach_semantics(last_path_points_,types_,marks_);
      auto semantic=std::make_unique<dyx::rpp::PathGeometryIndex>(
        dyx::rpp::PathGeometryIndex::build(tagged));
-     geometry_=std::move(semantic);
+     leg_tracker_.reset(); geometry_=std::move(semantic);
      semantic_valid_=true;
      semantic_marking_count_=marks_.size();
      semantic_error_.clear();
    }catch(const std::exception& e){
      // Never retain possibly stale semantic identities after a bad update.
      semantic_error_=e.what();
-     geometry_=std::make_unique<dyx::rpp::PathGeometryIndex>(
+     leg_tracker_.reset(); geometry_=std::make_unique<dyx::rpp::PathGeometryIndex>(
        dyx::rpp::PathGeometryIndex::build(last_path_points_));
    }
  }
@@ -194,6 +195,19 @@ public:
         cfg.master_to_pivot_m=get_parameter("rear_master_to_pivot_m").as_double();
         const auto plan=dyx::rpp::plan_active_leg_preview(
           *geometry_,marks_,active_index_,{east_,north_},heading_enu_,speed_mps_,cfg);
+        // Stateful, bounded, monotonically non-decreasing active-leg progress.
+        // A different active goal or geometry revision requires a new tracker.
+        // This remains read-only; NO terminal certificate is issued here.
+        const auto tracked=leg_tracker_.step(*geometry_, marks_,active_index_,
+          path_revision_,{east_,north_},
+          get_parameter("lookahead_m").as_double(),
+          get_parameter("max_path_jump_m").as_double());
+        s<<";tracked_progress_m="<<tracked.progress_m
+         <<";tracked_remaining_m="<<tracked.remaining_m
+         <<";tracked_cross_track_m="<<tracked.cross_track_m
+         <<";tracked_lookahead_east_m="<<tracked.lookahead.x
+         <<";tracked_lookahead_north_m="<<tracked.lookahead.y
+         <<";tracked_clamped="<<(tracked.monotonic_clamped?"true":"false");
         s<<";execution_preview_valid=true;execution_phase="<<plan.phase
          <<";execution_goal="<<plan.goal_identity
          <<";execution_cross_track_m="<<plan.cross_track_m
@@ -230,7 +244,7 @@ public:
  std::vector<std::int32_t> marks_{};
  std::vector<dyx::rpp::RawPathPoint> last_path_points_;
  std::unique_ptr<dyx::rpp::PathGeometryIndex> geometry_;
- std::unique_ptr<dyx::rpp::GeometryProgressTracker> tracker_;
+ dyx::rpp::MonotonicLegTracking leg_tracker_;
  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr out_,detail_;
  rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr pos_;
  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_;
