@@ -1,11 +1,14 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>rtk_correction_bridge</name>
-  <version>0.2.0</version>
-  <description>DYX native C++17 modular migration; not all original Python features ported</description>
+  <version>0.3.0</version>
+  <description>DYX native C++17 NTRIP receive and RTCM CRC observation; serial injection disabled</description>
   <maintainer email="noreply@dyxautonomous.com">DYX Autonomous Engineering</maintainer>
   <license>Proprietary</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
-
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <build_depend>libssl-dev</build_depend>
+  <exec_depend>libssl3</exec_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>
