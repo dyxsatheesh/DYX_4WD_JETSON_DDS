@@ -1,12 +1,14 @@
 #include "dyx_rpp_cpp17_core/path_index.hpp"
 #include "guidance_preview.hpp"
 #include "semantic_metadata.hpp"
+#include "active_leg_diagnostic.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/u_int8_multi_array.hpp>
 #include <std_msgs/msg/int32_multi_array.hpp>
 #include <algorithm>
@@ -82,6 +84,8 @@ public:
       geometry_=std::move(replacement);
       last_path_points_=std::move(points);
       semantic_valid_=false;
+      types_seen_=false; marks_seen_=false;
+      types_.clear(); marks_.clear();
       // Reattempt only when both metadata topics are available. This remains
       // diagnostics; no START or actuation authority is derived from metadata.
       rebuild_semantics_locked();
@@ -100,6 +104,12 @@ public:
     [this](std_msgs::msg::Int32MultiArray::ConstSharedPtr m){
       std::lock_guard<std::mutex> g(mu_);
       marks_=m->data; marks_seen_=true; rebuild_semantics_locked();
+    });
+  active_sub_ = create_subscription<std_msgs::msg::Int32>(
+    "/dyx/mission/active_marking_index",q,
+    [this](std_msgs::msg::Int32::ConstSharedPtr m){
+      std::lock_guard<std::mutex> g(mu_);
+      if(m->data != active_index_){active_index_=m->data;tracker_.reset();}
     });
   goal_=create_subscription<geometry_msgs::msg::PointStamped>("/dyx/mission/preview_goal_ned",5,
     [this](geometry_msgs::msg::PointStamped::ConstSharedPtr p){
@@ -146,8 +156,24 @@ public:
    <<";path_error="<<path_error_
    <<";semantic_valid="<<(semantic_valid_?"true":"false")
    <<";semantic_marking_count="<<semantic_marking_count_
-   <<";semantic_error="<<semantic_error_;
+   <<";semantic_error="<<semantic_error_
+   <<";active_marking_index="<<active_index_;
   if(fresh && pose_valid_ && !position_fault_ && path_ok){
+    if(semantic_valid_ && active_index_>=0) {
+      try {
+        const auto leg=dyx::rpp::inspect_active_leg(
+            *geometry_,marks_,active_index_,{east_,north_},
+            get_parameter("lookahead_m").as_double());
+        s<<";active_leg_valid=true;active_goal="<<leg.goal_identity
+         <<";active_goal_radial_m="<<leg.radial_m
+         <<";active_leg_cross_track_m="<<leg.cross_track_m
+         <<";active_leg_remaining_m="<<leg.remaining_m
+         <<";active_leg_lookahead_east_m="<<leg.lookahead.x
+         <<";active_leg_lookahead_north_m="<<leg.lookahead.y;
+      } catch(const std::exception& e) {
+        s<<";active_leg_valid=false;active_leg_fault="<<e.what();
+      }
+    } else s<<";active_leg_valid=false;active_leg_fault=NO_MISSION_SELECTED_SEMANTIC_LEG";
     try{
       // Project onto entire recorded path for diagnostic tracking. Movement
       // decisions require trusted semantic active-leg selection not yet wired.
@@ -192,6 +218,7 @@ public:
  double east_{0},north_{0},heading_enu_{0},goal_east_{0},goal_north_{0};
  std::uint64_t path_revision_{0};std::string path_frame_{},path_error_{};
  std::chrono::steady_clock::time_point position_time_{},path_time_{};
+ std::int32_t active_index_{-1};
  bool types_seen_{false}, marks_seen_{false}, semantic_valid_{false};
  std::size_t semantic_marking_count_{0};
  std::string semantic_error_{};
@@ -205,6 +232,7 @@ public:
  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_;
  rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr types_sub_;
  rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr marks_sub_;
+ rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr active_sub_;
  rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_;
  rclcpp::TimerBase::SharedPtr timer_;
 };

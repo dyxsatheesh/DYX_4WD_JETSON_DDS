@@ -11,10 +11,12 @@
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/int32.hpp>
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <memory>
 #include <sstream>
@@ -164,6 +166,8 @@ class MissionManagerNode final : public rclcpp::Node {
     status_pub_ = create_publisher<std_msgs::msg::String>(
         "/dyx/native/mission_dds_runtime/status",
         rclcpp::QoS(5));
+    active_marking_pub_ = create_publisher<std_msgs::msg::Int32>(
+        "/dyx/mission/active_marking_index", rclcpp::QoS(1).reliable().transient_local());
     legacy_compat_status_pub_ = create_publisher<std_msgs::msg::String>(
         "/mission_manager/status", rclcpp::QoS(10));
 
@@ -483,6 +487,18 @@ class MissionManagerNode final : public rclcpp::Node {
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
 
+    // A mission-owned diagnostic selection, never an independent motion grant.
+    // -1 invalidates stale selection during PAUSE, STOP, fault, or unload.
+    std_msgs::msg::Int32 active_index;
+    active_index.data = -1;
+    const auto& mission_state = owner_.mission().status();
+    if (owner_.has_active_mission() && !owner_.safe_stop_requested() &&
+        mission_state.stage == dyx::rpp::MissionStage::approaching &&
+        mission_state.current_marking < mission_state.total &&
+        mission_state.current_marking <= static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+      active_index.data = static_cast<std::int32_t>(mission_state.current_marking);
+    }
+    active_marking_pub_->publish(active_index);
     status.data = out.str();
     status_pub_->publish(status);
     // Original node-name status compatibility, always fail-closed.
@@ -620,6 +636,7 @@ class MissionManagerNode final : public rclcpp::Node {
   rclcpp::Publisher<
       std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr legacy_compat_status_pub_;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr active_marking_pub_;
 
   rclcpp::TimerBase::SharedPtr timer_;
 };
