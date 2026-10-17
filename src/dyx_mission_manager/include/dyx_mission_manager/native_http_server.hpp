@@ -8,6 +8,7 @@
 #include "dyx_mission_manager/native_command_mailbox.hpp"
 #include "dyx_mission_manager/native_mission_preview.hpp"
 #include "dyx_mission_manager/native_upload_ingress.hpp"
+#include "dyx_mission_manager/native_load_ingress.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -75,10 +76,11 @@ class HttpSession final
       std::shared_ptr<NativeStatusSnapshot> snapshot,
       std::shared_ptr<NativeSessionAuth> sessions,
       NativeCommandMailbox& mailbox,
-      NativeUploadIngress& ingress)
+      NativeUploadIngress& ingress,
+      NativeLoadIngress& loads)
       : stream_(std::move(socket)),
         snapshot_(std::move(snapshot)),
-        sessions_(std::move(sessions)), mailbox_(mailbox), ingress_(ingress) {}
+        sessions_(std::move(sessions)), mailbox_(mailbox), ingress_(ingress), loads_(loads) {}
 
   void start() {
     parser_.body_limit(8192);
@@ -273,6 +275,42 @@ class HttpSession final
         }
       }
     } else if (request.method() == http::verb::post &&
+               request.target() == "/api/native/mission/load") {
+      const auto session = verify_session(request);
+      if (!session.authenticated) {
+        response->result(http::status::unauthorized);
+        response->body() = R"({"detail":"AUTHENTICATION_REQUIRED"})";
+      } else {
+        const auto data = nlohmann::json::parse(request.body(), nullptr, false);
+        const auto validated = NativeLoadIngress::validate(data);
+        if (!validated.ok) {
+          response->result(http::status::unprocessable_entity);
+          response->body() = R"({"detail":"INVALID_LOAD_ENVELOPE"})";
+        } else if (!ingress_.staged_for(session.session_id, validated.run_id,
+                                       validated.signature, validated.revision)) {
+          response->result(http::status::conflict);
+          response->body() = R"({"detail":"STAGED_DRAFT_OR_OPERATOR_MISMATCH"})";
+        } else {
+          const auto queued = loads_.enqueue(session.session_id, validated,
+                                             mailbox_.stopped_latched());
+          response->result(queued ? http::status::accepted : http::status::conflict);
+          response->body() = queued ?
+              R"({"state":"LOAD_QUEUED_FOR_ROS","decision_only":true,"mission_loaded":false,"motor_commands_enabled":false})" :
+              R"({"detail":"LOAD_BUSY_OR_STOP_LATCHED"})";
+        }
+      }
+    } else if (request.method() == http::verb::get &&
+               request.target() == "/api/native/mission/load/status") {
+      const auto session = verify_session(request);
+      if (!session.authenticated) {
+        response->result(http::status::unauthorized);
+        response->body() = R"({"detail":"AUTHENTICATION_REQUIRED"})";
+      } else {
+        response->result(http::status::ok);
+        response->body() = loads_.status_for(session.session_id,
+                                             mailbox_.stopped_latched()).dump();
+      }
+    } else if (request.method() == http::verb::post &&
                request.target() == "/api/native/mission/preview") {
       // Never accept a network value as proof of control lease or disarm.
       if (!sessions_->configured()) {
@@ -338,8 +376,10 @@ class HttpSession final
           command.mission_run_id = "native_stop";
           command.sequence = 1;
           auto result = mailbox_.submit_verified(std::move(command), true);
-          if (result == NativeCommandMailbox::SubmitResult::accepted)
+          if (result == NativeCommandMailbox::SubmitResult::accepted) {
             ingress_.cancel_on_stop();
+            loads_.cancel_on_stop();
+          }
           if (result != NativeCommandMailbox::SubmitResult::accepted) {
             response->result(http::status::service_unavailable);
             response->body() = R"({"detail":"STOP_ENQUEUE_REJECTED"})";
@@ -395,6 +435,7 @@ class HttpSession final
   std::shared_ptr<NativeSessionAuth> sessions_;
   NativeCommandMailbox& mailbox_;
   NativeUploadIngress& ingress_;
+  NativeLoadIngress& loads_;
   beast::flat_buffer buffer_;
   http::request_parser<http::string_body> parser_;
 };
@@ -405,9 +446,10 @@ class NativeHttpServer final {
       std::uint16_t port,
       std::shared_ptr<NativeStatusSnapshot> snapshot,
       NativeCommandMailbox& mailbox,
-      NativeUploadIngress& ingress)
+      NativeUploadIngress& ingress,
+      NativeLoadIngress& loads)
       : acceptor_(ioc_), snapshot_(std::move(snapshot)), mailbox_(mailbox),
-        ingress_(ingress),
+        ingress_(ingress), loads_(loads),
         sessions_(std::make_shared<NativeSessionAuth>(
             std::getenv("DYX_CPP17_AUTH_DB") ?
             std::getenv("DYX_CPP17_AUTH_DB") : "")) {
@@ -453,7 +495,7 @@ class NativeHttpServer final {
           if (!ec) {
             std::make_shared<HttpSession>(
                 std::move(socket), snapshot_, sessions_, mailbox_,
-                ingress_)->start();
+                ingress_, loads_)->start();
           }
 
           if (acceptor_.is_open())
@@ -465,6 +507,7 @@ class NativeHttpServer final {
   std::shared_ptr<NativeSessionAuth> sessions_;
   NativeCommandMailbox& mailbox_;
   NativeUploadIngress& ingress_;
+  NativeLoadIngress& loads_;
   asio::io_context ioc_{1};
   tcp::acceptor acceptor_;
   std::thread worker_;

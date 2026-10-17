@@ -69,6 +69,7 @@ class NativeUploadIngress final {
       pending_.reset();
       return std::nullopt;
     }
+    processing_sequence_ = pending_->sequence;
     auto out = std::move(pending_);
     pending_.reset();
     return out;
@@ -82,6 +83,7 @@ class NativeUploadIngress final {
                       std::uint64_t revision) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stop_latched_ || session_id != owner_session_) return;
+    staged_sequence_ = http_status == 200 ? processing_sequence_ : 0;
     last_status_ = {{"state", http_status == 200 ? "UPLOAD_STAGED" : "UPLOAD_REJECTED"},
                     {"result_http_status", http_status}, {"detail", code},
                     {"mission_run_id", run_id}, {"signature", signature},
@@ -105,6 +107,23 @@ class NativeUploadIngress final {
     return last_status_;
   }
 
+  // Read-only saved draft identity. HTTP cannot claim PX4 disarm.
+  bool staged_for(const std::string& session, const std::string& run,
+                  const std::string& signature, std::uint64_t revision) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !stop_latched_ && !owner_session_.empty() &&
+           owner_session_ == session &&
+           last_status_.value("state", std::string{}) == "UPLOAD_STAGED" &&
+           last_status_.value("mission_run_id", std::string{}) == run &&
+           last_status_.value("signature", std::string{}) == signature &&
+           last_status_.value("revision", std::uint64_t{0}) == revision;
+  }
+  std::uint64_t staged_sequence_for(const std::string& session) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stop_latched_ || session != owner_session_ ||
+        last_status_.value("state", std::string{}) != "UPLOAD_STAGED") return 0;
+    return staged_sequence_;
+  }
   void cancel_on_stop() {
     std::lock_guard<std::mutex> lock(mutex_);
     stop_locked_();
@@ -128,6 +147,8 @@ class NativeUploadIngress final {
   nlohmann::json last_status_{{"state", "NO_UPLOAD_SUBMITTED"},
                               {"decision_only", true}};
   std::uint64_t next_sequence_{0};
+  std::uint64_t processing_sequence_{0};
+  std::uint64_t staged_sequence_{0};
   bool stop_latched_{false};
 };
 }  // namespace dyx::http_backend

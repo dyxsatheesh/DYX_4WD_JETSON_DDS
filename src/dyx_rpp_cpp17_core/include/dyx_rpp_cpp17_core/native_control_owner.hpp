@@ -53,7 +53,7 @@ class NativeControlOwner final {
 
         auto candidate = std::make_unique<NativeMissionInstallation>(
             *snapshot, request.mission_run_id,
-            request.mission_mode);
+            uploader_.saved_mode());
 
         if (candidate->marking_goals.size() !=
             gateway_.mission().records().size())

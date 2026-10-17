@@ -158,7 +158,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     // Android's existing production endpoint.
     native_http_ =
         std::make_unique<dyx::http_backend::NativeHttpServer>(
-            18766, native_status_, command_mailbox_, upload_ingress_);
+            18766, native_status_, command_mailbox_, upload_ingress_, load_ingress_);
 
     timer_ = create_wall_timer(20ms, [this]() { tick(); });
 
@@ -206,7 +206,10 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     }
 
     // STOP supersedes any pending UPLOAD, including concurrent HTTP ingress.
-    if (command_mailbox_.stopped_latched()) upload_ingress_.cancel_on_stop();
+    if (command_mailbox_.stopped_latched()) {
+      upload_ingress_.cancel_on_stop();
+      load_ingress_.cancel_on_stop();
+    }
 
     // Exactly one bounded upload decision per tick. The owner_ is touched
     // only here on the ROS executor; HTTP never invokes the mission gateway.
@@ -248,6 +251,48 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         upload_ingress_.publish_result(entry->session_id, upload.http_status,
             upload.code, request.mission_run_id,
             upload.signature, upload.revision);
+      }
+    }
+
+    // The upload and load paths share the single ROS owner and PX4 evidence.
+    // LOAD never accepts a JSON-supplied disarm attestation.
+    if (auto entry = load_ingress_.pop_for_ros(command_mailbox_.stopped_latched())) {
+      const bool px4_disarmed = !telemetry_fault_ &&
+          last_vehicle_disarmed_ &&
+          std::isfinite(last_vehicle_disarm_received_sec_) &&
+          now >= last_vehicle_disarm_received_sec_ &&
+          now - last_vehicle_disarm_received_sec_ <= 0.25;
+      if (!px4_disarmed) {
+        load_ingress_.publish_result(entry->session_id, 412, "PX4_DISARM_REQUIRED");
+      } else if (!upload_ingress_.staged_for(entry->session_id,
+                    entry->load.run_id, entry->load.signature,
+                    entry->load.revision)) {
+        load_ingress_.publish_result(entry->session_id, 409, "DRAFT_IDENTITY_CONFLICT");
+      } else {
+        dyx::rpp::BackendMissionUploadRequest req{};
+        req.path = dyx::rpp::kBackendMissionLoadPath;
+        req.method = "POST";
+        req.principal.authenticated = true;
+        req.principal.owns_control_lease = true;
+        req.principal.can_read_mission = true;
+        req.principal.operator_session_id = entry->session_id;
+        req.mission_run_id = entry->load.run_id;
+        const auto staged_sequence =
+            upload_ingress_.staged_sequence_for(entry->session_id);
+        if (staged_sequence == 0 ||
+            staged_sequence >= std::numeric_limits<std::uint64_t>::max() - entry->sequence) {
+          load_ingress_.publish_result(entry->session_id, 409,
+                                       "INVALID_STAGED_SEQUENCE");
+        } else {
+        req.sequence = staged_sequence + entry->sequence;
+        req.host_received_sec = now;
+        req.expected_revision = entry->load.revision;
+        req.expected_signature = entry->load.signature;
+        req.trusted_px4_disarmed = px4_disarmed;
+        const auto result = owner_.handle_backend_upload(req);
+        load_ingress_.publish_result(entry->session_id, result.http_status,
+                                     result.code);
+        }
       }
     }
 
@@ -458,6 +503,8 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         {"mailbox_commands_processed", processed_commands_},
         {"http_command_ingress_ready", true},
         {"http_stop_only", true},
+        {"load_requires_px4_disarmed", true},
+        {"mission_start_enabled", false},
         {"http_upload_staging_only", true},
         {"px4_disarmed_attestation_fresh", !telemetry_fault_ &&
              last_vehicle_disarmed_ &&
@@ -477,6 +524,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   NativeControlOwner owner_{};
   dyx::http_backend::NativeCommandMailbox command_mailbox_{};
   dyx::http_backend::NativeUploadIngress upload_ingress_{};
+  dyx::http_backend::NativeLoadIngress load_ingress_{};
   bool last_vehicle_disarmed_{false};
   double last_vehicle_disarm_received_sec_{-1.0};
   std::uint64_t processed_commands_{0};

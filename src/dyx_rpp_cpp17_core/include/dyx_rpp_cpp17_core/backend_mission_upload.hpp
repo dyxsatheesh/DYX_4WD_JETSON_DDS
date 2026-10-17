@@ -129,6 +129,10 @@ class NativeBackendMissionUpload final {
   }
   bool has_draft() const { return draft_.has_value(); }
   bool loaded() const { return draft_ && draft_->loaded; }
+  MissionMode saved_mode() const {
+    if (!draft_) throw std::logic_error("saved mission mode unavailable");
+    return draft_->mode;
+  }
   const PreparedPathSnapshot *preview_snapshot() const {
     if (gateway_.recovery_quarantined()) return nullptr;
     return draft_ ? &draft_->snapshot : nullptr;  // immutable read-only preview
