@@ -2,6 +2,7 @@
 #include "guidance_preview.hpp"
 #include "semantic_metadata.hpp"
 #include "active_leg_diagnostic.hpp"
+#include "active_leg_execution.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
@@ -37,6 +38,9 @@ public:
   declare_parameter<double>("lookahead_m",0.55);
   declare_parameter<double>("max_path_jump_m",0.5);
   declare_parameter<double>("preview_cruise_mps",0.6);
+  declare_parameter<double>("accel_distance_m",0.8);
+  declare_parameter<double>("decel_distance_m",0.8);
+  declare_parameter<double>("rear_master_to_pivot_m",0.42);
   pos_=create_subscription<px4_msgs::msg::VehicleLocalPosition>("/fmu/out/vehicle_local_position",rclcpp::SensorDataQoS(),
    [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr p){
     std::lock_guard<std::mutex> g(mu_);
@@ -50,6 +54,8 @@ public:
     pose_valid_=p->xy_valid && p->v_xy_valid && p->heading_good_for_control &&
       !p->dead_reckoning && p->timestamp_sample!=0 &&
       std::isfinite(p->x)&&std::isfinite(p->y)&&std::isfinite(p->heading);
+    if(std::isfinite(p->vx) && std::isfinite(p->vy)) speed_mps_=std::hypot(p->vx,p->vy);
+    else pose_valid_=false;
     east_=p->y;north_=p->x; // PX4 NED (North, East) -> ENU (East, North)
     heading_enu_=dyx::rpp::wrap_angle(dyx::rpp::pi/2.0-p->heading);
    });
@@ -80,6 +86,7 @@ public:
         }
         if(same && geometry_) {path_time_=std::chrono::steady_clock::now();return;}
       }
+      // Path replacement invalidates mission-selected active-leg preview.
       auto replacement=std::make_unique<dyx::rpp::PathGeometryIndex>(dyx::rpp::PathGeometryIndex::build(points));
       geometry_=std::move(replacement);
       last_path_points_=std::move(points);
@@ -175,37 +182,34 @@ public:
       }
     } else s<<";active_leg_valid=false;active_leg_fault=NO_MISSION_SELECTED_SEMANTIC_LEG";
     try{
-      // Project onto entire recorded path for diagnostic tracking. Movement
-      // decisions require trusted semantic active-leg selection not yet wired.
-      auto const& gidx=*geometry_;
-      auto const& points=gidx.raw_points;
-      // Last waypoint is temporarily a semantic endpoint for geometry only.
-      // It cannot confer mission authority or trigger spray.
-      auto distances=std::vector<double>{};distances.reserve(points.size());
-      double cumulative=0.0;distances.push_back(0.0);
-      for(size_t i=1;i<points.size();++i){cumulative+=std::hypot(points[i].point.x-points[i-1].point.x,points[i].point.y-points[i-1].point.y);distances.push_back(cumulative);}
-      double best=std::numeric_limits<double>::infinity(),along=0.0,cross=0.0;
-      for(size_t i=1;i<points.size();++i){
-        const auto a=points[i-1].point,b=points[i].point;double dx=b.x-a.x,dy=b.y-a.y,len2=dx*dx+dy*dy;
-        if(len2<=1e-12)continue;
-        const double t=std::clamp(((east_-a.x)*dx+(north_-a.y)*dy)/len2,0.0,1.0);
-        const double fx=a.x+t*dx,fy=a.y+t*dy,dist=std::hypot(east_-fx,north_-fy);
-        if(dist<best){best=dist;along=distances[i-1]+t*std::sqrt(len2);cross=(dx*(north_-a.y)-dy*(east_-a.x))/std::sqrt(len2);}
+      // A8 strictly limits RPP preview to the mission-selected semantic span.
+      // No fallback to a global nearest path point: crossing legs must not
+      // silently replace the active marking destination.
+      if(semantic_valid_ && active_index_>=1) {
+        dyx::rpp::ActiveLegControlConfig cfg;
+        cfg.cruise_mps=get_parameter("preview_cruise_mps").as_double();
+        cfg.lookahead_m=get_parameter("lookahead_m").as_double();
+        cfg.accel_m=get_parameter("accel_distance_m").as_double();
+        cfg.decel_m=get_parameter("decel_distance_m").as_double();
+        cfg.master_to_pivot_m=get_parameter("rear_master_to_pivot_m").as_double();
+        const auto plan=dyx::rpp::plan_active_leg_preview(
+          *geometry_,marks_,active_index_,{east_,north_},heading_enu_,speed_mps_,cfg);
+        s<<";execution_preview_valid=true;execution_phase="<<plan.phase
+         <<";execution_goal="<<plan.goal_identity
+         <<";execution_cross_track_m="<<plan.cross_track_m
+         <<";execution_radial_m="<<plan.radial_m
+         <<";execution_remaining_m="<<plan.remaining_m
+         <<";execution_heading_error_rad="<<plan.heading_error_rad
+         <<";execution_speed_preview_mps="<<plan.forward_preview_mps
+         <<";execution_yaw_preview_radps="<<plan.yaw_rate_preview_radps
+         <<";execution_pivot_required="<<(plan.reverse_pivot_required?"true":"false")
+         <<";execution_reverse_distance_preview_m="<<plan.reverse_distance_preview_m
+         <<";execution_stationary_at_mark="<<(plan.stationary_at_mark?"true":"false")
+         <<";execution_lookahead_east_m="<<plan.lookahead_east_m
+         <<";execution_lookahead_north_m="<<plan.lookahead_north_m;
+      } else {
+        s<<";execution_preview_valid=false;execution_phase=HOLD_NO_TRUSTED_ACTIVE_LEG";
       }
-      const double look=get_parameter("lookahead_m").as_double();
-      if(!std::isfinite(look)||look<0.0||look>5.0)throw std::invalid_argument("BAD_LOOKAHEAD");
-      const auto target=gidx.point_at_s(std::min(gidx.total_length,along+look));
-      const auto guidance=dyx::rpp::preview_guidance(east_,north_,heading_enu_,
-        target.point.x,target.point.y,along,gidx.total_length,
-        get_parameter("preview_cruise_mps").as_double());
-      s<<";guidance_heading_error_rad="<<guidance.heading_error_rad
-       <<";guidance_forward_preview_mps="<<guidance.forward_mps
-       <<";guidance_yaw_rate_preview_radps="<<guidance.yaw_rate_enu_radps
-       <<";guidance_pivot_needed="<<(guidance.pivot_needed?"true":"false");
-      s<<";cross_track_m="<<cross<<";nearest_distance_m="<<best
-       <<";path_progress_m="<<along<<";remaining_path_m="<<std::max(0.0,gidx.total_length-along)
-       <<";lookahead_east_m="<<target.point.x<<";lookahead_north_m="<<target.point.y
-       <<";heading_enu_rad="<<heading_enu_;
     }catch(const std::exception& e){s<<";geometry_fault="<<e.what();}
   }
   if(fresh && pose_valid_ && goal_valid_)s<<";goal_radial_m="<<std::hypot(goal_east_-east_,goal_north_-north_);
@@ -215,7 +219,7 @@ public:
  std::mutex mu_;
  bool seen_{false},pose_valid_{false},position_fault_{false},goal_valid_{false};
  std::uint8_t xy_reset_{0},heading_reset_{0};std::uint64_t last_sample_{0};
- double east_{0},north_{0},heading_enu_{0},goal_east_{0},goal_north_{0};
+ double east_{0},north_{0},heading_enu_{0},goal_east_{0},goal_north_{0},speed_mps_{0};
  std::uint64_t path_revision_{0};std::string path_frame_{},path_error_{};
  std::chrono::steady_clock::time_point position_time_{},path_time_{};
  std::int32_t active_index_{-1};
