@@ -85,6 +85,12 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.failure_detector_status =
                   m->failure_detector_status;
               inspect(owner_.observe_vehicle(f));
+              // Trusted disarm evidence comes from PX4 DDS, never JSON.
+              last_vehicle_disarm_received_sec_ = f.received_sec;
+              last_vehicle_disarmed_ =
+                  m->timestamp != 0 &&
+                  m->arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_DISARMED &&
+                  !m->failsafe && m->failure_detector_status == 0;
             });
 
     position_sub_ =
@@ -152,7 +158,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     // Android's existing production endpoint.
     native_http_ =
         std::make_unique<dyx::http_backend::NativeHttpServer>(
-            18766, native_status_, command_mailbox_);
+            18766, native_status_, command_mailbox_, upload_ingress_);
 
     timer_ = create_wall_timer(20ms, [this]() { tick(); });
 
@@ -197,6 +203,52 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         (void)owner_.handle_backend_action(*command);
       }
       ++processed_commands_;
+    }
+
+    // STOP supersedes any pending UPLOAD, including concurrent HTTP ingress.
+    if (command_mailbox_.stopped_latched()) upload_ingress_.cancel_on_stop();
+
+    // Exactly one bounded upload decision per tick. The owner_ is touched
+    // only here on the ROS executor; HTTP never invokes the mission gateway.
+    if (auto entry = upload_ingress_.pop_for_ros(
+            command_mailbox_.stopped_latched())) {
+      const auto preview = dyx::http_backend::NativeMissionPreview::validate(
+          entry->payload);
+      if (preview.http_status != 200 || command_mailbox_.stopped_latched()) {
+        upload_ingress_.publish_result(entry->session_id, 422,
+            "INVALID_OR_STOPPED_UPLOAD", "", "", 0);
+      } else {
+        dyx::rpp::BackendMissionUploadRequest request{};
+        request.method = "POST";
+        request.path = dyx::rpp::kBackendMissionUploadPath;
+        request.principal.authenticated = true;
+        request.principal.can_read_mission = true;
+        request.principal.owns_control_lease = true;
+        request.principal.operator_session_id = entry->session_id;
+        request.mission_run_id =
+            entry->payload.at("mission_run_id").get<std::string>();
+        request.sequence = entry->sequence;
+        request.host_received_sec = now;
+        request.mission_mode =
+            entry->payload.value("mission_mode", std::string("automatic")) == "manual"
+            ? dyx::rpp::MissionMode::manual : dyx::rpp::MissionMode::automatic;
+        request.extension_enabled = entry->payload.value("extension_enabled", false);
+        request.extension_distance_m = entry->payload.value("extension_distance_m", 4.0);
+        for (const auto& p : entry->payload.at("marking_points")) {
+          request.marking_points.push_back({
+              p.at("x_m").get<double>(), p.at("y_m").get<double>()});
+        }
+        // A stale/rejected PX4 DDS VehicleStatus cannot attest disarm.
+        request.trusted_px4_disarmed = !telemetry_fault_ &&
+            last_vehicle_disarmed_ &&
+            std::isfinite(last_vehicle_disarm_received_sec_) &&
+            now >= last_vehicle_disarm_received_sec_ &&
+            now - last_vehicle_disarm_received_sec_ <= 0.25;
+        const auto upload = owner_.handle_backend_upload(request);
+        upload_ingress_.publish_result(entry->session_id, upload.http_status,
+            upload.code, request.mission_run_id,
+            upload.signature, upload.revision);
+      }
     }
 
     double cycle_dt_sec = 0.02;
@@ -406,6 +458,11 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         {"mailbox_commands_processed", processed_commands_},
         {"http_command_ingress_ready", true},
         {"http_stop_only", true},
+        {"http_upload_staging_only", true},
+        {"px4_disarmed_attestation_fresh", !telemetry_fault_ &&
+             last_vehicle_disarmed_ &&
+             now >= last_vehicle_disarm_received_sec_ &&
+             now - last_vehicle_disarm_received_sec_ <= 0.25},
         {"physical_stop_confirmed", false},
         {"control_timing_fault", timing_fault_},
         {"control_missed_cycles", missed_cycle_count_},
@@ -419,6 +476,9 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
 
   NativeControlOwner owner_{};
   dyx::http_backend::NativeCommandMailbox command_mailbox_{};
+  dyx::http_backend::NativeUploadIngress upload_ingress_{};
+  bool last_vehicle_disarmed_{false};
+  double last_vehicle_disarm_received_sec_{-1.0};
   std::uint64_t processed_commands_{0};
 
   // Construct the shared snapshot before the HTTP server so

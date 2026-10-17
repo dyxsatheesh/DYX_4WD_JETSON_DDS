@@ -7,6 +7,7 @@
 #include "dyx_mission_manager/native_session_auth.hpp"
 #include "dyx_mission_manager/native_command_mailbox.hpp"
 #include "dyx_mission_manager/native_mission_preview.hpp"
+#include "dyx_mission_manager/native_upload_ingress.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -73,10 +74,11 @@ class HttpSession final
       tcp::socket socket,
       std::shared_ptr<NativeStatusSnapshot> snapshot,
       std::shared_ptr<NativeSessionAuth> sessions,
-      NativeCommandMailbox& mailbox)
+      NativeCommandMailbox& mailbox,
+      NativeUploadIngress& ingress)
       : stream_(std::move(socket)),
         snapshot_(std::move(snapshot)),
-        sessions_(std::move(sessions)), mailbox_(mailbox) {}
+        sessions_(std::move(sessions)), mailbox_(mailbox), ingress_(ingress) {}
 
   void start() {
     parser_.body_limit(8192);
@@ -94,6 +96,23 @@ class HttpSession final
   }
 
  private:
+  NativeVerifiedSession verify_session(
+      const http::request<http::string_body>& request) const {
+    if (!sessions_->configured()) return {};
+    std::string token;
+    const auto authorization = request.find(http::field::authorization);
+    if (authorization != request.end()) {
+      const std::string value = authorization->value().to_string();
+      if (value.size() >= 7 && value.compare(0, 7, "Bearer ") == 0)
+        token = value.substr(7);
+    }
+    if (token.empty()) {
+      const auto alternate = request.find("X-Rover-Token");
+      if (alternate != request.end()) token = alternate->value().to_string();
+    }
+    return sessions_->verify(token);
+  }
+
   void respond() {
     const auto request = parser_.release();
 
@@ -161,6 +180,9 @@ class HttpSession final
           {"service", "dyx_cpp17_native_mission_preview"},
           {"auth_database_configured", sessions_->configured()},
           {"authenticated_preview_supported", true},
+          {"authenticated_upload_staging_supported", true},
+          {"exclusive_upload_lease_required", true},
+          {"px4_disarm_attestation_required", true},
           {"preview_coordinate_frame", "LOCAL_ENU_METRES"},
           {"live_android_api_compatible", false},
           {"mission_load_enabled", false},
@@ -169,6 +191,87 @@ class HttpSession final
           {"spray_commands_enabled", false},
           {"physical_command_emitted", false}
       }.dump();
+    } else if (request.method() == http::verb::post &&
+               request.target() == "/api/native/mission/lease/acquire") {
+      if (!sessions_->configured()) {
+        response->result(http::status::service_unavailable);
+        response->body() = R"({"detail":"NATIVE_SESSION_DB_NOT_CONFIGURED"})";
+      } else {
+        const auto session = verify_session(request);
+        if (!session.authenticated) {
+          response->result(http::status::unauthorized);
+          response->body() = R"({"detail":"AUTHENTICATION_REQUIRED"})";
+        } else {
+          const auto status = ingress_.acquire(
+              session.session_id, mailbox_.stopped_latched());
+          if (status == NativeUploadIngress::LeaseResult::acquired ||
+              status == NativeUploadIngress::LeaseResult::already_owned) {
+            response->result(http::status::ok);
+            response->body() = R"({"state":"UPLOAD_LEASE_ACQUIRED","scope":"DRAFT_UPLOAD_ONLY","motion_authorized":false})";
+          } else {
+            response->result(http::status::locked);
+            response->body() = R"({"detail":"UPLOAD_LEASE_CONFLICT_OR_STOP_LATCHED"})";
+          }
+        }
+      }
+    } else if (request.method() == http::verb::post &&
+               request.target() == "/api/native/mission/upload") {
+      if (!sessions_->configured()) {
+        response->result(http::status::service_unavailable);
+        response->body() = R"({"detail":"NATIVE_SESSION_DB_NOT_CONFIGURED"})";
+      } else {
+        const auto session = verify_session(request);
+        if (!session.authenticated) {
+          response->result(http::status::unauthorized);
+          response->body() = R"({"detail":"AUTHENTICATION_REQUIRED"})";
+        } else {
+          // The schema is identical to PREVIEW. JSON cannot supply disarm
+          // attestation, control lease, timestamps or a server-side sequence.
+          auto payload = nlohmann::json::parse(request.body(), nullptr, false);
+          if (payload.is_discarded()) {
+            response->result(http::status::bad_request);
+            response->body() = R"({"detail":"INVALID_JSON"})";
+          } else {
+            const auto checked = NativeMissionPreview::validate(payload);
+            if (checked.http_status != 200) {
+              response->result(static_cast<http::status>(checked.http_status));
+              response->body() = checked.body.dump();
+            } else {
+              const auto submitted = ingress_.enqueue(
+                  session.session_id, std::move(payload),
+                  mailbox_.stopped_latched());
+              if (submitted == NativeUploadIngress::EnqueueResult::accepted) {
+                response->result(http::status::accepted);
+                response->body() = R"({"state":"UPLOAD_QUEUED_FOR_ROS","decision_only":true,"mission_loaded":false,"motor_commands_enabled":false})";
+              } else {
+                response->result(http::status::conflict);
+                response->body() = R"({"detail":"UPLOAD_LEASE_REQUIRED_OR_INBOX_BUSY_OR_STOPPED"})";
+              }
+            }
+          }
+        }
+      }
+    } else if (request.method() == http::verb::get &&
+               request.target() == "/api/native/mission/upload/status") {
+      if (!sessions_->configured()) {
+        response->result(http::status::service_unavailable);
+        response->body() = R"({"detail":"NATIVE_SESSION_DB_NOT_CONFIGURED"})";
+      } else {
+        const auto session = verify_session(request);
+        if (!session.authenticated) {
+          response->result(http::status::unauthorized);
+          response->body() = R"({"detail":"AUTHENTICATION_REQUIRED"})";
+        } else {
+          const auto body = ingress_.status_for(
+              session.session_id, mailbox_.stopped_latched());
+          if (body.value("state", std::string{}) == "CONTROL_LEASE_REQUIRED") {
+            response->result(http::status::forbidden);
+          } else {
+            response->result(http::status::ok);
+          }
+          response->body() = body.dump();
+        }
+      }
     } else if (request.method() == http::verb::post &&
                request.target() == "/api/native/mission/preview") {
       // Never accept a network value as proof of control lease or disarm.
@@ -235,6 +338,8 @@ class HttpSession final
           command.mission_run_id = "native_stop";
           command.sequence = 1;
           auto result = mailbox_.submit_verified(std::move(command), true);
+          if (result == NativeCommandMailbox::SubmitResult::accepted)
+            ingress_.cancel_on_stop();
           if (result != NativeCommandMailbox::SubmitResult::accepted) {
             response->result(http::status::service_unavailable);
             response->body() = R"({"detail":"STOP_ENQUEUE_REJECTED"})";
@@ -289,6 +394,7 @@ class HttpSession final
   std::shared_ptr<NativeStatusSnapshot> snapshot_;
   std::shared_ptr<NativeSessionAuth> sessions_;
   NativeCommandMailbox& mailbox_;
+  NativeUploadIngress& ingress_;
   beast::flat_buffer buffer_;
   http::request_parser<http::string_body> parser_;
 };
@@ -298,8 +404,10 @@ class NativeHttpServer final {
   NativeHttpServer(
       std::uint16_t port,
       std::shared_ptr<NativeStatusSnapshot> snapshot,
-      NativeCommandMailbox& mailbox)
+      NativeCommandMailbox& mailbox,
+      NativeUploadIngress& ingress)
       : acceptor_(ioc_), snapshot_(std::move(snapshot)), mailbox_(mailbox),
+        ingress_(ingress),
         sessions_(std::make_shared<NativeSessionAuth>(
             std::getenv("DYX_CPP17_AUTH_DB") ?
             std::getenv("DYX_CPP17_AUTH_DB") : "")) {
@@ -344,7 +452,8 @@ class NativeHttpServer final {
             tcp::socket socket) {
           if (!ec) {
             std::make_shared<HttpSession>(
-                std::move(socket), snapshot_, sessions_, mailbox_)->start();
+                std::move(socket), snapshot_, sessions_, mailbox_,
+                ingress_)->start();
           }
 
           if (acceptor_.is_open())
@@ -355,6 +464,7 @@ class NativeHttpServer final {
   std::shared_ptr<NativeStatusSnapshot> snapshot_;
   std::shared_ptr<NativeSessionAuth> sessions_;
   NativeCommandMailbox& mailbox_;
+  NativeUploadIngress& ingress_;
   asio::io_context ioc_{1};
   tcp::acceptor acceptor_;
   std::thread worker_;
