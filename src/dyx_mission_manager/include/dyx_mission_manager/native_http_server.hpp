@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 #include "dyx_mission_manager/native_session_auth.hpp"
 #include "dyx_mission_manager/native_command_mailbox.hpp"
+#include "dyx_mission_manager/native_mission_preview.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -151,6 +152,56 @@ class HttpSession final
               {"decision_only",true},
               {"mission_commands_enabled",false}}
               .dump();
+        }
+      }
+    } else if (request.method() == http::verb::get &&
+               request.target() == "/api/native/mission/capabilities") {
+      response->result(http::status::ok);
+      response->body() = nlohmann::json{
+          {"service", "dyx_cpp17_native_mission_preview"},
+          {"auth_database_configured", sessions_->configured()},
+          {"authenticated_preview_supported", true},
+          {"preview_coordinate_frame", "LOCAL_ENU_METRES"},
+          {"live_android_api_compatible", false},
+          {"mission_load_enabled", false},
+          {"mission_commands_enabled", false},
+          {"motor_commands_enabled", false},
+          {"spray_commands_enabled", false},
+          {"physical_command_emitted", false}
+      }.dump();
+    } else if (request.method() == http::verb::post &&
+               request.target() == "/api/native/mission/preview") {
+      // Never accept a network value as proof of control lease or disarm.
+      if (!sessions_->configured()) {
+        response->result(http::status::service_unavailable);
+        response->body() = R"({"detail":"NATIVE_SESSION_DB_NOT_CONFIGURED"})";
+      } else {
+        std::string token;
+        const auto bearer = request.find(http::field::authorization);
+        if (bearer != request.end()) {
+          const std::string value = bearer->value().to_string();
+          if (value.size() >= 7 && value.compare(0, 7, "Bearer ") == 0)
+            token = value.substr(7);
+        }
+        if (token.empty()) {
+          const auto header = request.find("X-Rover-Token");
+          if (header != request.end()) token = header->value().to_string();
+        }
+        const auto verified = sessions_->verify(token);
+        if (!verified.authenticated) {
+          response->result(http::status::unauthorized);
+          response->body() = R"({"detail":"AUTHENTICATION_REQUIRED"})";
+        } else {
+          // Bounded by the existing 8192-byte Beast request-body limit.
+          const auto payload = nlohmann::json::parse(request.body(), nullptr, false);
+          if (payload.is_discarded()) {
+            response->result(http::status::bad_request);
+            response->body() = R"({"detail":"INVALID_JSON"})";
+          } else {
+            const auto preview = NativeMissionPreview::validate(payload);
+            response->result(static_cast<http::status>(preview.http_status));
+            response->body() = preview.body.dump();
+          }
         }
       }
     } else if (request.method() == http::verb::post &&
