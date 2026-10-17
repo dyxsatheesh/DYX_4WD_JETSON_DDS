@@ -1,0 +1,12 @@
+<launch>
+  <!-- Observation-only profile. Never launch the legacy Python production bringup concurrently. -->
+  <node pkg="dyx_cpp17_named_nodes" exec="mission_manager_node" name="mission_manager_node" output="screen" />
+  <node pkg="dyx_cpp17_named_nodes" exec="rover_backend" name="rover_backend" output="screen" />
+  <node pkg="dyx_cpp17_named_nodes" exec="cmd_vel_bridge" name="cmd_vel_bridge" output="screen" />
+  <node pkg="dyx_cpp17_named_nodes" exec="rpp_controller_node" name="rpp_controller_node" output="screen" />
+  <node pkg="dyx_cpp17_named_nodes" exec="trajectory_generator_node" name="trajectory_generator_node" output="screen" />
+  <node pkg="dyx_cpp17_named_nodes" exec="spray_controller_node" name="spray_controller_node" output="screen" />
+  <node pkg="dyx_cpp17_named_nodes" exec="obstacle_monitor_node" name="obstacle_monitor_node" output="screen" />
+  <node pkg="dyx_cpp17_named_nodes" exec="rtk_worker" name="rtk_worker" output="screen" />
+  <node pkg="dyx_cpp17_named_nodes" exec="estimator_status_relay" name="estimator_status_relay" output="screen" />
+</launch>

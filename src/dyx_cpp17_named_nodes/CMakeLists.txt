@@ -27,4 +27,18 @@ target_include_directories(rover_backend PRIVATE
 ament_target_dependencies(rover_backend dyx_rpp_cpp17_core)
 target_link_libraries(rover_backend Boost::system Threads::Threads OpenSSL::Crypto SQLite::SQLite3)
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+
+find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+foreach(node IN ITEMS rpp_controller_node trajectory_generator_node spray_controller_node obstacle_monitor_node rtk_worker estimator_status_relay)
+  add_executable(${node} src/${node}.cpp)
+  ament_target_dependencies(${node} rclcpp std_msgs)
+  install(TARGETS ${node} DESTINATION lib/${PROJECT_NAME})
+endforeach()
+ament_target_dependencies(rpp_controller_node geometry_msgs px4_msgs dyx_rpp_cpp17_core)
+ament_target_dependencies(estimator_status_relay px4_msgs)
+ament_target_dependencies(trajectory_generator_node dyx_rpp_cpp17_core)
+ament_target_dependencies(spray_controller_node dyx_rpp_cpp17_core)
+ament_target_dependencies(obstacle_monitor_node sensor_msgs)
+
 ament_package()
