@@ -21,5 +21,10 @@ target_include_directories(mission_manager_node PRIVATE
 ament_target_dependencies(mission_manager_node dyx_rpp_cpp17_core px4_msgs)
 target_link_libraries(mission_manager_node
   Boost::system Threads::Threads OpenSSL::Crypto SQLite::SQLite3)
+# Read-only backend authenticates SQLite sessions without mission authority.
+target_include_directories(rover_backend PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_mission_manager/include)
+ament_target_dependencies(rover_backend dyx_rpp_cpp17_core)
+target_link_libraries(rover_backend Boost::system Threads::Threads OpenSSL::Crypto SQLite::SQLite3)
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 ament_package()
