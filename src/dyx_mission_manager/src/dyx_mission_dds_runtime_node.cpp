@@ -158,7 +158,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     // Android's existing production endpoint.
     native_http_ =
         std::make_unique<dyx::http_backend::NativeHttpServer>(
-            18766, native_status_, command_mailbox_, upload_ingress_, load_ingress_);
+            18766, native_status_, command_mailbox_, upload_ingress_, load_ingress_, command_decisions_);
 
     timer_ = create_wall_timer(20ms, [this]() { tick(); });
 
@@ -198,9 +198,11 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
       if (command->path == dyx::rpp::kBackendMissionStopPath) {
         owner_.force_stop();
       } else {
-        // The installed network listener deliberately cannot submit here.
-        // Even a future privileged producer cannot bypass gateway checks.
-        (void)owner_.handle_backend_action(*command);
+        // Batch 7B2: ROS is the sole consumer. All positive commands
+        // are denied, NOT forwarded to the owner, even with DDS telemetry.
+        // HTTP has NO motor/spray publisher and NO motion lease.
+        command_decisions_.denied(command->principal.operator_session_id,
+                                  command->mission_run_id, command->sequence);
       }
       ++processed_commands_;
     }
@@ -209,6 +211,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     if (command_mailbox_.stopped_latched()) {
       upload_ingress_.cancel_on_stop();
       load_ingress_.cancel_on_stop();
+      command_decisions_.stop();
     }
 
     // Exactly one bounded upload decision per tick. The owner_ is touched
@@ -533,6 +536,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   dyx::http_backend::NativeCommandMailbox command_mailbox_{};
   dyx::http_backend::NativeUploadIngress upload_ingress_{};
   dyx::http_backend::NativeLoadIngress load_ingress_{};
+  dyx::http_backend::NativeCommandDecisionAudit command_decisions_{};
   bool last_vehicle_disarmed_{false};
   double last_vehicle_disarm_received_sec_{-1.0};
   std::uint64_t processed_commands_{0};
