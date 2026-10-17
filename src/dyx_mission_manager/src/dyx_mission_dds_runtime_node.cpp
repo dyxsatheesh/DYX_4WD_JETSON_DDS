@@ -1,6 +1,7 @@
 #include "dyx_rpp_cpp17_core/native_control_owner.hpp"
 #include "dyx_mission_manager/native_http_server.hpp"
 #include "dyx_mission_manager/native_command_mailbox.hpp"
+#include "dyx_mission_manager/native_mission_command_executor.hpp"
 #include "dyx_mission_manager/native_telemetry_safety_component.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
@@ -196,32 +197,14 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     // This is not a PX4 hardware stop acknowledgment.
     if (telemetry_safety_.critical_battery_latched()) owner_.force_stop();
 
-    // Only the ROS executor handles the mailbox. A bounded maximum of
-    // four decisions per cycle prevents unbounded request processing.
-    // HTTP command ingress is NOT enabled in this batch: no HTTP thread
-    // can dispatch mission actions or claim an authenticated session.
-    // STOP is decision-side only; physical E-stop still required.
-    for (int i = 0; i < 4; ++i) {
-      auto command = command_mailbox_.pop_for_ros();
-      if (!command) break;
-      if (command->path == dyx::rpp::kBackendMissionStopPath) {
-        owner_.force_stop();
-      } else {
-        // Batch 7B2: ROS is the sole consumer. All positive commands
-        // are denied, NOT forwarded to the owner, even with DDS telemetry.
-        // HTTP has NO motor/spray publisher and NO motion lease.
-        command_decisions_.denied(command->principal.operator_session_id,
-                                  command->mission_run_id, command->sequence);
-      }
-      ++processed_commands_;
-    }
-
-    // STOP supersedes any pending UPLOAD, including concurrent HTTP ingress.
-    if (command_mailbox_.stopped_latched()) {
-      upload_ingress_.cancel_on_stop();
-      load_ingress_.cancel_on_stop();
-      command_decisions_.stop();
-    }
+    // Single ROS-owner command executor, extracted from the gateway.
+    // STOP remains decision-side only; positive commands remain denied.
+    const auto command_result = mission_command_executor_.drain(
+        command_mailbox_, command_decisions_,
+        [this]() { owner_.force_stop(); },
+        upload_ingress_, load_ingress_,
+        dyx::rpp::kBackendMissionStopPath);
+    processed_commands_ += command_result.processed;
 
     // Exactly one bounded upload decision per tick. The owner_ is touched
     // only here on the ROS executor; HTTP never invokes the mission gateway.
@@ -566,6 +549,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
 
   NativeControlOwner owner_{};
   dyx::http_backend::NativeTelemetrySafetyComponent telemetry_safety_{};
+  dyx::http_backend::NativeMissionCommandExecutor mission_command_executor_{};
   dyx::http_backend::NativeCommandMailbox command_mailbox_{};
   dyx::http_backend::NativeUploadIngress upload_ingress_{};
   dyx::http_backend::NativeLoadIngress load_ingress_{};
