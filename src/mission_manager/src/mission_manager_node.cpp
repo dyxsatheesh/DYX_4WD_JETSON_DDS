@@ -3,6 +3,7 @@
 #include "dyx_mission_manager/native_command_mailbox.hpp"
 #include "dyx_mission_manager/native_mission_command_executor.hpp"
 #include "dyx_mission_manager/native_telemetry_safety_component.hpp"
+#include "dyx_mission_manager/rtk_safety_snapshot.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -209,6 +210,10 @@ class MissionManagerNode final : public rclcpp::Node {
     // The 30-second critical-voltage debounce latches an internal mission STOP.
     // This is not a PX4 hardware stop acknowledgment.
     if (telemetry_safety_.critical_battery_latched()) owner_.force_stop();
+
+    const auto rtk_snapshot = dyx::http_backend::make_rtk_safety_snapshot(
+        telemetry_safety_.rtk(), telemetry_safety_.rtcm(), now,
+        false, false);  // No trusted receiver-age or positive safety adapters.
 
     // Single ROS-owner command executor, extracted from the gateway.
     // STOP remains decision-side only; positive commands remain denied.
@@ -483,6 +488,11 @@ class MissionManagerNode final : public rclcpp::Node {
         << leg.yaw_rate_enu_preview_radps
         << ";trajectory_status_seen=" << trajectory_seen_
         << ";trajectory_status=" << trajectory_status_
+        << ";rtk_pause_intent=" << rtk_snapshot.pause_intent
+        << ";rtk_float_over_five_seconds=" << rtk_snapshot.float_over_five_seconds
+        << ";rtk_correction_age_verified=" << rtk_snapshot.correction_age_verified
+        << ";rtk_motion_ready=" << rtk_snapshot.motion_ready
+        << ";rtk_safety_reason=" << rtk_snapshot.reason
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -530,6 +540,9 @@ class MissionManagerNode final : public rclcpp::Node {
         {"rtk_pause_intent", telemetry_safety_.rtk().pause_requested(now)},
         {"rtk_sample_fault", telemetry_safety_.rtk().fault()},
         {"rtk_auto_resume_authorized", false},
+        {"rtk_safety_reason", rtk_snapshot.reason},
+        {"rtk_motion_ready", rtk_snapshot.motion_ready},
+        {"rtk_receiver_age_provenance_verified", false},
         {"telemetry_fault",
          telemetry_fault_ ||
          result.mission.telemetry_fault_latched},
