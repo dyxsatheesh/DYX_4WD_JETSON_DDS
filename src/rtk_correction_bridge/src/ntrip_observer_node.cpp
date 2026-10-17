@@ -1,6 +1,8 @@
 // DYX native C++17 NTRIP RTCM receiver. No serial/PX4/actuator publishers.
 #include "rtcm3.hpp"
 #include "serial_rtcm_sink.hpp"
+#include "receiver_gga_age.hpp"
+#include "receiver_age_serial.hpp"
 #include "ntrip_protocol.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -65,6 +67,15 @@ public:
   serial_commissioned_=declare_parameter<bool>("serial_commissioned",false);
   serial_device_=declare_parameter<std::string>("serial_device","");
   serial_baud_=declare_parameter<int>("serial_baud",230400);
+  receiver_age_observe_=declare_parameter<bool>("receiver_age_observe_enabled",false);
+  receiver_age_device_=declare_parameter<std::string>("receiver_age_device","");
+  receiver_age_baud_=declare_parameter<int>("receiver_age_baud",230400);
+  if(receiver_age_observe_){
+    if(receiver_age_device_.empty() || (serial_enabled_ && receiver_age_device_==serial_device_))
+      throw std::invalid_argument("Receiver age requires an exclusive, separate receiver output port");
+    receiver_age_serial_=std::make_unique<dyx::rtcm::ReceiverAgeSerial>(receiver_age_device_,receiver_age_baud_);
+    age_worker_=std::thread([this]{age_loop();});
+  }
   if(serial_enabled_ && (!serial_commissioned_ || !enabled_ || serial_device_.empty()))
     throw std::invalid_argument("RTCM_SERIAL_REQUIRES_EXPLICIT_COMMISSIONING_AND_NTRIP");
   if(serial_enabled_)serial_=std::make_unique<dyx::rtcm::SerialRtcmSink>(serial_device_,serial_baud_);
@@ -82,12 +93,40 @@ public:
       ";receiver_injection_enabled="+std::string(serial_enabled_?"true":"false")+
       ";serial_frames_written="+std::to_string(serial_frames_)+
       ";serial_write_faults="+std::to_string(serial_faults_)+
+      ";receiver_age_observer_enabled="+std::string(receiver_age_observe_?"true":"false")+
+      ";receiver_gga_valid="+std::to_string(gga_valid_)+
+      ";receiver_age_report_fresh="+std::string(age_valid_ && seconds()-age_host_sec_<=1.0?"true":"false")+
+      ";receiver_reported_correction_age_sec="+
+        (age_valid_ && seconds()-age_host_sec_<=1.0 ? std::to_string(age_value_sec_+seconds()-age_host_sec_):"unavailable")+
+      ";receiver_age_provenance=LOCAL_SERIAL_DIAGNOSTIC_ONLY"+
+      ";mission_age_adapter_connected=false"+
       ";rtk_fixed_verified=false;motion_authorized=false";
     pub_->publish(m);
   });
  }
- ~NtripObserver()override{stop_=true;if(worker_.joinable())worker_.join();}
+ ~NtripObserver()override{stop_=true;if(worker_.joinable())worker_.join();if(age_worker_.joinable())age_worker_.join();}
 private:
+ void age_loop(){
+  dyx::rtcm::ReceiverGgaAge parser;
+  while(!stop_){
+   if(!receiver_age_serial_->open_read_only()){
+     {std::lock_guard<std::mutex> l(mu_); age_valid_=false;}
+     for(int i=0;i<10&&!stop_;++i)std::this_thread::sleep_for(100ms);
+     continue;
+   }
+   std::uint8_t buf[512];
+   const int count=receiver_age_serial_->read_some(buf,sizeof(buf));
+   if(count<0){receiver_age_serial_->close();std::lock_guard<std::mutex> l(mu_);age_valid_=false;continue;}
+   for(int i=0;i<count;++i){
+    const auto age=parser.feed(static_cast<char>(buf[i]));
+    if(age){
+      std::lock_guard<std::mutex> l(mu_);
+      ++gga_valid_;age_valid_=true;age_host_sec_=seconds();age_value_sec_=age->age_sec;
+    }
+   }
+  }
+  receiver_age_serial_->close();
+ }
  void update(const std::string&s,bool rx){std::lock_guard<std::mutex>l(mu_);state_=s;receiving_=rx;}
  void record(const dyx::rtcm::Parser& parser,std::size_t new_frames){
    std::lock_guard<std::mutex>l(mu_);valid_+=new_frames;bad_=parser.counters().crc_bad;
@@ -165,7 +204,11 @@ private:
   }
   update("STOPPED",false);
  }
- std::atomic<bool> stop_{false};std::thread worker_;
+ std::atomic<bool> stop_{false};std::thread worker_,age_worker_;
+ bool receiver_age_observe_{false};
+ std::string receiver_age_device_{};int receiver_age_baud_{230400};
+ std::unique_ptr<dyx::rtcm::ReceiverAgeSerial> receiver_age_serial_{};
+ std::uint64_t gga_valid_{0};bool age_valid_{false};double age_host_sec_{-1},age_value_sec_{-1};
  std::mutex mu_;std::string state_{"DISABLED"};bool receiving_{false},enabled_{false},tls_required_{true};
  std::string host_,mount_,user_,pass_,serial_device_;int port_{2101},serial_baud_{230400};
  bool serial_enabled_{false},serial_commissioned_{false};
