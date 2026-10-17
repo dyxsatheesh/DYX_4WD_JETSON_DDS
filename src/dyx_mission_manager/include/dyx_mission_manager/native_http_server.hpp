@@ -9,6 +9,7 @@
 #include "dyx_mission_manager/native_mission_preview.hpp"
 #include "dyx_mission_manager/native_upload_ingress.hpp"
 #include "dyx_mission_manager/native_load_ingress.hpp"
+#include "dyx_mission_manager/native_execution_preflight.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -193,6 +194,29 @@ class HttpSession final
           {"spray_commands_enabled", false},
           {"physical_command_emitted", false}
       }.dump();
+    } else if (request.method() == http::verb::get &&
+               request.target() == "/api/native/mission/preflight") {
+      // An authenticated, read-only report. All evidence originates from
+      // the ROS snapshot, never the HTTP request body.
+      const auto session = verify_session(request);
+      if (!session.authenticated) {
+        response->result(http::status::unauthorized);
+        response->body() = R"({"detail":"AUTHENTICATION_REQUIRED"})";
+      } else {
+        const auto snapshot = snapshot_->read();
+        if (!snapshot.first) {
+          response->result(http::status::service_unavailable);
+          response->body() = nlohmann::json{
+              {"state","BLOCKED"},
+              {"detail", "ROS_SNAPSHOT_STALE_OR_UNAVAILABLE"},
+              {"start_enabled",false},
+              {"ready_for_physical_motion",false},
+              {"decision_only",true}}.dump();
+        } else {
+          response->result(http::status::ok);
+          response->body() = NativeExecutionPreflight::evaluate(snapshot.second).dump();
+        }
+      }
     } else if (request.method() == http::verb::post &&
                request.target() == "/api/native/mission/lease/acquire") {
       if (!sessions_->configured()) {
