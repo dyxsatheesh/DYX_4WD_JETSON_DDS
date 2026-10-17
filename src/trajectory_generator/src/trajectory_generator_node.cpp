@@ -1,5 +1,6 @@
 #include "dyx_rpp_cpp17_core/trajectory_builder.hpp"
 #include "enu_csv.hpp"
+#include "geo_csv.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -37,6 +38,10 @@ public:
     preview_pub_ = create_publisher<std_msgs::msg::String>("/dyx/trajectory_generator/preview_status", 5);
     declare_parameter<std::vector<double>>("markings_enu_flat", std::vector<double>{});
     declare_parameter<std::string>("mission_enu_csv_file", "");
+    declare_parameter<std::string>("mission_geo_csv_file", "");
+    declare_parameter<bool>("explicit_geo_diagnostic_enabled", false);
+    declare_parameter<double>("diagnostic_px4_origin_latitude_deg", 999.0);
+    declare_parameter<double>("diagnostic_px4_origin_longitude_deg", 999.0);
     declare_parameter<bool>("explicit_enu_preparation_enabled", false);
     declare_parameter<bool>("extension_enabled",false);
     declare_parameter<double>("extension_distance_m",4.0);
@@ -71,10 +76,24 @@ private:
       throw std::runtime_error("DENIED: explicit ENU preparation disabled; GPS/PX4 origin placement not ported");
     const auto coordinates=get_parameter("markings_enu_flat").as_double_array();
     const auto csv_file=get_parameter("mission_enu_csv_file").as_string();
+    const auto geo_file=get_parameter("mission_geo_csv_file").as_string();
+    if(!geo_file.empty() && (!csv_file.empty() || !coordinates.empty()))
+      throw std::invalid_argument("DENIED: geographic and ENU sources cannot be mixed");
+    if(!geo_file.empty() && !get_parameter("explicit_geo_diagnostic_enabled").as_bool())
+      throw std::invalid_argument("DENIED: geographic diagnostic conversion not enabled");
     if(!csv_file.empty() && !coordinates.empty())
       throw std::invalid_argument("DENIED: choose one local ENU source, CSV or flat coordinates");
     std::vector<dyx::rpp::Point2D> source;
-    if(!csv_file.empty()) {
+    std::string geodetic_survey="[]";
+    const bool geographic=!geo_file.empty();
+    if(geographic){
+      dyx::trajectory::GeoPoint origin{
+        get_parameter("diagnostic_px4_origin_latitude_deg").as_double(),
+        get_parameter("diagnostic_px4_origin_longitude_deg").as_double()};
+      auto mission=dyx::trajectory::load_geographic_csv(geo_file,origin);
+      source=std::move(mission.enu);
+      geodetic_survey=dyx::trajectory::survey_json(mission.survey);
+    } else if(!csv_file.empty()) {
       source=dyx::trajectory::load_local_enu_csv(csv_file);
     } else {
       if (coordinates.size()<4 || coordinates.size()%2 || coordinates.size()>20000)
@@ -111,9 +130,11 @@ private:
     std::ostringstream summary;summary<<"ENU_PREVIEW_ONLY:n="<<source.size()<<":nav="<<nav_.poses.size()
                                     <<":dummy="<<result.dummy_count;
     signature_.data=summary.str();
-    survey_.data="[]";  // No geodetic survey targets can be inferred from local ENU.
+    survey_.data=geodetic_survey;
     ready_=true;
-    state_="ENU_PREVIEW_PREPARED_NOT_PX4_PLACED;mission_start_authorized=false;motion_authorized=false";
+    state_=geographic ?
+      "GEO_DIAGNOSTIC_PROJECTED_UNVERIFIED_PX4_ORIGIN;mission_start_authorized=false;motion_authorized=false" :
+      "ENU_PREVIEW_PREPARED_NOT_PX4_PLACED;mission_start_authorized=false;motion_authorized=false";
   }
   void publish_all() {
     // Publish no false readiness: /ready remains FALSE until geo/PX4 reference parity.

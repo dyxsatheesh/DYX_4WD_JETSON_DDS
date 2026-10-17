@@ -1,4 +1,5 @@
 #include "dyx_rpp_cpp17_core/path_index.hpp"
+#include "guidance_preview.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
@@ -32,6 +33,7 @@ public:
   detail_=create_publisher<std_msgs::msg::String>("/rpp_controller/geometry_status",10);
   declare_parameter<double>("lookahead_m",0.55);
   declare_parameter<double>("max_path_jump_m",0.5);
+  declare_parameter<double>("preview_cruise_mps",0.6);
   pos_=create_subscription<px4_msgs::msg::VehicleLocalPosition>("/fmu/out/vehicle_local_position",rclcpp::SensorDataQoS(),
    [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr p){
     std::lock_guard<std::mutex> g(mu_);
@@ -129,6 +131,13 @@ private:
       const double look=get_parameter("lookahead_m").as_double();
       if(!std::isfinite(look)||look<0.0||look>5.0)throw std::invalid_argument("BAD_LOOKAHEAD");
       const auto target=gidx.point_at_s(std::min(gidx.total_length,along+look));
+      const auto guidance=dyx::rpp::preview_guidance(east_,north_,heading_enu_,
+        target.point.x,target.point.y,along,gidx.total_length,
+        get_parameter("preview_cruise_mps").as_double());
+      s<<";guidance_heading_error_rad="<<guidance.heading_error_rad
+       <<";guidance_forward_preview_mps="<<guidance.forward_mps
+       <<";guidance_yaw_rate_preview_radps="<<guidance.yaw_rate_enu_radps
+       <<";guidance_pivot_needed="<<(guidance.pivot_needed?"true":"false");
       s<<";cross_track_m="<<cross<<";nearest_distance_m="<<best
        <<";path_progress_m="<<along<<";remaining_path_m="<<std::max(0.0,gidx.total_length-along)
        <<";lookahead_east_m="<<target.point.x<<";lookahead_north_m="<<target.point.y
