@@ -1,5 +1,6 @@
 #include "dyx_px4_dds_bridge/geometry.hpp"
 #include "dyx_px4_dds_bridge/safety_freshness.hpp"
+#include "dyx_px4_dds_bridge/bridge_commissioning_guard.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
@@ -26,6 +27,10 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
   DyxPx4DdsBridge() : Node("dyx_px4_dds_bridge") {
     // Deliberately DISABLED by default and not added to rover.launch.py.
     enable_motion_ = declare_parameter<bool>("enable_motion", false);
+    // Hardware commissioning not completed. Never let a ROS parameter
+    // enable the experimental velocity/trajectory PX4 writer.
+    if (enable_motion_) throw std::runtime_error(
+        "B3_LOCKOUT: enable_motion=true prohibited before hardware certification");
     maximum_speed_mps_ = declare_parameter<double>("maximum_speed_mps", 1.0);
     maximum_yaw_rate_radps_ =
         declare_parameter<double>("maximum_yaw_rate_radps", 0.18);
@@ -99,6 +104,12 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
               px4_status_received_ = std::chrono::steady_clock::now();
             });
 
+    mission_status_sub_ = create_subscription<std_msgs::msg::String>(
+        "/mission_manager/status", rclcpp::QoS(10),
+        [this](std_msgs::msg::String::ConstSharedPtr m) {
+          audit_.observe(m->data, Steady::now());
+        });
+    // This is diagnostic only. No trust is granted from a textual status.
     tick_ = create_wall_timer(20ms, [this]() { publish_setpoint(); });
     RCLCPP_WARN(get_logger(),
                 "DDS bridge installed but NOT production enabled; "
@@ -120,8 +131,15 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     if (!enable_motion_) {
       have_rpp_ = false;
       if (++tick_count_ % 50 == 0) {
+        // Our own publishers count as one each. Another publisher must be
+        // investigated before commissioning; this is not a process-wide lock.
+        const auto mode_writers = count_publishers("/fmu/in/offboard_control_mode");
+        const auto trajectory_writers = count_publishers("/fmu/in/trajectory_setpoint");
         std_msgs::msg::String status;
-        status.data = "INHIBITED:enable_motion_false";
+        status.data = "INHIBITED:" + audit_.reason(Steady::now(),
+            mode_writers > 1 ? mode_writers - 1 : 0,
+            trajectory_writers > 1 ? trajectory_writers - 1 : 0)
+            + ";motor_commands_enabled=false;physical_command_emitted=false";
         status_pub_->publish(status);
       }
       return;
@@ -196,6 +214,8 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     }
   }
 
+  dyx::bridge::BridgeAudit audit_{};
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mission_status_sub_;
   bool enable_motion_{false};
   bool emergency_stop_{true};
   bool mission_enabled_{false};
