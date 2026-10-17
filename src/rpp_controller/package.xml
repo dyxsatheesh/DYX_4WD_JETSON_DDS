@@ -8,6 +8,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>dyx_rpp_cpp17_core</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>px4_msgs</depend>
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
