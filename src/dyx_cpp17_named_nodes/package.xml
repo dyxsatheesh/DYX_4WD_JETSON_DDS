@@ -1,12 +1,13 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>dyx_cpp17_named_nodes</name>
-  <version>0.1.0</version>
-  <description>Non-actuating named-node boundaries for C++17 migration</description>
+  <version>0.2.0</version>
+  <description>Read-only C++17 named rover nodes with mission sequencer and watchdog observers</description>
   <maintainer email="noreply@dyxautonomous.com">DYX Autonomous Engineering</maintainer>
   <license>Proprietary</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
+  <depend>dyx_rpp_cpp17_core</depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>
