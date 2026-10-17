@@ -1,5 +1,6 @@
 #include "dyx_rpp_cpp17_core/path_index.hpp"
 #include "guidance_preview.hpp"
+#include "semantic_metadata.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
@@ -80,10 +81,26 @@ public:
       auto replacement=std::make_unique<dyx::rpp::PathGeometryIndex>(dyx::rpp::PathGeometryIndex::build(points));
       geometry_=std::move(replacement);
       last_path_points_=std::move(points);
+      semantic_valid_=false;
+      // Reattempt only when both metadata topics are available. This remains
+      // diagnostics; no START or actuation authority is derived from metadata.
+      rebuild_semantics_locked();
       path_frame_=p->header.frame_id;path_error_.clear();path_time_=std::chrono::steady_clock::now();
       tracker_.reset();++path_revision_;
     } catch(const std::exception& e){geometry_.reset();tracker_.reset();last_path_points_.clear();path_error_=e.what();}
   });
+  types_sub_ = create_subscription<std_msgs::msg::UInt8MultiArray>(
+    "/trajectory_generator/path_types", q,
+    [this](std_msgs::msg::UInt8MultiArray::ConstSharedPtr m){
+      std::lock_guard<std::mutex> g(mu_);
+      types_=m->data; types_seen_=true; rebuild_semantics_locked();
+    });
+  marks_sub_ = create_subscription<std_msgs::msg::Int32MultiArray>(
+    "/trajectory_generator/marking_indices", q,
+    [this](std_msgs::msg::Int32MultiArray::ConstSharedPtr m){
+      std::lock_guard<std::mutex> g(mu_);
+      marks_=m->data; marks_seen_=true; rebuild_semantics_locked();
+    });
   goal_=create_subscription<geometry_msgs::msg::PointStamped>("/dyx/mission/preview_goal_ned",5,
     [this](geometry_msgs::msg::PointStamped::ConstSharedPtr p){
       std::lock_guard<std::mutex> g(mu_);
@@ -94,7 +111,25 @@ public:
     });
   timer_=create_wall_timer(50ms,[this]{publish();});
  }
-private:
+ private:
+ void rebuild_semantics_locked(){
+   semantic_valid_=false; semantic_marking_count_=0;
+   if(!geometry_ || !types_seen_ || !marks_seen_) return;
+   try {
+     auto tagged=dyx::rpp::attach_semantics(last_path_points_,types_,marks_);
+     auto semantic=std::make_unique<dyx::rpp::PathGeometryIndex>(
+       dyx::rpp::PathGeometryIndex::build(tagged));
+     geometry_=std::move(semantic);
+     semantic_valid_=true;
+     semantic_marking_count_=marks_.size();
+     semantic_error_.clear();
+   }catch(const std::exception& e){
+     // Never retain possibly stale semantic identities after a bad update.
+     semantic_error_=e.what();
+     geometry_=std::make_unique<dyx::rpp::PathGeometryIndex>(
+       dyx::rpp::PathGeometryIndex::build(last_path_points_));
+   }
+ }
  void publish(){
   std::lock_guard<std::mutex> g(mu_);
   const auto now=std::chrono::steady_clock::now();
@@ -108,7 +143,10 @@ private:
    <<";path_available="<<(path_ok?"true":"false")
    <<";path_revision="<<path_revision_
    <<";path_frame="<<path_frame_
-   <<";path_error="<<path_error_;
+   <<";path_error="<<path_error_
+   <<";semantic_valid="<<(semantic_valid_?"true":"false")
+   <<";semantic_marking_count="<<semantic_marking_count_
+   <<";semantic_error="<<semantic_error_;
   if(fresh && pose_valid_ && !position_fault_ && path_ok){
     try{
       // Project onto entire recorded path for diagnostic tracking. Movement
@@ -154,12 +192,19 @@ private:
  double east_{0},north_{0},heading_enu_{0},goal_east_{0},goal_north_{0};
  std::uint64_t path_revision_{0};std::string path_frame_{},path_error_{};
  std::chrono::steady_clock::time_point position_time_{},path_time_{};
+ bool types_seen_{false}, marks_seen_{false}, semantic_valid_{false};
+ std::size_t semantic_marking_count_{0};
+ std::string semantic_error_{};
+ std::vector<std::uint8_t> types_{};
+ std::vector<std::int32_t> marks_{};
  std::vector<dyx::rpp::RawPathPoint> last_path_points_;
  std::unique_ptr<dyx::rpp::PathGeometryIndex> geometry_;
  std::unique_ptr<dyx::rpp::GeometryProgressTracker> tracker_;
  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr out_,detail_;
  rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr pos_;
  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_;
+ rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr types_sub_;
+ rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr marks_sub_;
  rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_;
  rclcpp::TimerBase::SharedPtr timer_;
 };
