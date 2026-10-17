@@ -8,6 +8,7 @@
 #include <std_msgs/msg/u_int8_multi_array.hpp>
 #include <std_msgs/msg/int32_multi_array.hpp>
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <chrono>
@@ -64,10 +65,22 @@ public:
       }
       // Marking metadata arrives asynchronously; do not infer any point as a
       // physical marking stop from an interpolation-only path.
-      geometry_=std::make_unique<dyx::rpp::PathGeometryIndex>(dyx::rpp::PathGeometryIndex::build(points));
+      // A latched path may be republished every second. Identical data MUST
+      // NOT reset path progress or increment mission/path revision.
+      if (path_frame_==p->header.frame_id && points.size()==last_path_points_.size()) {
+        bool same=true;
+        for(std::size_t i=0;i<points.size();++i) {
+          if(points[i].point.x!=last_path_points_[i].point.x ||
+             points[i].point.y!=last_path_points_[i].point.y) {same=false;break;}
+        }
+        if(same && geometry_) {path_time_=std::chrono::steady_clock::now();return;}
+      }
+      auto replacement=std::make_unique<dyx::rpp::PathGeometryIndex>(dyx::rpp::PathGeometryIndex::build(points));
+      geometry_=std::move(replacement);
+      last_path_points_=std::move(points);
       path_frame_=p->header.frame_id;path_error_.clear();path_time_=std::chrono::steady_clock::now();
       tracker_.reset();++path_revision_;
-    } catch(const std::exception& e){geometry_.reset();tracker_.reset();path_error_=e.what();}
+    } catch(const std::exception& e){geometry_.reset();tracker_.reset();last_path_points_.clear();path_error_=e.what();}
   });
   goal_=create_subscription<geometry_msgs::msg::PointStamped>("/dyx/mission/preview_goal_ned",5,
     [this](geometry_msgs::msg::PointStamped::ConstSharedPtr p){
@@ -132,6 +145,7 @@ private:
  double east_{0},north_{0},heading_enu_{0},goal_east_{0},goal_north_{0};
  std::uint64_t path_revision_{0};std::string path_frame_{},path_error_{};
  std::chrono::steady_clock::time_point position_time_{},path_time_{};
+ std::vector<dyx::rpp::RawPathPoint> last_path_points_;
  std::unique_ptr<dyx::rpp::PathGeometryIndex> geometry_;
  std::unique_ptr<dyx::rpp::GeometryProgressTracker> tracker_;
  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr out_,detail_;

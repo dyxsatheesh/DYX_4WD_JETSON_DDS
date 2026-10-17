@@ -154,6 +154,13 @@ class MissionManagerNode final : public rclcpp::Node {
               }
             });
 
+    trajectory_status_sub_ = create_subscription<std_msgs::msg::String>(
+        "/trajectory_generator/status", rclcpp::QoS(1).reliable().transient_local(),
+        [this](std_msgs::msg::String::ConstSharedPtr m) {
+          // Only diagnostic status; never interpreted as authorization.
+          trajectory_seen_ = true;
+          trajectory_status_ = m->data.substr(0, 160);
+        });
     status_pub_ = create_publisher<std_msgs::msg::String>(
         "/dyx/native/mission_dds_runtime/status",
         rclcpp::QoS(5));
@@ -470,6 +477,8 @@ class MissionManagerNode final : public rclcpp::Node {
         << leg.forward_preview_mps
         << ";rpp_preview_yaw_rate_radps="
         << leg.yaw_rate_enu_preview_radps
+        << ";trajectory_status_seen=" << trajectory_seen_
+        << ";trajectory_status=" << trajectory_status_
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -555,6 +564,9 @@ class MissionManagerNode final : public rclcpp::Node {
     });
   }
 
+  bool trajectory_seen_{false};
+  std::string trajectory_status_{"UNAVAILABLE"};
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr trajectory_status_sub_;
   NativeControlOwner owner_{};
   dyx::http_backend::NativeTelemetrySafetyComponent telemetry_safety_{};
   dyx::http_backend::NativeMissionCommandExecutor mission_command_executor_{};

@@ -1,4 +1,5 @@
 #include "dyx_rpp_cpp17_core/trajectory_builder.hpp"
+#include "enu_csv.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -35,6 +36,7 @@ public:
     status_pub_ = create_publisher<std_msgs::msg::String>("/trajectory_generator/status", qos);
     preview_pub_ = create_publisher<std_msgs::msg::String>("/dyx/trajectory_generator/preview_status", 5);
     declare_parameter<std::vector<double>>("markings_enu_flat", std::vector<double>{});
+    declare_parameter<std::string>("mission_enu_csv_file", "");
     declare_parameter<bool>("explicit_enu_preparation_enabled", false);
     declare_parameter<bool>("extension_enabled",false);
     declare_parameter<double>("extension_distance_m",4.0);
@@ -68,14 +70,21 @@ private:
     if (!get_parameter("explicit_enu_preparation_enabled").as_bool())
       throw std::runtime_error("DENIED: explicit ENU preparation disabled; GPS/PX4 origin placement not ported");
     const auto coordinates=get_parameter("markings_enu_flat").as_double_array();
-    if (coordinates.size()<4 || coordinates.size()%2 || coordinates.size()>20000)
-      throw std::invalid_argument("Expected 2 to 10000 ENU marking-point pairs");
+    const auto csv_file=get_parameter("mission_enu_csv_file").as_string();
+    if(!csv_file.empty() && !coordinates.empty())
+      throw std::invalid_argument("DENIED: choose one local ENU source, CSV or flat coordinates");
     std::vector<dyx::rpp::Point2D> source;
-    source.reserve(coordinates.size()/2);
-    for(size_t i=0;i<coordinates.size();i+=2) {
-      if(!std::isfinite(coordinates[i])||!std::isfinite(coordinates[i+1]))
-        throw std::invalid_argument("Nonfinite ENU coordinate");
-      source.push_back({coordinates[i],coordinates[i+1]});
+    if(!csv_file.empty()) {
+      source=dyx::trajectory::load_local_enu_csv(csv_file);
+    } else {
+      if (coordinates.size()<4 || coordinates.size()%2 || coordinates.size()>20000)
+        throw std::invalid_argument("Expected 2 to 10000 ENU marking-point pairs");
+      source.reserve(coordinates.size()/2);
+      for(size_t i=0;i<coordinates.size();i+=2) {
+        if(!std::isfinite(coordinates[i])||!std::isfinite(coordinates[i+1]))
+          throw std::invalid_argument("Nonfinite ENU coordinate");
+        source.push_back({coordinates[i],coordinates[i+1]});
+      }
     }
     dyx::rpp::TrajectoryBuildConfig cfg;
     cfg.extension_enabled=get_parameter("extension_enabled").as_bool();
