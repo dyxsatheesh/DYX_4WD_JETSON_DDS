@@ -10,6 +10,7 @@
 #include "dyx_mission_manager/native_upload_ingress.hpp"
 #include "dyx_mission_manager/native_load_ingress.hpp"
 #include "dyx_mission_manager/native_execution_preflight.hpp"
+#include "dyx_mission_manager/native_mission_command_preflight.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -215,6 +216,30 @@ class HttpSession final
         } else {
           response->result(http::status::ok);
           response->body() = NativeExecutionPreflight::evaluate(snapshot.second).dump();
+        }
+      }
+    } else if (request.method() == http::verb::post &&
+               (request.target() == "/api/native/mission/start" ||
+                request.target() == "/api/native/mission/pause" ||
+                request.target() == "/api/native/mission/resume")) {
+      // Batch 7B: only authenticated, schema-valid commands reach preflight.
+      // NO command is submitted to the mailbox or the ROS mission owner.
+      const auto session = verify_session(request);
+      if (!session.authenticated) {
+        response->result(http::status::unauthorized);
+        response->body() = R"({"detail":"AUTHENTICATION_REQUIRED"})";
+      } else {
+        const auto payload = nlohmann::json::parse(request.body(), nullptr, false);
+        const auto cmd = NativeMissionCommandPreflight::validate(payload);
+        if (!cmd.ok) {
+          response->result(http::status::unprocessable_entity);
+          response->body() = R"({"detail":"INVALID_COMMAND_ENVELOPE"})";
+        } else {
+          const auto snapshot = snapshot_->read();
+          // Even a fabricated optimistic snapshot cannot authorize START.
+          response->result(http::status::precondition_failed);
+          response->body() = NativeMissionCommandPreflight::deny(
+              snapshot.first ? snapshot.second : nlohmann::json::object()).dump();
         }
       }
     } else if (request.method() == http::verb::post &&
