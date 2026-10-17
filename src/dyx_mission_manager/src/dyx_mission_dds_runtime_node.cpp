@@ -1,6 +1,7 @@
 #include "dyx_rpp_cpp17_core/native_control_owner.hpp"
 #include "dyx_mission_manager/native_http_server.hpp"
 #include "dyx_mission_manager/native_command_mailbox.hpp"
+#include "dyx_mission_manager/native_power_gnss_observer.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -53,6 +54,9 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.cell_count = m->cell_count;
               f.warning = m->warning;
               inspect(owner_.observe_battery(f));
+              power_gnss_.observe_battery(f.received_sec, m->timestamp,
+                   m->voltage_v, m->connected, m->is_powering_off,
+                   m->cell_count, m->warning);
             });
 
     gps_sub_ =
@@ -69,6 +73,8 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.rtcm_crc_failed = m->rtcm_crc_failed;
               f.system_error = m->system_error;
               inspect(owner_.observe_gps(f));
+              power_gnss_.observe_gps(f.received_sec, m->timestamp_sample,
+                   m->fix_type, m->rtcm_crc_failed, m->system_error);
             });
 
     vehicle_sub_ =
@@ -186,6 +192,9 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
 
   void tick() {
     const double now = now_sec();
+    // The 30-second critical-voltage debounce latches an internal mission STOP.
+    // This is not a PX4 hardware stop acknowledgment.
+    if (power_gnss_.low_voltage_latched()) owner_.force_stop();
 
     // Only the ROS executor handles the mailbox. A bounded maximum of
     // four decisions per cycle prevents unbounded request processing.
@@ -493,7 +502,13 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         {"safe_stop_requested", owner_.safe_stop_requested()},
         {"px4_vehicle_fresh", result.mission.telemetry.px4_vehicle_fresh},
         {"gps_fresh", result.mission.telemetry.gps_sample_fresh},
-        {"battery_fresh", result.mission.telemetry.battery_sample_fresh},
+        {"battery_fresh", result.mission.telemetry.battery_sample_fresh && power_gnss_.battery_fresh(now)},
+        {"battery_voltage_v", std::isfinite(power_gnss_.voltage()) ?
+            nlohmann::json(power_gnss_.voltage()) : nlohmann::json(nullptr)},
+        {"battery_critical_latched", power_gnss_.low_voltage_latched()},
+        {"battery_sample_fault", power_gnss_.battery_fault()},
+        {"gps_sample_fault", power_gnss_.gps_fault()},
+        {"gps_fix_type", power_gnss_.fix_type()},
         {"telemetry_fault",
          telemetry_fault_ ||
          result.mission.telemetry_fault_latched},
@@ -501,12 +516,15 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         {"rear_reference_available", reference_available},
         {"rear_reference_calibrated", false},
         // These sources are not integrated and must default fail-closed.
-        {"rtk_fixed", false},
+        {"rtk_fixed", !telemetry_fault_ &&
+             result.mission.telemetry.gps_sample_fresh && power_gnss_.rtk_fixed(now)},
         {"corrections_fresh", false},
         {"obstacle_clear_verified", false},
         {"physical_estop_clear_verified", false},
         {"operator_motion_authorized", false},
+        // Critical threshold alone cannot certify reserve energy to return.
         {"battery_reserve_ok", false},
+        {"battery_voltage_healthy_diagnostic", power_gnss_.battery_healthy(now)},
         {"px4_control_interface_commissioned", false},
         {"control_target_hz", 50},
         {"mailbox_normal_queued", command_mailbox_.queued_normal()},
@@ -533,6 +551,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   }
 
   NativeControlOwner owner_{};
+  dyx::http_backend::NativePowerGnssObserver power_gnss_{};
   dyx::http_backend::NativeCommandMailbox command_mailbox_{};
   dyx::http_backend::NativeUploadIngress upload_ingress_{};
   dyx::http_backend::NativeLoadIngress load_ingress_{};
