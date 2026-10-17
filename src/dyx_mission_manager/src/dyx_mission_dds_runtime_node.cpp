@@ -1,8 +1,7 @@
 #include "dyx_rpp_cpp17_core/native_control_owner.hpp"
 #include "dyx_mission_manager/native_http_server.hpp"
 #include "dyx_mission_manager/native_command_mailbox.hpp"
-#include "dyx_mission_manager/native_power_gnss_observer.hpp"
-#include "dyx_mission_manager/native_rtk_float_guard.hpp"
+#include "dyx_mission_manager/native_telemetry_safety_component.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -55,7 +54,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.cell_count = m->cell_count;
               f.warning = m->warning;
               inspect(owner_.observe_battery(f));
-              power_gnss_.observe_battery(f.received_sec, m->timestamp,
+              telemetry_safety_.observe_battery(f.received_sec, m->timestamp,
                    m->voltage_v, m->connected, m->is_powering_off,
                    m->cell_count, m->warning);
             });
@@ -74,9 +73,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.rtcm_crc_failed = m->rtcm_crc_failed;
               f.system_error = m->system_error;
               inspect(owner_.observe_gps(f));
-              power_gnss_.observe_gps(f.received_sec, m->timestamp_sample,
-                   m->fix_type, m->rtcm_crc_failed, m->system_error);
-              rtk_guard_.observe(f.received_sec, m->timestamp_sample,
+              telemetry_safety_.observe_gps(f.received_sec, m->timestamp_sample,
                    m->fix_type, m->rtcm_crc_failed, m->system_error);
             });
 
@@ -197,7 +194,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     const double now = now_sec();
     // The 30-second critical-voltage debounce latches an internal mission STOP.
     // This is not a PX4 hardware stop acknowledgment.
-    if (power_gnss_.low_voltage_latched()) owner_.force_stop();
+    if (telemetry_safety_.critical_battery_latched()) owner_.force_stop();
 
     // Only the ROS executor handles the mailbox. A bounded maximum of
     // four decisions per cycle prevents unbounded request processing.
@@ -505,17 +502,17 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         {"safe_stop_requested", owner_.safe_stop_requested()},
         {"px4_vehicle_fresh", result.mission.telemetry.px4_vehicle_fresh},
         {"gps_fresh", result.mission.telemetry.gps_sample_fresh},
-        {"battery_fresh", result.mission.telemetry.battery_sample_fresh && power_gnss_.battery_fresh(now)},
-        {"battery_voltage_v", std::isfinite(power_gnss_.voltage()) ?
-            nlohmann::json(power_gnss_.voltage()) : nlohmann::json(nullptr)},
-        {"battery_critical_latched", power_gnss_.low_voltage_latched()},
-        {"battery_sample_fault", power_gnss_.battery_fault()},
-        {"gps_sample_fault", power_gnss_.gps_fault()},
-        {"gps_fix_type", power_gnss_.fix_type()},
-        {"rtk_float_duration_sec", rtk_guard_.float_duration_sec(now)},
-        {"rtk_float_over_five_seconds", rtk_guard_.float_over_five_seconds(now)},
-        {"rtk_pause_intent", rtk_guard_.pause_requested(now)},
-        {"rtk_sample_fault", rtk_guard_.fault()},
+        {"battery_fresh", result.mission.telemetry.battery_sample_fresh && telemetry_safety_.power().battery_fresh(now)},
+        {"battery_voltage_v", std::isfinite(telemetry_safety_.power().voltage()) ?
+            nlohmann::json(telemetry_safety_.power().voltage()) : nlohmann::json(nullptr)},
+        {"battery_critical_latched", telemetry_safety_.critical_battery_latched()},
+        {"battery_sample_fault", telemetry_safety_.power().battery_fault()},
+        {"gps_sample_fault", telemetry_safety_.power().gps_fault()},
+        {"gps_fix_type", telemetry_safety_.power().fix_type()},
+        {"rtk_float_duration_sec", telemetry_safety_.rtk().float_duration_sec(now)},
+        {"rtk_float_over_five_seconds", telemetry_safety_.rtk().float_over_five_seconds(now)},
+        {"rtk_pause_intent", telemetry_safety_.rtk().pause_requested(now)},
+        {"rtk_sample_fault", telemetry_safety_.rtk().fault()},
         {"rtk_auto_resume_authorized", false},
         {"telemetry_fault",
          telemetry_fault_ ||
@@ -524,16 +521,24 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         {"rear_reference_available", reference_available},
         {"rear_reference_calibrated", false},
         // These sources are not integrated and must default fail-closed.
-        {"rtk_fixed", !telemetry_fault_ && !rtk_guard_.fault() &&
+        {"rtk_fixed", !telemetry_fault_ && !telemetry_safety_.rtk().fault() &&
              result.mission.telemetry.gps_sample_fresh &&
-             power_gnss_.rtk_fixed(now) && rtk_guard_.fixed(now)},
+             telemetry_safety_.power().rtk_fixed(now) && telemetry_safety_.rtk().fixed(now)},
+        // No trusted receiver-age adapter exists yet. Never claim verified
+        // correction freshness from NTRIP traffic or GPS FIX alone.
         {"corrections_fresh", false},
+        {"rtcm_receiver_age_adapter_connected", false},
+        {"rtcm_receiver_age_report_fresh", telemetry_safety_.rtcm().report_fresh(now)},
+        {"rtcm_receiver_age_diagnostic_sec", std::isfinite(telemetry_safety_.rtcm().effective_age_sec(now)) ?
+            nlohmann::json(telemetry_safety_.rtcm().effective_age_sec(now)) : nlohmann::json(nullptr)},
+        {"rtcm_receiver_age_threshold_sec", dyx::http_backend::NativeRtcmAgeGuard::kMaxRtkCorrectionAgeSec},
+        {"rtcm_receiver_age_source_fault", telemetry_safety_.rtcm().source_fault()},
         {"obstacle_clear_verified", false},
         {"physical_estop_clear_verified", false},
         {"operator_motion_authorized", false},
         // Critical threshold alone cannot certify reserve energy to return.
         {"battery_reserve_ok", false},
-        {"battery_voltage_healthy_diagnostic", power_gnss_.battery_healthy(now)},
+        {"battery_voltage_healthy_diagnostic", telemetry_safety_.power().battery_healthy(now)},
         {"px4_control_interface_commissioned", false},
         {"control_target_hz", 50},
         {"mailbox_normal_queued", command_mailbox_.queued_normal()},
@@ -560,8 +565,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
   }
 
   NativeControlOwner owner_{};
-  dyx::http_backend::NativePowerGnssObserver power_gnss_{};
-  dyx::http_backend::NativeRtkFloatGuard rtk_guard_{};
+  dyx::http_backend::NativeTelemetrySafetyComponent telemetry_safety_{};
   dyx::http_backend::NativeCommandMailbox command_mailbox_{};
   dyx::http_backend::NativeUploadIngress upload_ingress_{};
   dyx::http_backend::NativeLoadIngress load_ingress_{};
