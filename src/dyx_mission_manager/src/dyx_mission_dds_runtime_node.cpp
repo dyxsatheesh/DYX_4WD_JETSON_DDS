@@ -2,6 +2,7 @@
 #include "dyx_mission_manager/native_http_server.hpp"
 #include "dyx_mission_manager/native_command_mailbox.hpp"
 #include "dyx_mission_manager/native_power_gnss_observer.hpp"
+#include "dyx_mission_manager/native_rtk_float_guard.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -74,6 +75,8 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
               f.system_error = m->system_error;
               inspect(owner_.observe_gps(f));
               power_gnss_.observe_gps(f.received_sec, m->timestamp_sample,
+                   m->fix_type, m->rtcm_crc_failed, m->system_error);
+              rtk_guard_.observe(f.received_sec, m->timestamp_sample,
                    m->fix_type, m->rtcm_crc_failed, m->system_error);
             });
 
@@ -509,6 +512,11 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         {"battery_sample_fault", power_gnss_.battery_fault()},
         {"gps_sample_fault", power_gnss_.gps_fault()},
         {"gps_fix_type", power_gnss_.fix_type()},
+        {"rtk_float_duration_sec", rtk_guard_.float_duration_sec(now)},
+        {"rtk_float_over_five_seconds", rtk_guard_.float_over_five_seconds(now)},
+        {"rtk_pause_intent", rtk_guard_.pause_requested(now)},
+        {"rtk_sample_fault", rtk_guard_.fault()},
+        {"rtk_auto_resume_authorized", false},
         {"telemetry_fault",
          telemetry_fault_ ||
          result.mission.telemetry_fault_latched},
@@ -516,8 +524,9 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
         {"rear_reference_available", reference_available},
         {"rear_reference_calibrated", false},
         // These sources are not integrated and must default fail-closed.
-        {"rtk_fixed", !telemetry_fault_ &&
-             result.mission.telemetry.gps_sample_fresh && power_gnss_.rtk_fixed(now)},
+        {"rtk_fixed", !telemetry_fault_ && !rtk_guard_.fault() &&
+             result.mission.telemetry.gps_sample_fresh &&
+             power_gnss_.rtk_fixed(now) && rtk_guard_.fixed(now)},
         {"corrections_fresh", false},
         {"obstacle_clear_verified", false},
         {"physical_estop_clear_verified", false},
@@ -552,6 +561,7 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
 
   NativeControlOwner owner_{};
   dyx::http_backend::NativePowerGnssObserver power_gnss_{};
+  dyx::http_backend::NativeRtkFloatGuard rtk_guard_{};
   dyx::http_backend::NativeCommandMailbox command_mailbox_{};
   dyx::http_backend::NativeUploadIngress upload_ingress_{};
   dyx::http_backend::NativeLoadIngress load_ingress_{};
