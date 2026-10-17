@@ -1,5 +1,6 @@
 // DYX native C++17 NTRIP RTCM receiver. No serial/PX4/actuator publishers.
 #include "rtcm3.hpp"
+#include "serial_rtcm_sink.hpp"
 #include "ntrip_protocol.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -60,7 +61,13 @@ public:
   pass_=declare_parameter<std::string>("password","");
   port_=declare_parameter<int>("caster_port",2101);
   tls_required_=declare_parameter<bool>("tls_required",true);
-  if(declare_parameter<bool>("serial_injection_enabled",false))throw std::invalid_argument("SERIAL_INJECTION_NOT_COMMISSIONED");
+  serial_enabled_=declare_parameter<bool>("serial_injection_enabled",false);
+  serial_commissioned_=declare_parameter<bool>("serial_commissioned",false);
+  serial_device_=declare_parameter<std::string>("serial_device","");
+  serial_baud_=declare_parameter<int>("serial_baud",230400);
+  if(serial_enabled_ && (!serial_commissioned_ || !enabled_ || serial_device_.empty()))
+    throw std::invalid_argument("RTCM_SERIAL_REQUIRES_EXPLICIT_COMMISSIONING_AND_NTRIP");
+  if(serial_enabled_)serial_=std::make_unique<dyx::rtcm::SerialRtcmSink>(serial_device_,serial_baud_);
   if(port_<1||port_>65535)throw std::invalid_argument("Invalid caster port");
   if(enabled_){(void)dyx::rtcm::request(host_,mount_,user_,pass_);worker_=std::thread([this]{loop();});}
   pub_=create_publisher<std_msgs::msg::String>("/rtk_correction_bridge/status",10);
@@ -72,7 +79,10 @@ public:
       ";crc_rejected="+std::to_string(bad_)+
       ";last_frame_age_sec="+(last_frame_>0?std::to_string(seconds()-last_frame_):std::string("unavailable"))+
       ";status="+state_+
-      ";receiver_injection_enabled=false;rtk_fixed_verified=false;motion_authorized=false";
+      ";receiver_injection_enabled="+std::string(serial_enabled_?"true":"false")+
+      ";serial_frames_written="+std::to_string(serial_frames_)+
+      ";serial_write_faults="+std::to_string(serial_faults_)+
+      ";rtk_fixed_verified=false;motion_authorized=false";
     pub_->publish(m);
   });
  }
@@ -130,7 +140,20 @@ private:
     }
     if(ready&&offset<std::size_t(n)){
       const auto frames=parser.feed(chunk+offset,std::size_t(n)-offset,seconds());
-      record(parser,frames.size()); // validated frames deliberately NOT injected
+      record(parser,frames.size());
+      if(serial_){
+        for(const auto &f:frames){
+          if(!serial_->is_open() && !serial_->open()){
+            {std::lock_guard<std::mutex> lock(mu_);++serial_faults_;}
+            throw std::runtime_error("RTCM_SERIAL_OPEN_FAILED");
+          }
+          if(!serial_->write_frame(f.bytes)){
+            {std::lock_guard<std::mutex> lock(mu_);++serial_faults_;}
+            throw std::runtime_error("RTCM_SERIAL_WRITE_FAILED");
+          }
+          {std::lock_guard<std::mutex> lock(mu_);++serial_frames_;}
+        }
+      }
     }
   }
  }
@@ -144,7 +167,10 @@ private:
  }
  std::atomic<bool> stop_{false};std::thread worker_;
  std::mutex mu_;std::string state_{"DISABLED"};bool receiving_{false},enabled_{false},tls_required_{true};
- std::string host_,mount_,user_,pass_;int port_{2101};
+ std::string host_,mount_,user_,pass_,serial_device_;int port_{2101},serial_baud_{230400};
+ bool serial_enabled_{false},serial_commissioned_{false};
+ std::unique_ptr<dyx::rtcm::SerialRtcmSink> serial_;
+ std::uint64_t serial_frames_{0},serial_faults_{0};
  std::uint64_t valid_{0},bad_{0};double last_frame_{-1};
  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_;rclcpp::TimerBase::SharedPtr timer_;
 };
