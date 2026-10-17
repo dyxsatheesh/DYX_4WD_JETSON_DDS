@@ -9,5 +9,6 @@
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   <depend>dyx_rpp_cpp17_core</depend>
+  <depend>px4_msgs</depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>
