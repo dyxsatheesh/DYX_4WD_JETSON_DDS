@@ -1,13 +1,16 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>trajectory_generator</name>
-  <version>0.2.0</version>
-  <description>DYX native C++17 modular migration; not all original Python features ported</description>
+  <version>0.3.0</version>
+  <description>DYX native C++17 explicit ENU diagnostic trajectory lifecycle; geodetic/PX4 placement still pending</description>
   <maintainer email="noreply@dyxautonomous.com">DYX Autonomous Engineering</maintainer>
   <license>Proprietary</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>dyx_rpp_cpp17_core</depend>
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_srvs</depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>
