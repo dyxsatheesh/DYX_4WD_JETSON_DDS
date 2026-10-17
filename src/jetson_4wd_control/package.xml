@@ -1,26 +1,12 @@
 <?xml version="1.0"?>
 <package format="3">
-
   <name>jetson_4wd_control</name>
-  <version>1.0.0</version>
-
-  <description>Command velocity bridge for 4WD rover</description>
-
-  <maintainer email="flash@example.com">Flash Sat Systems</maintainer>
-
+  <version>0.2.0</version>
+  <description>DYX native C++17 modular migration; not all original Python features ported</description>
+  <maintainer email="noreply@dyxautonomous.com">DYX Autonomous Engineering</maintainer>
   <license>Proprietary</license>
-
-  <buildtool_depend>ament_python</buildtool_depend>
-
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>rcl_interfaces</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>mavros_msgs</exec_depend>
-  <exec_depend>rpp_interfaces</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-
-  <export>
-    <build_type>ament_python</build_type>
-  </export>
-
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <export><build_type>ament_cmake</build_type></export>
 </package>

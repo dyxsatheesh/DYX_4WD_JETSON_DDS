@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<launch>
+
+  <node pkg="mission_manager" exec="mission_manager_node" name="mission_manager_node" output="screen" />
+  <node pkg="rover_backend" exec="rover_backend" name="rover_backend" output="screen" />
+  <node pkg="jetson_4wd_control" exec="cmd_vel_bridge" name="cmd_vel_bridge" output="screen" />
+  <node pkg="rpp_controller" exec="rpp_controller_node" name="rpp_controller_node" output="screen" />
+  <node pkg="trajectory_generator" exec="trajectory_generator_node" name="trajectory_generator_node" output="screen" />
+  <node pkg="spray_controller" exec="spray_controller_node" name="spray_controller_node" output="screen" />
+  <node pkg="obstacle_monitor" exec="obstacle_monitor_node" name="obstacle_monitor_node" output="screen" />
+  <node pkg="rover_backend" exec="rtk_worker" name="rtk_worker" output="screen" />
+  <node pkg="rover_backend" exec="estimator_status_relay" name="estimator_status_relay" output="screen" />
+</launch>

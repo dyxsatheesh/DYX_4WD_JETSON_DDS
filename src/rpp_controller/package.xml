@@ -1,27 +1,15 @@
 <?xml version="1.0"?>
 <package format="3">
-
   <name>rpp_controller</name>
-  <version>0.0.0</version>
-
-  <description>Pure Pursuit Controller</description>
-
-  <maintainer email="flash@todo.todo">flash</maintainer>
-
-  <license>Apache-2.0</license>
-
-  <buildtool_depend>ament_python</buildtool_depend>
-
-  <depend>rcl_interfaces</depend>
-  <depend>rclpy</depend>
+  <version>0.2.0</version>
+  <description>DYX native C++17 modular migration; not all original Python features ported</description>
+  <maintainer email="noreply@dyxautonomous.com">DYX Autonomous Engineering</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>dyx_rpp_cpp17_core</depend>
   <depend>geometry_msgs</depend>
-  <depend>nav_msgs</depend>
-  <depend>rpp_interfaces</depend>
+  <depend>px4_msgs</depend>
+  <depend>rclcpp</depend>
   <depend>std_msgs</depend>
-  <depend>tf_transformations</depend>
-
-  <export>
-    <build_type>ament_python</build_type>
-  </export>
-
+  <export><build_type>ament_cmake</build_type></export>
 </package>

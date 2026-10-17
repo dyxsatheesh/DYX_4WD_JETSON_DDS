@@ -1,38 +1,14 @@
 <?xml version="1.0"?>
-<?xml-model
-  href="http://download.ros.org/schema/package_format3.xsd"
-  schematypens="http://www.w3.org/2001/XMLSchema"?>
-
 <package format="3">
   <name>rover_backend</name>
-  <version>2.0.0</version>
-
-  <description>
-    Production REST API, Socket.IO, authentication, safety and ROS bridge
-    for the DYX 4WD marking rover.
-  </description>
-
-  <maintainer email="support@flashsatsystems.com">
-    Flash Sat Systems
-  </maintainer>
-
+  <version>0.2.0</version>
+  <description>DYX native C++17 modular migration; not all original Python features ported</description>
+  <maintainer email="noreply@dyxautonomous.com">DYX Autonomous Engineering</maintainer>
   <license>Proprietary</license>
-
-  <buildtool_depend>ament_python</buildtool_depend>
-
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>geographic_msgs</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>std_srvs</exec_depend>
-  <exec_depend>mavros_msgs</exec_depend>
-  <exec_depend>rtk_correction_bridge</exec_depend>
-
-  <export>
-    <build_type>ament_python</build_type>
-  </export>
-  <exec_depend>mission_manager_interfaces</exec_depend>
-  <exec_depend>mission_manager</exec_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>dyx_rpp_cpp17_core</depend>
+  <depend>px4_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <export><build_type>ament_cmake</build_type></export>
 </package>
