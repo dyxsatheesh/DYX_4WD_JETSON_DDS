@@ -9,6 +9,7 @@
 #include "dyx_mission_manager/native_mission_state_audit.hpp"
 #include "dyx_mission_manager/native_mission_transition_gate.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
+#include "dyx_rpp_cpp17_core/reverse_pivot_handoff.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/battery_status.hpp>
@@ -430,6 +431,31 @@ class MissionManagerNode final : public rclcpp::Node {
       }
     }
 
+    // D2A: post-marking handoff is only an advisory geometric calculation.
+    // No certified rear-master/pivot lever arm exists in this runtime yet.
+    dyx::rpp::ReversePivotHandoffResult handoff{};
+    if (const auto* prepared = owner_.prepared_mission()) {
+      const auto& state = owner_.mission().status();
+      if (state.current_marking < prepared->snapshot.marking_points.size() &&
+          state.current_marking + 1 < prepared->snapshot.marking_points.size()) {
+        dyx::rpp::ReversePivotHandoffInput handoff_input{};
+        handoff_input.marked_point_enu = prepared->snapshot.marking_points[state.current_marking];
+        handoff_input.next_point_enu = prepared->snapshot.marking_points[state.current_marking + 1];
+        handoff_input.rear_master_now_enu = {rear.east_m, rear.north_m};
+        handoff_input.current_heading_enu_rad = position_fresh ?
+            dyx::rpp::wrap_angle(dyx::rpp::pi / 2.0 - last_position_.heading_rad) : 0.0;
+        handoff_input.marking_resolved = state.stage == dyx::rpp::MissionStage::resolved ||
+            state.stage == dyx::rpp::MissionStage::await_next;
+        handoff_input.position_fresh = position_fresh;
+        // Do NOT fabricate these certifications from a parameter or DDS FIX.
+        handoff_input.reference_calibrated = false;
+        handoff_input.pivot_offset_calibrated = false;
+        handoff_input.stop_certified = false;
+        handoff_input.physical_safety_verified = false;
+        handoff = dyx::rpp::plan_reverse_pivot_handoff(handoff_input);
+      }
+    }
+
     dyx::rpp::MissionLegPreviewInput leg_input{};
 
     leg_input.now_sec = now;
@@ -563,6 +589,11 @@ class MissionManagerNode final : public rclcpp::Node {
         << ";d1b_preflight_missing_gates=" << positive_preflight.missing_gate_count
         << ";d1b_preflight_first_blocker=" << positive_preflight.first_blocker
         << ";d1b_positive_authorized=false"
+        << ";d2a_handoff_phase=" << dyx::rpp::handoff_phase_name(handoff.phase)
+        << ";d2a_handoff_reason=" << handoff.reason
+        << ";d2a_heading_change_deg=" << handoff.heading_change_deg
+        << ";d2a_reverse_distance_m=" << handoff.reverse_distance_m
+        << ";d2a_action_authorized=false"
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -672,6 +703,12 @@ class MissionManagerNode final : public rclcpp::Node {
         {"d1b_preflight_first_blocker", positive_preflight.first_blocker},
         {"d1b_preflight_diagnostic_preconditions_met", positive_preflight.diagnostic_preconditions_met},
         {"d1b_positive_authorized", false},
+        {"d2a_handoff_phase", dyx::rpp::handoff_phase_name(handoff.phase)},
+        {"d2a_handoff_reason", handoff.reason},
+        {"d2a_handoff_geometry_valid", handoff.geometry_valid},
+        {"d2a_heading_change_deg", handoff.heading_change_deg},
+        {"d2a_reverse_distance_m", handoff.reverse_distance_m},
+        {"d2a_handoff_action_authorized", false},
         {"mission_start_enabled", false},
         {"http_upload_staging_only", true},
         {"px4_disarmed_attestation_fresh", !telemetry_fault_ &&
