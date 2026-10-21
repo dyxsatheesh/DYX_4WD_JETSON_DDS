@@ -2,6 +2,7 @@
 #include "dyx_mission_manager/native_http_server.hpp"
 #include "dyx_mission_manager/native_command_mailbox.hpp"
 #include "dyx_mission_manager/native_mission_command_executor.hpp"
+#include "dyx_mission_manager/native_mission_transition_gate.hpp"
 #include "dyx_mission_manager/native_telemetry_safety_component.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
@@ -202,8 +203,16 @@ class DyxMissionDdsRuntime final : public rclcpp::Node {
     const auto command_result = mission_command_executor_.drain(
         command_mailbox_, command_decisions_,
         [this]() { owner_.force_stop(); },
+        [](const auto&) { return false; },
+        [this](const auto& command) {
+          return dyx::http_backend::assess_mission_transition(
+              command,
+              owner_.mission().stage(),
+              command_mailbox_.stopped_latched());
+        },
         upload_ingress_, load_ingress_,
-        dyx::rpp::kBackendMissionStopPath);
+        dyx::rpp::kBackendMissionStopPath,
+        dyx::rpp::kBackendMissionPausePath);
     processed_commands_ += command_result.processed;
 
     // Exactly one bounded upload decision per tick. The owner_ is touched
