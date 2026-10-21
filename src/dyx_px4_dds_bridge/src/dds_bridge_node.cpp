@@ -6,7 +6,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
-#include <px4_msgs/msg/trajectory_setpoint.hpp>
+#include <px4_msgs/msg/rover_speed_setpoint.hpp>
+#include <px4_msgs/msg/rover_rate_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <rpp_interfaces/msg/rpp_command.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -58,8 +59,10 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     const auto input_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
     px4_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
         "/fmu/in/offboard_control_mode", px4_pub_qos);
-    px4_trajectory_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
-        "/fmu/in/trajectory_setpoint", px4_pub_qos);
+    px4_rover_speed_pub_ = create_publisher<px4_msgs::msg::RoverSpeedSetpoint>(
+        "/fmu/in/rover_speed_setpoint", px4_pub_qos);
+    px4_rover_rate_pub_ = create_publisher<px4_msgs::msg::RoverRateSetpoint>(
+        "/fmu/in/rover_rate_setpoint", px4_pub_qos);
     status_pub_ = create_publisher<std_msgs::msg::String>(
         "/dyx_px4_dds_bridge/status", rclcpp::QoS(10));
 
@@ -128,110 +131,30 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
   }
 
   void publish_setpoint() {
-    // An opt-in DISABLED test bridge must not send even zeroed PX4 Offboard
-    // keepalives. This mode is not a certified physical stop mechanism.
-    if (!enable_motion_) {
-      have_rpp_ = false;
-      if (++tick_count_ % 50 == 0) {
-        // Our own publishers count as one each. Another publisher must be
-        // investigated before commissioning; this is not a process-wide lock.
-        const auto mode_writers = count_publishers("/fmu/in/offboard_control_mode");
-        const auto trajectory_writers = count_publishers("/fmu/in/trajectory_setpoint");
-        // D3D: inspect all known native rover + legacy PX4 input topics.
-        // Local legacy publisher objects are still present in this bridge,
-        // so this check can never imply exclusive DDS ownership or motion.
-        dyx::bridge::WriterCounts writer_counts{};
-        writer_counts.offboard_mode = count_publishers("/fmu/in/offboard_control_mode") > 0 ?
-            count_publishers("/fmu/in/offboard_control_mode") - 1 : 0;
-        writer_counts.legacy_trajectory = count_publishers("/fmu/in/trajectory_setpoint") > 0 ?
-            count_publishers("/fmu/in/trajectory_setpoint") - 1 : 0;
-        writer_counts.rover_speed = count_publishers("/fmu/in/rover_speed_setpoint");
-        writer_counts.rover_rate = count_publishers("/fmu/in/rover_rate_setpoint");
-        writer_counts.rover_attitude = count_publishers("/fmu/in/rover_attitude_setpoint");
-        const auto writer_audit = dyx::bridge::inspect_writer_graph(
-            writer_counts, true, true);
-        std_msgs::msg::String status;
-        status.data = "INHIBITED:" + audit_.reason(Steady::now(),
-            mode_writers > 1 ? mode_writers - 1 : 0,
-            trajectory_writers > 1 ? trajectory_writers - 1 : 0)
-            + ";d3b_native_rover_api=contract_only;d3b_publish_authorized=false"
-            ";d3d_writer_graph_reason=" + writer_audit.reason +
-            ";d3d_graph_quiet=" + (writer_audit.graph_quiet ? "true" : "false") +
-            ";d3d_other_writers=" + std::to_string(writer_audit.observed_writers) +
-            ";d3d_exclusivity_proven=false;d3d_motion_authorized=false" +
-            ";motor_commands_enabled=false;physical_command_emitted=false";
-        status_pub_->publish(status);
-      }
-      return;
-    }
-    const auto now_us = static_cast<uint64_t>(
-        get_clock()->now().nanoseconds() / 1000LL);
+    // PRE-COMMISSIONING: diagnostics only. No PX4 command is published.
+    // The constructor rejects enable_motion=true, even with ROS overrides.
+    have_rpp_ = false;
+    if (++tick_count_ % 50 != 0) return;
 
-    // Always publish a combined mode AND a trajectory sample on each tick.
-    // The custom PX4 firmware latches a motor stop if either becomes stale
-    // for >=500 ms during armed Offboard operation.
-    px4_msgs::msg::OffboardControlMode mode{};
-    mode.timestamp = now_us;
-    mode.position = false;
-    mode.velocity = true;
-    mode.acceleration = false;
-    mode.attitude = false;
-    mode.body_rate = true;
-    mode.thrust_and_torque = false;
-    mode.direct_actuator = false;
-
-    const char *reason = "allowed";
-    if (!enable_motion_) {
-      reason = "enable_motion_false";
-    } else if (!dyx::bridge::safety_evidence_fresh(
-                       have_estop_, estop_received_,
-                       Steady::now(), safety_input_timeout_s_)) {
-      reason = "emergency_stop_evidence_stale";
-    } else if (emergency_stop_) {
-      reason = "emergency_stop";
-    } else if (!dyx::bridge::safety_evidence_fresh(
-                       have_mission_, mission_received_,
-                       Steady::now(), safety_input_timeout_s_)) {
-      reason = "mission_authorization_stale";
-    } else if (!mission_enabled_) {
-      reason = "mission_disabled";
-    } else if (!fresh(have_heartbeat_, heartbeat_received_, heartbeat_timeout_s_)) {
-      reason = "backend_heartbeat_stale";
-    } else if (!fresh(have_px4_status_, px4_status_received_, 0.5)) {
-      reason = "px4_status_stale";
-    } else if (!armed_ || !in_offboard_) {
-      reason = "px4_not_armed_offboard";
-    } else if (!fresh(have_rpp_, rpp_received_, command_timeout_s_)) {
-      reason = "rpp_stale_or_invalid";
-    }
-
-    const bool allowed = std::string(reason) == "allowed";
-    // A safety-gate transition invalidates previously received RPP data.
-    // Re-enable requires a NEW valid RPP message, not a held command.
-    if (!allowed) {
-      have_rpp_ = false;
-    }
-
-    const auto qnan = std::numeric_limits<float>::quiet_NaN();
-    px4_msgs::msg::TrajectorySetpoint traj{};
-    traj.timestamp = now_us;
-    traj.position = {qnan, qnan, qnan};
-    traj.velocity = {allowed ? latest_rpp_.north_mps : 0.0f,
-                     allowed ? latest_rpp_.east_mps : 0.0f,
-                     qnan};
-    traj.acceleration = {qnan, qnan, qnan};
-    traj.jerk = {qnan, qnan, qnan};
-    traj.yaw = qnan;  // No absolute heading authority in combined mode.
-    traj.yawspeed = allowed ? latest_rpp_.yaw_rate_ned_radps : 0.0f;
-
-    px4_mode_pub_->publish(mode);
-    px4_trajectory_pub_->publish(traj);
-
-    if (++tick_count_ % 50 == 0) {
-      std_msgs::msg::String status;
-      status.data = std::string(allowed ? "ACTIVE:" : "INHIBITED:") + reason;
-      status_pub_->publish(status);
-    }
+    const auto mode = count_publishers("/fmu/in/offboard_control_mode");
+    const auto speed = count_publishers("/fmu/in/rover_speed_setpoint");
+    const auto rate = count_publishers("/fmu/in/rover_rate_setpoint");
+    dyx::bridge::WriterCounts counts{};
+    counts.offboard_mode = mode > 0 ? mode - 1 : 0;
+    counts.rover_speed = speed > 0 ? speed - 1 : 0;
+    counts.rover_rate = rate > 0 ? rate - 1 : 0;
+    counts.legacy_trajectory = count_publishers("/fmu/in/trajectory_setpoint");
+    counts.rover_attitude = count_publishers("/fmu/in/rover_attitude_setpoint");
+    const auto graph = dyx::bridge::inspect_writer_graph(counts, true, false);
+    std_msgs::msg::String status;
+    status.data = std::string("INHIBITED:NATIVE_ROVER_DDS_NON_ACTUATING") +
+        ";native_rover_publishers_created=true" +
+        ";setpoint_published=false;offboard_heartbeat_published=false" +
+        ";writer_graph_reason=" + graph.reason +
+        ";other_writers=" + std::to_string(graph.observed_writers) +
+        ";publisher_exclusivity_proven=false" +
+        ";motor_commands_enabled=false;physical_command_emitted=false";
+    status_pub_->publish(status);
   }
 
   dyx::bridge::BridgeAudit audit_{};
@@ -260,7 +183,8 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
   Steady::time_point rpp_received_{};
 
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr px4_mode_pub_;
-  rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr px4_trajectory_pub_;
+  rclcpp::Publisher<px4_msgs::msg::RoverSpeedSetpoint>::SharedPtr px4_rover_speed_pub_;
+  rclcpp::Publisher<px4_msgs::msg::RoverRateSetpoint>::SharedPtr px4_rover_rate_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Subscription<rpp_interfaces::msg::RppCommand>::SharedPtr rpp_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_sub_;
