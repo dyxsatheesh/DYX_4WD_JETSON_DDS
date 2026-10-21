@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<launch>
+
+  <!-- Single mission-state owner for this observation topology -->
+  <node pkg="mission_manager"
+        exec="mission_manager_node"
+        name="mission_manager_node"
+        output="screen"/>
+
+  <node pkg="trajectory_generator"
+        exec="trajectory_generator_node"
+        output="screen"/>
+
+  <node pkg="rpp_controller"
+        exec="rpp_controller_node"
+        output="screen"/>
+
+  <node pkg="spray_controller"
+        exec="spray_controller_node"
+        output="screen"/>
+
+  <node pkg="obstacle_monitor"
+        exec="obstacle_monitor_node"
+        output="screen"/>
+
+  <node pkg="jetson_4wd_control"
+        exec="cmd_vel_bridge"
+        output="screen"/>
+
+  <!-- Never authorize PX4 motion in this launch -->
+  <node pkg="dyx_px4_dds_bridge"
+        exec="dyx_px4_dds_bridge_node"
+        output="screen">
+    <param name="enable_motion" value="false"/>
+  </node>
+
+  <!-- RTK observation only: no receiver serial writes -->
+  <node pkg="rtk_correction_bridge"
+        exec="rtk_correction_bridge_node"
+        output="screen">
+    <param name="receive_enabled" value="false"/>
+    <param name="serial_injection_enabled" value="false"/>
+  </node>
+
+  <node pkg="dyx_safety_cpp17_observer"
+        exec="dyx_safety_cpp17_observer_node"
+        output="screen"/>
+
+  <node pkg="dyx_dds_actuator_monitor"
+        exec="dyx_dds_actuator_monitor_node"
+        output="screen"/>
+
+</launch>
