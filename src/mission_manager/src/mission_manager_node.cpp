@@ -10,6 +10,7 @@
 #include "dyx_mission_manager/native_mission_transition_gate.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 #include "dyx_rpp_cpp17_core/reverse_pivot_handoff.hpp"
+#include "dyx_rpp_cpp17_core/native_tracking_shadow.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/battery_status.hpp>
@@ -456,6 +457,31 @@ class MissionManagerNode final : public rclcpp::Node {
       }
     }
 
+    // D2B: non-actuating straight/curve and lookahead shadow from the
+    // single mission-owner prepared trajectory. Bound the inspected span.
+    // This is never passed to the PX4 DDS command writer.
+    dyx::rpp::TrackingShadowResult tracking_shadow{};
+    if (const auto* prepared = owner_.prepared_mission()) {
+      const auto& state = owner_.mission().status();
+      const auto& goals = prepared->marking_goals;
+      if (state.current_marking < goals.size() && goals.size() >= 2) {
+        const std::size_t end_goal = state.current_marking == 0 ? 1 : state.current_marking;
+        const std::size_t begin_goal = end_goal - 1;
+        dyx::rpp::TrackingShadowInput tracking_input{};
+        tracking_input.east_m = rear.east_m;
+        tracking_input.north_m = rear.north_m;
+        tracking_input.yaw_enu_rad = position_fresh ?
+            dyx::rpp::wrap_angle(dyx::rpp::pi/2.0-last_position_.heading_rad) : 0.0;
+        tracking_input.position_fresh = position_fresh && reference_available;
+        tracking_input.rear_reference_calibrated = false; // commissioning pending
+        const auto raw = prepared->snapshot.raw_navigation();
+        if (goals[begin_goal].raw_path_index >= 0 && goals[end_goal].raw_path_index >= 0)
+          tracking_shadow = dyx::rpp::evaluate_tracking_shadow(raw,
+              static_cast<std::size_t>(goals[begin_goal].raw_path_index),
+              static_cast<std::size_t>(goals[end_goal].raw_path_index), tracking_input);
+      }
+    }
+
     dyx::rpp::MissionLegPreviewInput leg_input{};
 
     leg_input.now_sec = now;
@@ -594,6 +620,13 @@ class MissionManagerNode final : public rclcpp::Node {
         << ";d2a_heading_change_deg=" << handoff.heading_change_deg
         << ";d2a_reverse_distance_m=" << handoff.reverse_distance_m
         << ";d2a_action_authorized=false"
+        << ";d2b_tracking_kind=" << tracking_shadow.segment_kind
+        << ";d2b_tracking_reason=" << tracking_shadow.reason
+        << ";d2b_tracking_cross_track_m=" << tracking_shadow.cross_track_m
+        << ";d2b_tracking_remaining_m=" << tracking_shadow.remaining_m
+        << ";d2b_tracking_bearing_error_rad=" << tracking_shadow.bearing_error_rad
+        << ";d2b_tracking_hold_zero=true"
+        << ";d2b_tracking_motion_authorized=false"
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -709,6 +742,13 @@ class MissionManagerNode final : public rclcpp::Node {
         {"d2a_heading_change_deg", handoff.heading_change_deg},
         {"d2a_reverse_distance_m", handoff.reverse_distance_m},
         {"d2a_handoff_action_authorized", false},
+        {"d2b_tracking_kind", tracking_shadow.segment_kind},
+        {"d2b_tracking_reason", tracking_shadow.reason},
+        {"d2b_tracking_geometry_valid", tracking_shadow.geometry_valid},
+        {"d2b_tracking_cross_track_m", tracking_shadow.cross_track_m},
+        {"d2b_tracking_remaining_m", tracking_shadow.remaining_m},
+        {"d2b_tracking_bearing_error_rad", tracking_shadow.bearing_error_rad},
+        {"d2b_tracking_motion_authorized", false},
         {"mission_start_enabled", false},
         {"http_upload_staging_only", true},
         {"px4_disarmed_attestation_fresh", !telemetry_fault_ &&
