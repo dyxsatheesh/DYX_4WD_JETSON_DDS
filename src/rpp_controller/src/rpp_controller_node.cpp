@@ -8,6 +8,7 @@
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <rpp_interfaces/msg/rpp_preview.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/int32.hpp>
@@ -36,6 +37,9 @@ public:
   const auto q=rclcpp::QoS(1).reliable().transient_local();
   out_=create_publisher<std_msgs::msg::String>("/dyx/rpp_controller/preview_status",10);
   detail_=create_publisher<std_msgs::msg::String>("/rpp_controller/geometry_status",10);
+  // Distinct interface and topic from /rpp/command. No physical control path.
+  shadow_pub_=create_publisher<rpp_interfaces::msg::RppPreview>(
+    "/dyx/rpp/preview",rclcpp::QoS(5));
   declare_parameter<double>("lookahead_m",0.55);
   declare_parameter<double>("max_path_jump_m",0.5);
   declare_parameter<double>("preview_cruise_mps",0.6);
@@ -153,6 +157,15 @@ public:
   const auto now=std::chrono::steady_clock::now();
   const bool fresh=seen_ && now-position_time_<=250ms;
   const bool path_ok=bool(geometry_) && !geometry_->segments.empty();
+  rpp_interfaces::msg::RppPreview preview{};
+  preview.header.stamp = get_clock()->now();
+  preview.header.frame_id = "enu_preview_not_authorized";
+  preview.path_revision = path_revision_;
+  preview.active_marking_index = active_index_;
+  preview.pose_fresh = fresh && pose_valid_ && !position_fault_;
+  preview.semantic_valid = semantic_valid_;
+  preview.motion_authorized = false; // Immutable pre-commissioning contract.
+  preview.reason = "HOLD_NO_VALIDATED_GUIDANCE";
   std::ostringstream s;
   s.setf(std::ios::fixed);s.precision(5);
   s<<"CXX17_RPP_PATH_OBSERVE;px4_position_fresh="<<(fresh?"true":"false")
@@ -208,6 +221,12 @@ public:
          <<";tracked_lookahead_east_m="<<tracked.lookahead.x
          <<";tracked_lookahead_north_m="<<tracked.lookahead.y
          <<";tracked_clamped="<<(tracked.monotonic_clamped?"true":"false");
+        preview.guidance_valid = true;
+        preview.preview_forward_mps = plan.forward_preview_mps;
+        preview.preview_yaw_rate_enu_radps = plan.yaw_rate_preview_radps;
+        preview.heading_enu_rad = heading_enu_;
+        preview.remaining_m = plan.remaining_m;
+        preview.reason = "NON_ACTUATING_RPP_GEOMETRY_ONLY";
         s<<";execution_preview_valid=true;execution_phase="<<plan.phase
          <<";execution_goal="<<plan.goal_identity
          <<";execution_cross_track_m="<<plan.cross_track_m
@@ -228,6 +247,8 @@ public:
   }
   if(fresh && pose_valid_ && goal_valid_)s<<";goal_radial_m="<<std::hypot(goal_east_-east_,goal_north_-north_);
   s<<";mission_authorized=false;motion_authorized=false;physical_command_emitted=false";
+  // A valid preview never confers START, motion, spray, or PX4 authority.
+  shadow_pub_->publish(preview);
   std_msgs::msg::String m;m.data=s.str();out_->publish(m);detail_->publish(m);
  }
  std::mutex mu_;
@@ -246,6 +267,7 @@ public:
  std::unique_ptr<dyx::rpp::PathGeometryIndex> geometry_;
  dyx::rpp::MonotonicLegTracking leg_tracker_;
  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr out_,detail_;
+ rclcpp::Publisher<rpp_interfaces::msg::RppPreview>::SharedPtr shadow_pub_;
  rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr pos_;
  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_;
  rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr types_sub_;
