@@ -1,6 +1,7 @@
 #include "dyx_px4_dds_bridge/geometry.hpp"
 #include "dyx_px4_dds_bridge/safety_freshness.hpp"
 #include "dyx_px4_dds_bridge/bridge_commissioning_guard.hpp"
+#include "dyx_px4_dds_bridge/native_rover_dds_contract.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
@@ -139,7 +140,8 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         status.data = "INHIBITED:" + audit_.reason(Steady::now(),
             mode_writers > 1 ? mode_writers - 1 : 0,
             trajectory_writers > 1 ? trajectory_writers - 1 : 0)
-            + ";motor_commands_enabled=false;physical_command_emitted=false";
+            + ";d3b_native_rover_api=contract_only;d3b_publish_authorized=false"
+            ";motor_commands_enabled=false;physical_command_emitted=false";
         status_pub_->publish(status);
       }
       return;
