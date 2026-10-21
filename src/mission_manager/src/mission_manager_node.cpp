@@ -10,6 +10,7 @@
 #include "dyx_mission_manager/native_mission_transition_gate.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 #include "dyx_rpp_cpp17_core/reverse_pivot_handoff.hpp"
+#include "dyx_rpp_cpp17_core/native_pivot_sequence_shadow.hpp"
 #include "dyx_rpp_cpp17_core/native_tracking_shadow.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -457,6 +458,23 @@ class MissionManagerNode final : public rclcpp::Node {
       }
     }
 
+    // D2C: mission-owned, fail-closed reverse/pivot sequence shadow.
+    // The D2A geometry result is NOT a trusted maneuver authorization.
+    // No physical stop, operator lease, rear/pivot calibration or independent
+    // obstacle/E-stop evidence is commissioned. This stays HOLD_ZERO.
+    dyx::rpp::PivotSequenceShadowInput pivot_shadow_input{};
+    pivot_shadow_input.handoff = handoff;
+    pivot_shadow_input.now_sec = now;
+    pivot_shadow_input.dt_sec = cycle_dt_sec;
+    pivot_shadow_input.position_and_yaw_fresh = position_fresh && reference_available;
+    pivot_shadow_input.trusted_mission_owner = false;
+    pivot_shadow_input.stop_and_mark_certified = false;
+    pivot_shadow_input.rear_and_pivot_calibrated = false;
+    pivot_shadow_input.physical_safety_verified = false;
+    pivot_shadow_input.reverse_alignment_certified = false;
+    pivot_shadow_input.recapture_certified = false;
+    const auto pivot_shadow = pivot_sequence_shadow_.step(pivot_shadow_input);
+
     // D2B: non-actuating straight/curve and lookahead shadow from the
     // single mission-owner prepared trajectory. Bound the inspected span.
     // This is never passed to the PX4 DDS command writer.
@@ -627,6 +645,11 @@ class MissionManagerNode final : public rclcpp::Node {
         << ";d2b_tracking_bearing_error_rad=" << tracking_shadow.bearing_error_rad
         << ";d2b_tracking_hold_zero=true"
         << ";d2b_tracking_motion_authorized=false"
+        << ";d2c_pivot_shadow_reason=" << pivot_shadow.reason
+        << ";d2c_pivot_shadow_state=" << dyx::rpp::motion_name(pivot_shadow.state)
+        << ";d2c_pivot_shadow_eligible=" << pivot_shadow.eligible
+        << ";d2c_reverse_needed=" << pivot_shadow.reverse_needed
+        << ";d2c_pivot_action_authorized=false"
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -749,6 +772,12 @@ class MissionManagerNode final : public rclcpp::Node {
         {"d2b_tracking_remaining_m", tracking_shadow.remaining_m},
         {"d2b_tracking_bearing_error_rad", tracking_shadow.bearing_error_rad},
         {"d2b_tracking_motion_authorized", false},
+        {"d2c_pivot_shadow_reason", pivot_shadow.reason},
+        {"d2c_pivot_shadow_state", dyx::rpp::motion_name(pivot_shadow.state)},
+        {"d2c_pivot_shadow_eligible", pivot_shadow.eligible},
+        {"d2c_pivot_shadow_failed", pivot_shadow.failed},
+        {"d2c_reverse_needed", pivot_shadow.reverse_needed},
+        {"d2c_pivot_action_authorized", false},
         {"mission_start_enabled", false},
         {"http_upload_staging_only", true},
         {"px4_disarmed_attestation_fresh", !telemetry_fault_ &&
@@ -775,6 +804,7 @@ class MissionManagerNode final : public rclcpp::Node {
   dyx::http_backend::NativeTelemetrySafetyComponent telemetry_safety_{};
   dyx::http_backend::NativeMissionCommandExecutor mission_command_executor_{};
   dyx::http_backend::NativeMissionStateAudit mission_state_audit_{};
+  dyx::rpp::NativePivotSequenceShadow pivot_sequence_shadow_{};
   dyx::http_backend::NativeCommandMailbox command_mailbox_{};
   dyx::http_backend::NativeUploadIngress upload_ingress_{};
   dyx::http_backend::NativeLoadIngress load_ingress_{};
