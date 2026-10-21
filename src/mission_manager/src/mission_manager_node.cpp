@@ -5,6 +5,7 @@
 #include "dyx_mission_manager/native_telemetry_safety_component.hpp"
 #include "dyx_mission_manager/rtk_safety_snapshot.hpp"
 #include "dyx_mission_manager/receiver_age_diagnostic.hpp"
+#include "dyx_mission_manager/native_positive_command_preflight.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -365,6 +366,29 @@ class MissionManagerNode final : public rclcpp::Node {
         evidence,
         guidance);
 
+    // D1B: explicit missing prerequisites, NOT a physical safety grant.
+    // Trusted interfaces and physical commissioning are deliberately false.
+    dyx::http_backend::PositiveCommandEvidence positive_evidence{};
+    positive_evidence.mission_loaded = owner_.has_active_mission();
+    positive_evidence.stop_latched = command_mailbox_.stopped_latched() || owner_.safe_stop_requested();
+    positive_evidence.telemetry_fault = telemetry_fault_ || timing_fault_;
+    positive_evidence.rtk_fixed = !telemetry_fault_ && telemetry_safety_.rtk().fixed(now);
+    positive_evidence.receiver_age_trusted = false; // C5 feed is diagnostic only.
+    positive_evidence.position_fresh = position_seen_ && !position_fault_ &&
+        std::isfinite(last_position_received_sec_) &&
+        now >= last_position_received_sec_ && now-last_position_received_sec_<=0.25 &&
+        last_position_.xy_valid && last_position_.heading_good_for_control;
+    positive_evidence.rear_reference_calibrated = false;
+    positive_evidence.battery_reserve_verified = false;
+    positive_evidence.obstacle_clear_verified = false;
+    positive_evidence.physical_estop_clear_verified = false;
+    positive_evidence.operator_lease_verified = false;
+    positive_evidence.px4_command_path_commissioned = false;
+    positive_evidence.spray_safety_commissioned = false;
+    positive_evidence.timing_fault = timing_fault_;
+    const auto positive_preflight =
+        dyx::http_backend::assess_positive_command_preflight(positive_evidence);
+
     std_msgs::msg::String status{};
     std::ostringstream out;
 
@@ -515,6 +539,9 @@ class MissionManagerNode final : public rclcpp::Node {
         << ";receiver_age_ros_diagnostic_fresh=" << receiver_age_diagnostic_.fresh(now)
         << ";receiver_age_ros_under_20s=" << receiver_age_diagnostic_.diagnostic_under_20s(now)
         << ";receiver_age_ros_provenance_verified=false"
+        << ";d1b_preflight_missing_gates=" << positive_preflight.missing_gate_count
+        << ";d1b_preflight_first_blocker=" << positive_preflight.first_blocker
+        << ";d1b_positive_authorized=false"
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -607,6 +634,10 @@ class MissionManagerNode final : public rclcpp::Node {
         {"http_command_ingress_ready", true},
         {"http_stop_only", true},
         {"load_requires_px4_disarmed", true},
+        {"d1b_preflight_missing_gates", positive_preflight.missing_gate_count},
+        {"d1b_preflight_first_blocker", positive_preflight.first_blocker},
+        {"d1b_preflight_diagnostic_preconditions_met", positive_preflight.diagnostic_preconditions_met},
+        {"d1b_positive_authorized", false},
         {"mission_start_enabled", false},
         {"http_upload_staging_only", true},
         {"px4_disarmed_attestation_fresh", !telemetry_fault_ &&
