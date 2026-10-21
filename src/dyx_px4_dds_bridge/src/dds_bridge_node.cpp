@@ -2,6 +2,7 @@
 #include "dyx_px4_dds_bridge/safety_freshness.hpp"
 #include "dyx_px4_dds_bridge/bridge_commissioning_guard.hpp"
 #include "dyx_px4_dds_bridge/native_rover_dds_contract.hpp"
+#include "dyx_px4_dds_bridge/native_writer_arbitration.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
@@ -136,11 +137,28 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         // investigated before commissioning; this is not a process-wide lock.
         const auto mode_writers = count_publishers("/fmu/in/offboard_control_mode");
         const auto trajectory_writers = count_publishers("/fmu/in/trajectory_setpoint");
+        // D3D: inspect all known native rover + legacy PX4 input topics.
+        // Local legacy publisher objects are still present in this bridge,
+        // so this check can never imply exclusive DDS ownership or motion.
+        dyx::bridge::WriterCounts writer_counts{};
+        writer_counts.offboard_mode = count_publishers("/fmu/in/offboard_control_mode") > 0 ?
+            count_publishers("/fmu/in/offboard_control_mode") - 1 : 0;
+        writer_counts.legacy_trajectory = count_publishers("/fmu/in/trajectory_setpoint") > 0 ?
+            count_publishers("/fmu/in/trajectory_setpoint") - 1 : 0;
+        writer_counts.rover_speed = count_publishers("/fmu/in/rover_speed_setpoint");
+        writer_counts.rover_rate = count_publishers("/fmu/in/rover_rate_setpoint");
+        writer_counts.rover_attitude = count_publishers("/fmu/in/rover_attitude_setpoint");
+        const auto writer_audit = dyx::bridge::inspect_writer_graph(
+            writer_counts, true, true);
         std_msgs::msg::String status;
         status.data = "INHIBITED:" + audit_.reason(Steady::now(),
             mode_writers > 1 ? mode_writers - 1 : 0,
             trajectory_writers > 1 ? trajectory_writers - 1 : 0)
             + ";d3b_native_rover_api=contract_only;d3b_publish_authorized=false"
+            ";d3d_writer_graph_reason=" + writer_audit.reason +
+            ";d3d_graph_quiet=" + (writer_audit.graph_quiet ? "true" : "false") +
+            ";d3d_other_writers=" + std::to_string(writer_audit.observed_writers) +
+            ";d3d_exclusivity_proven=false;d3d_motion_authorized=false" +
             ";motor_commands_enabled=false;physical_command_emitted=false";
         status_pub_->publish(status);
       }
