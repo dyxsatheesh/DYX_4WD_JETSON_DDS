@@ -1,5 +1,5 @@
 #pragma once
-// D1A: single ROS-owner command dispatch, non-actuating.
+// D1D: single ROS-owner command dispatch with bounded positive-command stage audit.
 // STOP has priority, PAUSE needs backend-authenticated control lease,
 // START/RESUME/NEXT/SKIP remain denied until commissioned.
 #include <cstddef>
@@ -13,14 +13,17 @@ class NativeMissionCommandExecutor final {
     std::size_t pause_accepted{0};
     std::size_t pause_denied{0};
     std::size_t positive_denied{0};
+    std::size_t positive_stage_eligible_denied{0};
+    std::size_t positive_invalid_stage_denied{0};
     bool stop_latched{false};
   };
 
   template <typename Mailbox, typename Audit, typename StopCallback,
-            typename PauseCallback, typename UploadIngress,
+            typename PauseCallback, typename TransitionCallback, typename UploadIngress,
             typename LoadIngress, typename StopPath, typename PausePath>
   Result drain(Mailbox& mailbox, Audit& audit, StopCallback&& stop_callback,
-               PauseCallback&& pause_callback, UploadIngress& upload,
+               PauseCallback&& pause_callback, TransitionCallback&& transition_callback,
+               UploadIngress& upload,
                LoadIngress& load, const StopPath& stop_path,
                const PausePath& pause_path) const {
     Result result{};
@@ -42,7 +45,14 @@ class NativeMissionCommandExecutor final {
           ++result.pause_denied;
         }
       } else {
-        // Positive commands must NEVER be dispatched by D1A.
+        // Read-only transition classification; do not call mission owner.
+        const auto transition = transition_callback(*command);
+        if (transition.eligible_stage) ++result.positive_stage_eligible_denied;
+        else ++result.positive_invalid_stage_denied;
+        // A future refactor must never treat eligible_stage as permission.
+        if (transition.dispatch_authorized) {
+          stop_callback(); // Fail closed even if a callback violates its contract.
+        }
         audit.denied(command->principal.operator_session_id,
                      command->mission_run_id, command->sequence);
         ++result.positive_denied;

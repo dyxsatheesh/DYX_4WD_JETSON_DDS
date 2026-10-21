@@ -7,6 +7,7 @@
 #include "dyx_mission_manager/receiver_age_diagnostic.hpp"
 #include "dyx_mission_manager/native_positive_command_preflight.hpp"
 #include "dyx_mission_manager/native_mission_state_audit.hpp"
+#include "dyx_mission_manager/native_mission_transition_gate.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -234,6 +235,11 @@ class MissionManagerNode final : public rclcpp::Node {
           // ROS executor is the only mission owner. This call cannot actuate.
           return owner_.handle_backend_action(request).accepted();
         },
+        [this](const dyx::rpp::BackendMissionApiRequest& request) {
+          // No positive dispatch here: classify command/stage for diagnostics.
+          return dyx::http_backend::assess_mission_transition(
+              request, owner_.mission().stage(), command_mailbox_.stopped_latched());
+        },
         upload_ingress_, load_ingress_,
         dyx::rpp::kBackendMissionStopPath,
         dyx::rpp::kBackendMissionPausePath);
@@ -241,6 +247,8 @@ class MissionManagerNode final : public rclcpp::Node {
     pause_decisions_ += command_result.pause_accepted;
     pause_denials_ += command_result.pause_denied;
     positive_command_denials_ += command_result.positive_denied;
+    positive_stage_eligible_denied_ += command_result.positive_stage_eligible_denied;
+    positive_invalid_stage_denied_ += command_result.positive_invalid_stage_denied;
 
     // Exactly one bounded upload decision per tick. The owner_ is touched
     // only here on the ROS executor; HTTP never invokes the mission gateway.
@@ -526,6 +534,8 @@ class MissionManagerNode final : public rclcpp::Node {
         << ";d1a_pause_decisions=" << pause_decisions_
         << ";d1a_pause_denials=" << pause_denials_
         << ";d1a_positive_denials=" << positive_command_denials_
+        << ";d1d_stage_eligible_denied=" << positive_stage_eligible_denied_
+        << ";d1d_invalid_stage_denied=" << positive_invalid_stage_denied_
         << ";control_target_hz=50"
         << ";control_cycle_dt_sec=" << cycle_dt_sec
         << ";control_missed_cycles=" << missed_cycle_count_
@@ -652,6 +662,9 @@ class MissionManagerNode final : public rclcpp::Node {
         {"d1a_pause_decisions", pause_decisions_},
         {"d1a_pause_denials", pause_denials_},
         {"d1a_positive_denials", positive_command_denials_},
+        {"d1d_stage_eligible_denied", positive_stage_eligible_denied_},
+        {"d1d_invalid_stage_denied", positive_invalid_stage_denied_},
+        {"d1d_positive_dispatch_authorized", false},
         {"http_command_ingress_ready", true},
         {"http_stop_only", true},
         {"load_requires_px4_disarmed", true},
@@ -695,6 +708,8 @@ class MissionManagerNode final : public rclcpp::Node {
   std::uint64_t pause_decisions_{0};
   std::uint64_t pause_denials_{0};
   std::uint64_t positive_command_denials_{0};
+  std::uint64_t positive_stage_eligible_denied_{0};
+  std::uint64_t positive_invalid_stage_denied_{0};
 
   // Construct the shared snapshot before the HTTP server so
   // it remains available throughout the server's lifetime.
