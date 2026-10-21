@@ -228,9 +228,17 @@ class MissionManagerNode final : public rclcpp::Node {
     const auto command_result = mission_command_executor_.drain(
         command_mailbox_, command_decisions_,
         [this]() { owner_.force_stop(); },
+        [this](const dyx::rpp::BackendMissionApiRequest& request) {
+          // ROS executor is the only mission owner. This call cannot actuate.
+          return owner_.handle_backend_action(request).accepted();
+        },
         upload_ingress_, load_ingress_,
-        dyx::rpp::kBackendMissionStopPath);
+        dyx::rpp::kBackendMissionStopPath,
+        dyx::rpp::kBackendMissionPausePath);
     processed_commands_ += command_result.processed;
+    pause_decisions_ += command_result.pause_accepted;
+    pause_denials_ += command_result.pause_denied;
+    positive_command_denials_ += command_result.positive_denied;
 
     // Exactly one bounded upload decision per tick. The owner_ is touched
     // only here on the ROS executor; HTTP never invokes the mission gateway.
@@ -480,6 +488,9 @@ class MissionManagerNode final : public rclcpp::Node {
         << ";mailbox_normal_queued=" << command_mailbox_.queued_normal()
         << ";mailbox_stop_latched=" << command_mailbox_.stopped_latched()
         << ";mailbox_commands_processed=" << processed_commands_
+        << ";d1a_pause_decisions=" << pause_decisions_
+        << ";d1a_pause_denials=" << pause_denials_
+        << ";d1a_positive_denials=" << positive_command_denials_
         << ";control_target_hz=50"
         << ";control_cycle_dt_sec=" << cycle_dt_sec
         << ";control_missed_cycles=" << missed_cycle_count_
@@ -590,6 +601,9 @@ class MissionManagerNode final : public rclcpp::Node {
         {"mailbox_normal_queued", command_mailbox_.queued_normal()},
         {"mailbox_stop_latched", command_mailbox_.stopped_latched()},
         {"mailbox_commands_processed", processed_commands_},
+        {"d1a_pause_decisions", pause_decisions_},
+        {"d1a_pause_denials", pause_denials_},
+        {"d1a_positive_denials", positive_command_denials_},
         {"http_command_ingress_ready", true},
         {"http_stop_only", true},
         {"load_requires_px4_disarmed", true},
@@ -625,6 +639,9 @@ class MissionManagerNode final : public rclcpp::Node {
   bool last_vehicle_disarmed_{false};
   double last_vehicle_disarm_received_sec_{-1.0};
   std::uint64_t processed_commands_{0};
+  std::uint64_t pause_decisions_{0};
+  std::uint64_t pause_denials_{0};
+  std::uint64_t positive_command_denials_{0};
 
   // Construct the shared snapshot before the HTTP server so
   // it remains available throughout the server's lifetime.
