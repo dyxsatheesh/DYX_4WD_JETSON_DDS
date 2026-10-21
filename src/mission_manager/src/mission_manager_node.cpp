@@ -12,6 +12,7 @@
 #include "dyx_rpp_cpp17_core/reverse_pivot_handoff.hpp"
 #include "dyx_rpp_cpp17_core/native_pivot_sequence_shadow.hpp"
 #include "dyx_rpp_cpp17_core/native_terminal_shadow.hpp"
+#include "dyx_rpp_cpp17_core/native_spray_intent_shadow.hpp"
 #include "dyx_rpp_cpp17_core/native_tracking_shadow.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -526,6 +527,24 @@ class MissionManagerNode final : public rclcpp::Node {
     }
     const auto terminal_shadow = terminal_shadow_.observe(terminal_evidence);
 
+    // D4B: mission-owned spray intent shadow; no physical spray grant.
+    dyx::rpp::SprayIntentShadowInput spray_shadow_input{};
+    const auto& spray_stage = owner_.mission().status();
+    spray_shadow_input.stage = spray_stage.stage;
+    spray_shadow_input.active_terminal_identity = spray_stage.active_terminal_identity;
+    // Not wired to validated RAW RTK, physical OFF feedback, transaction
+    // receipts or operator authorization. All gates deliberately false.
+    spray_shadow_input.mission_owner_verified = false;
+    spray_shadow_input.terminal_estimator_stop_certified = false;
+    spray_shadow_input.independent_raw_rtk_survey_pass = false;
+    spray_shadow_input.physical_estop_clear_verified = false;
+    spray_shadow_input.physical_off_feedback_verified = false;
+    spray_shadow_input.durable_journal_ready = false;
+    spray_shadow_input.uniquely_correlated_ack_available = false;
+    spray_shadow_input.operator_lease_verified = false;
+    spray_shadow_input.spray_hardware_commissioned = false;
+    const auto spray_shadow = dyx::rpp::evaluate_spray_intent_shadow(spray_shadow_input);
+
     dyx::rpp::MissionLegPreviewInput leg_input{};
 
     leg_input.now_sec = now;
@@ -680,6 +699,10 @@ class MissionManagerNode final : public rclcpp::Node {
         << ";d2d_terminal_radial_m=" << terminal_shadow.radial_error_m
         << ";d2d_stop_estimator_only=" << terminal_shadow.stopped_in_estimator_frame
         << ";d2d_marking_authorized=false"
+        << ";d4b_spray_intent_reason=" << spray_shadow.reason
+        << ";d4b_spray_eligibility_diagnostic=" << spray_shadow.eligibility_diagnostic
+        << ";d4b_spray_dispatch_authorized=false"
+        << ";d4b_spray_physical_off_verified=false"
         << ";motion_enabled=false"
         << ";spray_enabled=false"
         << ";physical_command_emitted=false";
@@ -812,6 +835,10 @@ class MissionManagerNode final : public rclcpp::Node {
         {"d2d_terminal_radial_m", terminal_shadow.radial_error_m},
         {"d2d_stop_estimator_only", terminal_shadow.stopped_in_estimator_frame},
         {"d2d_marking_authorized", false},
+        {"d4b_spray_intent_reason", spray_shadow.reason},
+        {"d4b_spray_eligibility_diagnostic", spray_shadow.eligibility_diagnostic},
+        {"d4b_spray_dispatch_authorized", false},
+        {"d4b_spray_physical_off_verified", false},
         {"mission_start_enabled", false},
         {"http_upload_staging_only", true},
         {"px4_disarmed_attestation_fresh", !telemetry_fault_ &&
