@@ -275,6 +275,30 @@ class MissionManagerNode final : public rclcpp::Node {
     // This is not a PX4 hardware stop acknowledgment.
     if (telemetry_safety_.critical_battery_latched()) owner_.force_stop();
 
+    // Missing feedback at startup is not authorization. Once telemetry
+    // has been observed, losing it creates a persistent mission STOP.
+    const bool position_timeout =
+        position_seen_ &&
+        (!std::isfinite(last_position_received_sec_) ||
+         now < last_position_received_sec_ ||
+         now - last_position_received_sec_ > 0.25);
+
+    const bool rover_rate_timeout =
+        rover_rate_seen_ &&
+        (!std::isfinite(last_rover_rate_received_sec_) ||
+         now < last_rover_rate_received_sec_ ||
+         now - last_rover_rate_received_sec_ > 0.25);
+
+    if (position_timeout || rover_rate_timeout) {
+      position_fault_ = position_fault_ || position_timeout;
+      rover_rate_fault_ = rover_rate_fault_ || rover_rate_timeout;
+
+      if (!telemetry_loss_stop_latched_) {
+        owner_.force_stop();
+        telemetry_loss_stop_latched_ = true;
+      }
+    }
+
     // Once PX4 estimator or yaw-rate telemetry has been observed,
     // losing it is a mission STOP, not an automatic PAUSE/RESUME.
     // Startup with missing hardware remains non-actuating.
