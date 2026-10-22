@@ -10,5 +10,6 @@
   <depend>px4_msgs</depend>
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
+  <depend>rpp_interfaces</depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

@@ -9,6 +9,7 @@
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rpp_interfaces/msg/rpp_preview.hpp>
+#include <rpp_interfaces/msg/mission_safety_preview.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/int32.hpp>
@@ -131,6 +132,18 @@ public:
       }
       goal_east_=p->point.y;goal_north_=p->point.x;goal_valid_=true;
     });
+  mission_safety_sub_ = create_subscription<rpp_interfaces::msg::MissionSafetyPreview>(
+    "/dyx/mission/safety_preview", rclcpp::QoS(5),
+    [this](rpp_interfaces::msg::MissionSafetyPreview::ConstSharedPtr m) {
+      std::lock_guard<std::mutex> g(mu_);
+      mission_safety_seen_ = true;
+      mission_safety_received_ = std::chrono::steady_clock::now();
+      mission_stop_requested_ = m->stop_requested;
+      mission_rtk_fixed_ = m->rtk_fixed;
+      mission_float_over_5s_ = m->float_over_five_seconds;
+      mission_rtk_pause_ = m->rtk_pause_requested;
+      mission_correction_age_verified_ = m->correction_age_verified;
+    });
   timer_=create_wall_timer(50ms,[this]{publish();});
  }
  private:
@@ -166,6 +179,15 @@ public:
   preview.semantic_valid = semantic_valid_;
   preview.motion_authorized = false; // Immutable pre-commissioning contract.
   preview.reason = "HOLD_NO_VALIDATED_GUIDANCE";
+  const bool safety_fresh = mission_safety_seen_ &&
+      now - mission_safety_received_ <= 250ms;
+  const bool safety_hold = !safety_fresh || mission_stop_requested_ ||
+      !mission_rtk_fixed_ || mission_rtk_pause_ ||
+      !mission_correction_age_verified_;
+  // Diagnostics only: safety evidence never authorizes motion.
+  // Keep guidance_valid about geometry only; separate safety information follows.
+  preview.reason = safety_hold ? "MISSION_OR_RTK_SAFETY_HOLD" :
+      "NON_ACTUATING_RPP_GEOMETRY_ONLY";
   std::ostringstream s;
   s.setf(std::ios::fixed);s.precision(5);
   s<<"CXX17_RPP_PATH_OBSERVE;px4_position_fresh="<<(fresh?"true":"false")
@@ -226,7 +248,8 @@ public:
         preview.preview_yaw_rate_enu_radps = plan.yaw_rate_preview_radps;
         preview.heading_enu_rad = heading_enu_;
         preview.remaining_m = plan.remaining_m;
-        preview.reason = "NON_ACTUATING_RPP_GEOMETRY_ONLY";
+        // Preserve safety HOLD even when geometric guidance is valid.
+        if (!safety_hold) preview.reason = "NON_ACTUATING_RPP_GEOMETRY_ONLY";
         s<<";execution_preview_valid=true;execution_phase="<<plan.phase
          <<";execution_goal="<<plan.goal_identity
          <<";execution_cross_track_m="<<plan.cross_track_m
@@ -246,11 +269,22 @@ public:
     }catch(const std::exception& e){s<<";geometry_fault="<<e.what();}
   }
   if(fresh && pose_valid_ && goal_valid_)s<<";goal_radial_m="<<std::hypot(goal_east_-east_,goal_north_-north_);
-  s<<";mission_authorized=false;motion_authorized=false;physical_command_emitted=false";
+  s<<";mission_safety_fresh="<<(safety_fresh?"true":"false")
+   <<";mission_stop_requested="<<(mission_stop_requested_?"true":"false")
+   <<";rtk_fixed_diagnostic="<<(mission_rtk_fixed_?"true":"false")
+   <<";rtk_float_over_5s="<<(mission_float_over_5s_?"true":"false")
+   <<";rtk_pause_intent="<<(mission_rtk_pause_?"true":"false")
+   <<";correction_age_verified="<<(mission_correction_age_verified_?"true":"false")
+   <<";mission_authorized=false;motion_authorized=false;physical_command_emitted=false";
   // A valid preview never confers START, motion, spray, or PX4 authority.
   shadow_pub_->publish(preview);
   std_msgs::msg::String m;m.data=s.str();out_->publish(m);detail_->publish(m);
  }
+ bool mission_safety_seen_{false};
+ bool mission_stop_requested_{true}, mission_rtk_fixed_{false};
+ bool mission_float_over_5s_{false}, mission_rtk_pause_{true};
+ bool mission_correction_age_verified_{false};
+ std::chrono::steady_clock::time_point mission_safety_received_{};
  std::mutex mu_;
  bool seen_{false},pose_valid_{false},position_fault_{false},goal_valid_{false};
  std::uint8_t xy_reset_{0},heading_reset_{0};std::uint64_t last_sample_{0};
@@ -274,6 +308,7 @@ public:
  rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr marks_sub_;
  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr active_sub_;
  rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_;
+ rclcpp::Subscription<rpp_interfaces::msg::MissionSafetyPreview>::SharedPtr mission_safety_sub_;
  rclcpp::TimerBase::SharedPtr timer_;
 };
 int main(int argc,char**argv){rclcpp::init(argc,argv);rclcpp::spin(std::make_shared<RppControllerNode>());rclcpp::shutdown();return 0;}

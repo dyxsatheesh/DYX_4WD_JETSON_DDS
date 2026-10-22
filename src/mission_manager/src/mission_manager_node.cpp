@@ -22,6 +22,7 @@
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/int32.hpp>
+#include <rpp_interfaces/msg/mission_safety_preview.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -180,6 +181,8 @@ class MissionManagerNode final : public rclcpp::Node {
           // independently trusted NativeRtcmAgeGuard or motion gates.
           receiver_age_diagnostic_.observe(m->data, now_sec());
         });
+    safety_preview_pub_ = create_publisher<rpp_interfaces::msg::MissionSafetyPreview>(
+        "/dyx/mission/safety_preview", rclcpp::QoS(5));
     status_pub_ = create_publisher<std_msgs::msg::String>(
         "/dyx/native/mission_dds_runtime/status",
         rclcpp::QoS(5));
@@ -720,6 +723,20 @@ class MissionManagerNode final : public rclcpp::Node {
     }
     active_marking_pub_->publish(active_index);
     status.data = out.str();
+    // Single mission-owner safety observation, never an authorization token.
+    rpp_interfaces::msg::MissionSafetyPreview safety{};
+    safety.header.stamp = get_clock()->now();
+    safety.header.frame_id = "mission_safety_diagnostic_only";
+    safety.mission_loaded = owner_.has_active_mission();
+    safety.stop_requested = owner_.safe_stop_requested() ||
+        command_mailbox_.stopped_latched() || telemetry_fault_ || timing_fault_;
+    safety.rtk_fixed = rtk_snapshot.raw_fixed;
+    safety.float_over_five_seconds = rtk_snapshot.float_over_five_seconds;
+    safety.rtk_pause_requested = rtk_snapshot.pause_intent;
+    safety.correction_age_verified = rtk_snapshot.correction_age_verified;
+    safety.motion_authorized = false;  // No physical safety adapter.
+    safety.reason = rtk_snapshot.reason;
+    safety_preview_pub_->publish(safety);
     status_pub_->publish(status);
     // Original node-name status compatibility, always fail-closed.
     std_msgs::msg::String legacy_status{};
@@ -918,6 +935,7 @@ class MissionManagerNode final : public rclcpp::Node {
       px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_sub_;
   rclcpp::Subscription<
       px4_msgs::msg::VehicleLocalPosition>::SharedPtr position_sub_;
+  rclcpp::Publisher<rpp_interfaces::msg::MissionSafetyPreview>::SharedPtr safety_preview_pub_;
 
   rclcpp::Publisher<
       std_msgs::msg::String>::SharedPtr status_pub_;

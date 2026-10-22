@@ -8,6 +8,7 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RppCommand.msg"
   "msg/RppPreview.msg"
+  "msg/MissionSafetyPreview.msg"
   DEPENDENCIES std_msgs
 )
 
