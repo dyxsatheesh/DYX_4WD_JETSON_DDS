@@ -44,3 +44,13 @@ if(BUILD_TESTING)
   add_test(NAME mission_dispatch_regression
     COMMAND test_mission_dispatch)
 endif()
+
+# B117: isolated fail-closed authority and lifecycle policy regression.
+if(BUILD_TESTING)
+  add_executable(test_motion_authority test/test_motion_authority.cpp)
+  target_include_directories(test_motion_authority PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_mission_manager/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_rpp_cpp17_core/include
+  )
+  add_test(NAME motion_authority_regression COMMAND test_motion_authority)
+endif()

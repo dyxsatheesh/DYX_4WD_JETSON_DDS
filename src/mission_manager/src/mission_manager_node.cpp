@@ -2,6 +2,7 @@
 #include "dyx_mission_manager/native_http_server.hpp"
 #include "dyx_mission_manager/native_command_mailbox.hpp"
 #include "dyx_mission_manager/native_mission_command_executor.hpp"
+#include "dyx_mission_manager/native_motion_authority.hpp"
 #include "dyx_mission_manager/native_telemetry_safety_component.hpp"
 #include "dyx_mission_manager/rtk_safety_snapshot.hpp"
 #include "dyx_mission_manager/receiver_age_diagnostic.hpp"
@@ -298,6 +299,9 @@ class MissionManagerNode final : public rclcpp::Node {
         telemetry_loss_stop_latched_ = true;
       }
     }
+
+    if (command_mailbox_.stopped_latched() || owner_.safe_stop_requested())
+      motion_authority_.stop();
 
     const auto rtk_snapshot = dyx::http_backend::make_rtk_safety_snapshot(
         telemetry_safety_.rtk(), telemetry_safety_.rtcm(), now,
@@ -999,6 +1003,9 @@ class MissionManagerNode final : public rclcpp::Node {
         {"d1d_stage_eligible_denied", positive_stage_eligible_denied_},
         {"d1d_invalid_stage_denied", positive_invalid_stage_denied_},
         {"d1d_positive_dispatch_authorized", false},
+        {"b117_motion_authority_stop_latched", motion_authority_.stop_latched()},
+        {"b117_trusted_motion_lease_connected", false},
+        {"b117_hardware_motion_authorized", false},
         {"http_command_ingress_ready", true},
         {"http_stop_only", true},
         {"load_requires_px4_disarmed", true},
@@ -1074,6 +1081,7 @@ class MissionManagerNode final : public rclcpp::Node {
   NativeControlOwner owner_{};
   dyx::http_backend::NativeTelemetrySafetyComponent telemetry_safety_{};
   dyx::http_backend::NativeMissionCommandExecutor mission_command_executor_{};
+  dyx::http_backend::NativeMotionAuthority motion_authority_{};
   dyx::http_backend::NativeMissionStateAudit mission_state_audit_{};
   dyx::rpp::NativeTerminalShadow terminal_shadow_{};
   dyx::rpp::NativePivotSequenceShadow pivot_sequence_shadow_{};
