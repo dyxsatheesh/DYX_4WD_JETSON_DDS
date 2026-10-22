@@ -21,3 +21,15 @@ target_include_directories(mission_manager_node PRIVATE
 target_link_libraries(mission_manager_node Boost::system Threads::Threads OpenSSL::Crypto SQLite::SQLite3)
 install(TARGETS mission_manager_node DESTINATION lib/${PROJECT_NAME})
 ament_package()
+
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(test_mission_safety
+    test/test_mission_safety.cpp)
+  target_include_directories(test_mission_safety PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_mission_manager/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_rpp_cpp17_core/include
+  )
+  add_test(NAME mission_safety_regression
+    COMMAND test_mission_safety)
+endif()
