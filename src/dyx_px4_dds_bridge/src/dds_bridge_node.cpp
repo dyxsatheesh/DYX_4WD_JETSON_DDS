@@ -13,6 +13,8 @@
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <rpp_interfaces/msg/rpp_command.hpp>
+#include <rpp_interfaces/msg/mission_safety_preview.hpp>
+#include <rpp_interfaces/msg/mission_safety_preview.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int64.hpp>
@@ -170,6 +172,42 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
               }
             });
 
+    mission_safety_sub_ =
+        create_subscription<rpp_interfaces::msg::MissionSafetyPreview>(
+            "/dyx/mission/safety_preview",
+            rclcpp::QoS(5),
+            [this](
+                rpp_interfaces::msg::MissionSafetyPreview::ConstSharedPtr m) {
+              mission_safety_seen_ = true;
+              mission_safety_received_ = Steady::now();
+
+              // Diagnostic state only. ROS topic publication alone
+              // cannot grant mission or actuator authority.
+              mission_preview_stop_ = m->stop_requested;
+              mission_preview_authorized_ = m->motion_authorized;
+              mission_preview_rtk_fixed_ = m->rtk_fixed;
+              mission_preview_correction_age_verified_ =
+                  m->correction_age_verified;
+            });
+
+    mission_safety_sub_ =
+        create_subscription<rpp_interfaces::msg::MissionSafetyPreview>(
+            "/dyx/mission/safety_preview",
+            rclcpp::QoS(5),
+            [this](
+                rpp_interfaces::msg::MissionSafetyPreview::ConstSharedPtr m) {
+              mission_safety_seen_ = true;
+              mission_safety_received_ = Steady::now();
+
+              // Diagnostic state only. ROS topic publication alone
+              // cannot grant mission or actuator authority.
+              mission_preview_stop_ = m->stop_requested;
+              mission_preview_authorized_ = m->motion_authorized;
+              mission_preview_rtk_fixed_ = m->rtk_fixed;
+              mission_preview_correction_age_verified_ =
+                  m->correction_age_verified;
+            });
+
     mission_status_sub_ = create_subscription<std_msgs::msg::String>(
         "/mission_manager/status", rclcpp::QoS(10),
         [this](std_msgs::msg::String::ConstSharedPtr m) {
@@ -247,6 +285,38 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
                 ? "true" : "false") +
         ";heading_fault_latched=" +
             std::string(heading_fault_latched_ ? "true" : "false") +
+        ";mission_safety_preview_fresh=" +
+            std::string(
+                fresh(mission_safety_seen_,
+                      mission_safety_received_, 0.30)
+                ? "true" : "false") +
+        ";mission_preview_stop_requested=" +
+            std::string(mission_preview_stop_ ? "true" : "false") +
+        ";mission_preview_motion_authorized=" +
+            std::string(mission_preview_authorized_ ? "true" : "false") +
+        ";mission_preview_rtk_fixed=" +
+            std::string(mission_preview_rtk_fixed_ ? "true" : "false") +
+        ";mission_preview_correction_age_verified=" +
+            std::string(
+                mission_preview_correction_age_verified_
+                ? "true" : "false") +
+        ";trusted_mission_actuation_authorized=false" +
+        ";mission_safety_preview_fresh=" +
+            std::string(
+                fresh(mission_safety_seen_,
+                      mission_safety_received_, 0.30)
+                ? "true" : "false") +
+        ";mission_preview_stop_requested=" +
+            std::string(mission_preview_stop_ ? "true" : "false") +
+        ";mission_preview_motion_authorized=" +
+            std::string(mission_preview_authorized_ ? "true" : "false") +
+        ";mission_preview_rtk_fixed=" +
+            std::string(mission_preview_rtk_fixed_ ? "true" : "false") +
+        ";mission_preview_correction_age_verified=" +
+            std::string(
+                mission_preview_correction_age_verified_
+                ? "true" : "false") +
+        ";trusted_mission_actuation_authorized=false" +
         ";native_wire_valid=" +
             std::string(latest_wire_.valid ? "true" : "false") +
         ";native_wire_fresh=" +
@@ -275,6 +345,21 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
   }
 
   dyx::bridge::BridgeAudit audit_{};
+
+  rclcpp::Subscription<
+      rpp_interfaces::msg::MissionSafetyPreview>::SharedPtr
+      mission_safety_sub_;
+
+  bool mission_safety_seen_{false};
+  bool mission_preview_stop_{true};
+  bool mission_preview_authorized_{false};
+  bool mission_preview_rtk_fixed_{false};
+  bool mission_preview_correction_age_verified_{false};
+
+  std::chrono::steady_clock::time_point
+      mission_safety_received_{};
+
+
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mission_status_sub_;
   bool enable_motion_{false};
   bool emergency_stop_{true};
