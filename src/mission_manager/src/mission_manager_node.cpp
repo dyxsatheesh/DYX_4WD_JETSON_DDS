@@ -507,6 +507,7 @@ class MissionManagerNode final : public rclcpp::Node {
         owned_pose_fresh &&
         !telemetry_fault_ &&
         !timing_fault_ &&
+        rover_rate_fresh &&
         !command_mailbox_.stopped_latched() &&
         !owner_.safe_stop_requested();
 
@@ -532,7 +533,9 @@ class MissionManagerNode final : public rclcpp::Node {
     dyx::http_backend::PositiveCommandEvidence positive_evidence{};
     positive_evidence.mission_loaded = owner_.has_active_mission();
     positive_evidence.stop_latched = command_mailbox_.stopped_latched() || owner_.safe_stop_requested();
-    positive_evidence.telemetry_fault = telemetry_fault_ || timing_fault_;
+    positive_evidence.telemetry_fault =
+        telemetry_fault_ || timing_fault_ ||
+        rover_rate_fault_ || !rover_rate_fresh;
     positive_evidence.rtk_fixed = !telemetry_fault_ && telemetry_safety_.rtk().fixed(now);
     positive_evidence.receiver_age_trusted = false; // C5 feed is diagnostic only.
     positive_evidence.position_fresh = position_seen_ && !position_fault_ &&
@@ -873,7 +876,8 @@ class MissionManagerNode final : public rclcpp::Node {
     safety.header.frame_id = "mission_safety_diagnostic_only";
     safety.mission_loaded = owner_.has_active_mission();
     safety.stop_requested = owner_.safe_stop_requested() ||
-        command_mailbox_.stopped_latched() || telemetry_fault_ || timing_fault_;
+        command_mailbox_.stopped_latched() || telemetry_fault_ ||
+        timing_fault_ || rover_rate_fault_ || !rover_rate_fresh;
     safety.rtk_fixed = rtk_snapshot.raw_fixed;
     safety.float_over_five_seconds = rtk_snapshot.float_over_five_seconds;
     safety.rtk_pause_requested = rtk_snapshot.pause_intent;
