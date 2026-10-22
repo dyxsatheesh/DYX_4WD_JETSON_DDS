@@ -33,3 +33,14 @@ if(BUILD_TESTING)
   add_test(NAME mission_safety_regression
     COMMAND test_mission_safety)
 endif()
+
+if(BUILD_TESTING)
+  add_executable(test_mission_dispatch
+    test/test_mission_dispatch.cpp)
+  target_include_directories(test_mission_dispatch PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_mission_manager/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_rpp_cpp17_core/include
+  )
+  add_test(NAME mission_dispatch_regression
+    COMMAND test_mission_dispatch)
+endif()
