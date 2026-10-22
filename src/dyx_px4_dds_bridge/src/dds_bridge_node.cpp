@@ -1,4 +1,5 @@
 #include "dyx_px4_dds_bridge/geometry.hpp"
+#include "dyx_px4_dds_bridge/body_speed_projection.hpp"
 #include "dyx_px4_dds_bridge/safety_freshness.hpp"
 #include "dyx_px4_dds_bridge/bridge_commissioning_guard.hpp"
 #include "dyx_px4_dds_bridge/native_rover_dds_contract.hpp"
@@ -9,6 +10,7 @@
 #include <px4_msgs/msg/rover_speed_setpoint.hpp>
 #include <px4_msgs/msg/rover_rate_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <rpp_interfaces/msg/rpp_command.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -71,10 +73,28 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         [this](const rpp_interfaces::msg::RppCommand::SharedPtr msg) {
           latest_rpp_ = dyx::convert_rpp(
               msg->velocity_north_mps, msg->velocity_east_mps,
-              msg->yaw_rate_enu_radps, msg->yaw_valid,
+              msg->yaw_enu_rad, msg->yaw_rate_enu_radps,
+              msg->yaw_valid,
               maximum_speed_mps_, maximum_yaw_rate_radps_);
+          const bool estimator_fresh =
+              heading_valid_ &&
+              fresh(heading_seen_, heading_received_, 0.25);
+
+          latest_body_ = dyx::bridge::project_body_speed(
+              msg->velocity_north_mps,
+              msg->velocity_east_mps,
+              measured_heading_enu_rad_,
+              msg->yaw_valid && estimator_fresh,
+              maximum_speed_mps_);
+          latest_wire_ = dyx::bridge::rover_speed_rate_wire(
+              latest_body_.forward_mps,
+              msg->yaw_rate_enu_radps,
+              latest_rpp_.valid && latest_body_.valid,
+              maximum_speed_mps_,
+              maximum_yaw_rate_radps_);
+
           rpp_received_ = std::chrono::steady_clock::now();
-          have_rpp_ = latest_rpp_.valid;
+          have_rpp_ = latest_wire_.valid;
         });
 
     estop_sub_ = create_subscription<std_msgs::msg::Bool>(
@@ -109,6 +129,46 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
               px4_status_received_ = std::chrono::steady_clock::now();
             });
 
+    heading_sub_ =
+        create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+            "/fmu/out/vehicle_local_position_v1",
+            rclcpp::SensorDataQoS(),
+            [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr p) {
+              if (heading_seen_ &&
+                  (p->timestamp_sample <= last_heading_sample_us_ ||
+                   p->xy_reset_counter != initial_xy_reset_ ||
+                   p->heading_reset_counter != initial_heading_reset_)) {
+                heading_fault_latched_ = true;
+              }
+
+              if (!heading_seen_) {
+                initial_xy_reset_ = p->xy_reset_counter;
+                initial_heading_reset_ = p->heading_reset_counter;
+              }
+
+              heading_seen_ = true;
+              last_heading_sample_us_ = p->timestamp_sample;
+              heading_received_ = Steady::now();
+
+              heading_valid_ =
+                  !heading_fault_latched_ &&
+                  p->timestamp_sample != 0 &&
+                  p->xy_valid &&
+                  p->v_xy_valid &&
+                  p->heading_good_for_control &&
+                  !p->dead_reckoning &&
+                  std::isfinite(p->heading);
+
+              if (heading_valid_) {
+                measured_heading_enu_rad_ =
+                    1.5707963267948966 - p->heading;
+              } else {
+                have_rpp_ = false;
+                latest_body_ = {};
+                latest_wire_ = {};
+              }
+            });
+
     mission_status_sub_ = create_subscription<std_msgs::msg::String>(
         "/mission_manager/status", rclcpp::QoS(10),
         [this](std_msgs::msg::String::ConstSharedPtr m) {
@@ -131,11 +191,19 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
   }
 
   void publish_setpoint() {
+    if (!rclcpp::ok(get_node_base_interface()->get_context()))
+      return;
+
     // PRE-COMMISSIONING: diagnostics only. No PX4 command is published.
     // The constructor rejects enable_motion=true, even with ROS overrides.
-    have_rpp_ = false;
+    const bool command_fresh =
+        have_rpp_ && latest_rpp_.valid &&
+        fresh(true, rpp_received_, command_timeout_s_) &&
+        heading_valid_ &&
+        fresh(heading_seen_, heading_received_, 0.25);
     if (++tick_count_ % 50 != 0) return;
 
+    try {
     const auto mode = count_publishers("/fmu/in/offboard_control_mode");
     const auto speed = count_publishers("/fmu/in/rover_speed_setpoint");
     const auto rate = count_publishers("/fmu/in/rover_rate_setpoint");
@@ -153,8 +221,41 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         ";writer_graph_reason=" + graph.reason +
         ";other_writers=" + std::to_string(graph.observed_writers) +
         ";publisher_exclusivity_proven=false" +
+        ";rpp_command_valid=" + std::string(have_rpp_ ? "true" : "false") +
+        ";rpp_command_fresh=" + std::string(command_fresh ? "true" : "false") +
+        ";converted_north_mps=" + std::to_string(command_fresh ? latest_rpp_.north_mps : 0.0f) +
+        ";converted_east_mps=" + std::to_string(command_fresh ? latest_rpp_.east_mps : 0.0f) +
+        ";converted_yaw_rate_ned_radps=" + std::to_string(
+            command_fresh ? latest_rpp_.yaw_rate_ned_radps : 0.0f) +
+        ";body_speed_valid=" +
+            std::string(latest_body_.valid ? "true" : "false") +
+        ";body_forward_mps=" +
+            std::to_string(command_fresh ? latest_body_.forward_mps : 0.0f) +
+        ";measured_heading_valid=" +
+            std::string(
+                heading_valid_ &&
+                fresh(heading_seen_, heading_received_, 0.25)
+                ? "true" : "false") +
+        ";heading_fault_latched=" +
+            std::string(heading_fault_latched_ ? "true" : "false") +
+        ";native_wire_valid=" +
+            std::string(latest_wire_.valid ? "true" : "false") +
+        ";native_wire_fresh=" +
+            std::string(command_fresh ? "true" : "false") +
+        ";native_speed_body_x_mps=" +
+            std::to_string(command_fresh ? latest_wire_.speed_body_x : 0.0f) +
+        ";native_yaw_rate_ned_radps=" +
+            std::to_string(command_fresh ? latest_wire_.yaw_rate_setpoint : 0.0f) +
+        ";native_wire_publish_authorized=false" +
         ";motor_commands_enabled=false;physical_command_emitted=false";
     status_pub_->publish(status);
+    } catch (const std::exception&) {
+      // Graph operations can race with Ctrl+C context shutdown.
+      // Suppress exceptions ONLY once ROS shutdown has begun.
+      if (!rclcpp::ok(get_node_base_interface()->get_context()))
+        return;
+      throw;
+    }
   }
 
   dyx::bridge::BridgeAudit audit_{};
@@ -176,6 +277,23 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
   double safety_input_timeout_s_{0.30};
   size_t tick_count_{0};
   dyx::NedCommand latest_rpp_{};
+  dyx::bridge::BodySpeedProjection latest_body_{};
+  dyx::bridge::RoverSpeedRateWire latest_wire_{};
+
+  rclcpp::Subscription<
+      px4_msgs::msg::VehicleLocalPosition>::SharedPtr heading_sub_;
+
+  bool heading_seen_{false};
+  bool heading_valid_{false};
+  bool heading_fault_latched_{false};
+
+  std::uint64_t last_heading_sample_us_{0};
+  std::uint8_t initial_xy_reset_{0};
+  std::uint8_t initial_heading_reset_{0};
+
+  double measured_heading_enu_rad_{0.0};
+
+  Steady::time_point heading_received_{};
   Steady::time_point heartbeat_received_{};
   Steady::time_point estop_received_{};
   Steady::time_point mission_received_{};

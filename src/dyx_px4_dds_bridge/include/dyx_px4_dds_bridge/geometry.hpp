@@ -14,11 +14,13 @@ struct NedCommand {
 // Source RppCommand uses North/East components and CCW-positive ENU yaw rate.
 // PX4 trajectory_setpoint uses NED North/East and CW-positive yaw rate.
 // No swapping of velocity components is needed: only yaw-rate sign flips.
-inline NedCommand convert_rpp(double north, double east, double yaw_rate_enu,
+inline NedCommand convert_rpp(double north, double east,
+                              double yaw_enu, double yaw_rate_enu,
                               bool yaw_valid, double speed_limit,
                               double yaw_rate_limit) {
   if (!yaw_valid || !std::isfinite(north) || !std::isfinite(east) ||
-      !std::isfinite(yaw_rate_enu) || !std::isfinite(speed_limit) ||
+      !std::isfinite(yaw_enu) || !std::isfinite(yaw_rate_enu) ||
+      !std::isfinite(speed_limit) ||
       !std::isfinite(yaw_rate_limit) || speed_limit <= 0.0 ||
       yaw_rate_limit <= 0.0) {
     return {};

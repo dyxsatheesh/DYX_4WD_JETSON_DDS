@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+
+  <!-- Exactly one native mission owner -->
+  <node pkg="mission_manager"
+        exec="mission_manager_node"
+        name="mission_manager_node"
+        output="screen"/>
+
+  <!-- C++17 trajectory generation -->
+  <node pkg="trajectory_generator"
+        exec="trajectory_generator_node"
+        name="trajectory_generator_node"
+        output="screen"/>
+
+  <!-- Python-equivalent RPP calculations, non-actuating -->
+  <node pkg="rpp_controller"
+        exec="rpp_controller_node"
+        name="rpp_controller_node"
+        output="screen"/>
+
+  <!-- PX4 native DDS bridge: physical output locked -->
+  <node pkg="dyx_px4_dds_bridge"
+        exec="dyx_px4_dds_bridge_node"
+        name="dyx_px4_dds_bridge"
+        output="screen">
+    <param name="enable_motion" value="false"/>
+  </node>
+
+  <!-- Spray transaction observer -->
+  <node pkg="spray_controller"
+        exec="spray_controller_node"
+        name="spray_controller_node"
+        output="screen">
+    <param name="observe_only" value="true"/>
+  </node>
+
+  <!-- RTK receiver/injection disabled until commissioned -->
+  <node pkg="rtk_correction_bridge"
+        exec="rtk_correction_bridge_node"
+        name="rtk_correction_bridge"
+        output="screen">
+    <param name="receive_enabled" value="false"/>
+    <param name="serial_injection_enabled" value="false"/>
+  </node>
+
+  <!-- Obstacle ROS range observer -->
+  <node pkg="obstacle_monitor"
+        exec="obstacle_monitor_node"
+        name="obstacle_monitor_node"
+        output="screen">
+    <param name="enable_serial" value="false"/>
+  </node>
+
+</launch>
