@@ -115,10 +115,21 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
           mission_received_ = Steady::now();
         });
     heartbeat_sub_ = create_subscription<std_msgs::msg::UInt64>(
-        "/rover_backend/heartbeat", input_qos,
-        [this](const std_msgs::msg::UInt64::SharedPtr) {
+        "/dyx/mission/heartbeat", input_qos,
+        [this](const std_msgs::msg::UInt64::SharedPtr msg) {
+          if (msg->data == 0 ||
+              (have_heartbeat_ &&
+               msg->data <= last_heartbeat_sequence_)) {
+            have_heartbeat_ = false;
+            heartbeat_fault_latched_ = true;
+            return;
+          }
+
+          if (heartbeat_fault_latched_) return;
+
+          last_heartbeat_sequence_ = msg->data;
           have_heartbeat_ = true;
-          heartbeat_received_ = std::chrono::steady_clock::now();
+          heartbeat_received_ = Steady::now();
         });
     vehicle_status_sub_ =
         create_subscription<px4_msgs::msg::VehicleStatus>(
@@ -317,6 +328,15 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
                 mission_preview_correction_age_verified_
                 ? "true" : "false") +
         ";trusted_mission_actuation_authorized=false" +
+        ";native_mission_heartbeat_fresh=" +
+            std::string(
+                !heartbeat_fault_latched_ &&
+                fresh(have_heartbeat_,
+                      heartbeat_received_, heartbeat_timeout_s_)
+                ? "true" : "false") +
+        ";native_mission_heartbeat_fault=" +
+            std::string(heartbeat_fault_latched_ ? "true" : "false") +
+        ";native_mission_heartbeat_authorizes_motion=false" +
         ";native_wire_valid=" +
             std::string(latest_wire_.valid ? "true" : "false") +
         ";native_wire_fresh=" +
@@ -367,6 +387,8 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
   bool armed_{false};
   bool in_offboard_{false};
   bool have_heartbeat_{false};
+  bool heartbeat_fault_latched_{false};
+  std::uint64_t last_heartbeat_sequence_{0};
   bool have_estop_{false};
   bool have_mission_{false};
   bool have_px4_status_{false};

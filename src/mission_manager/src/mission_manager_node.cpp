@@ -22,6 +22,7 @@
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/int32.hpp>
+#include <std_msgs/msg/u_int64.hpp>
 #include <rpp_interfaces/msg/mission_safety_preview.hpp>
 
 #include <chrono>
@@ -181,6 +182,9 @@ class MissionManagerNode final : public rclcpp::Node {
           // independently trusted NativeRtcmAgeGuard or motion gates.
           receiver_age_diagnostic_.observe(m->data, now_sec());
         });
+    heartbeat_pub_ = create_publisher<std_msgs::msg::UInt64>(
+        "/dyx/mission/heartbeat", rclcpp::QoS(5));
+
     safety_preview_pub_ = create_publisher<rpp_interfaces::msg::MissionSafetyPreview>(
         "/dyx/mission/safety_preview", rclcpp::QoS(5));
     status_pub_ = create_publisher<std_msgs::msg::String>(
@@ -737,6 +741,11 @@ class MissionManagerNode final : public rclcpp::Node {
     safety.motion_authorized = false;  // No physical safety adapter.
     safety.reason = rtk_snapshot.reason;
     safety_preview_pub_->publish(safety);
+
+    // Monotonic process-liveness signal, NOT motion authorization.
+    std_msgs::msg::UInt64 heartbeat{};
+    heartbeat.data = ++heartbeat_sequence_;
+    heartbeat_pub_->publish(heartbeat);
     status_pub_->publish(status);
     // Original node-name status compatibility, always fail-closed.
     std_msgs::msg::String legacy_status{};
@@ -906,6 +915,8 @@ class MissionManagerNode final : public rclcpp::Node {
   std::unique_ptr<dyx::http_backend::NativeHttpServer> native_http_{};
   bool telemetry_fault_{false};
   std::uint64_t control_sequence_{0};
+  std::uint64_t heartbeat_sequence_{0};
+  rclcpp::Publisher<std_msgs::msg::UInt64>::SharedPtr heartbeat_pub_;
   double last_tick_sec_{-1.0};
   std::uint64_t missed_cycle_count_{0};
   bool timing_fault_{false};
