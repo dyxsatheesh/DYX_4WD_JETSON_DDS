@@ -6,6 +6,11 @@
 #include "ntrip_protocol.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/float32.hpp>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <arpa/inet.h>
@@ -67,6 +72,9 @@ public:
   serial_commissioned_=declare_parameter<bool>("serial_commissioned",false);
   serial_device_=declare_parameter<std::string>("serial_device","");
   serial_baud_=declare_parameter<int>("serial_baud",230400);
+  healthy_age_sec_=declare_parameter<double>("healthy_age_sec",3.0);
+  if(!std::isfinite(healthy_age_sec_) || healthy_age_sec_<=0.0 || healthy_age_sec_>60.0)
+    throw std::invalid_argument("healthy_age_sec must be in (0,60]");
   receiver_age_observe_=declare_parameter<bool>("receiver_age_observe_enabled",false);
   receiver_age_device_=declare_parameter<std::string>("receiver_age_device","");
   receiver_age_baud_=declare_parameter<int>("receiver_age_baud",230400);
@@ -81,11 +89,30 @@ public:
   if(serial_enabled_)serial_=std::make_unique<dyx::rtcm::SerialRtcmSink>(serial_device_,serial_baud_);
   if(port_<1||port_>65535)throw std::invalid_argument("Invalid caster port");
   if(enabled_){(void)dyx::rtcm::request(host_,mount_,user_,pass_);worker_=std::thread([this]{loop();});}
+  const auto health_qos=rclcpp::QoS(1).reliable().transient_local();
+  healthy_pub_=create_publisher<std_msgs::msg::Bool>(
+    "/rtk_correction_bridge/healthy",health_qos);
+  age_pub_=create_publisher<std_msgs::msg::Float32>(
+    "/rtk_correction_bridge/correction_age_sec",health_qos);
   pub_=create_publisher<std_msgs::msg::String>("/rtk_correction_bridge/status",10);
   timer_=create_wall_timer(1s,[this]{
     std::lock_guard<std::mutex> lock(mu_);
+    // Age measures caster-received CRC-valid RTCM, NOT receiver-applied age.
+    // A stale/disconnected stream never reports healthy. No motion authority.
+    const double now=seconds();
+    const bool has_frame=last_frame_>0 && std::isfinite(last_frame_) && now>=last_frame_;
+    const double age=has_frame?now-last_frame_:std::numeric_limits<double>::infinity();
+    const bool healthy=enabled_ && receiving_ && has_frame && age<=healthy_age_sec_;
+    std_msgs::msg::Bool health_msg;
+    health_msg.data=healthy;
+    healthy_pub_->publish(health_msg);
+    std_msgs::msg::Float32 age_msg;
+    age_msg.data=std::isfinite(age)?static_cast<float>(std::min(age,1e6)):std::numeric_limits<float>::infinity();
+    age_pub_->publish(age_msg);
     std_msgs::msg::String m;
     m.data="CXX17_NTRIP;receiving="+std::string(receiving_?"true":"false")+
+      ";caster_rtcm_healthy="+std::string(healthy?"true":"false")+
+      ";healthy_age_limit_sec="+std::to_string(healthy_age_sec_)+
       ";valid_rtcm_frames="+std::to_string(valid_)+
       ";crc_rejected="+std::to_string(bad_)+
       ";last_frame_age_sec="+(last_frame_>0?std::to_string(seconds()-last_frame_):std::string("unavailable"))+
@@ -215,6 +242,9 @@ private:
  std::unique_ptr<dyx::rtcm::SerialRtcmSink> serial_;
  std::uint64_t serial_frames_{0},serial_faults_{0};
  std::uint64_t valid_{0},bad_{0};double last_frame_{-1};
+ double healthy_age_sec_{3.0};
+ rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr healthy_pub_;
+ rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr age_pub_;
  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_;rclcpp::TimerBase::SharedPtr timer_;
 };
 int main(int argc,char** argv){rclcpp::init(argc,argv);try{rclcpp::spin(std::make_shared<NtripObserver>());}catch(const std::exception&e){RCLCPP_ERROR(rclcpp::get_logger("rtk_correction_bridge"),"Startup failed: %s",e.what());rclcpp::shutdown();return 1;}rclcpp::shutdown();return 0;}
