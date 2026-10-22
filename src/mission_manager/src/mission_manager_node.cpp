@@ -3,6 +3,7 @@
 #include "dyx_mission_manager/native_command_mailbox.hpp"
 #include "dyx_mission_manager/native_mission_command_executor.hpp"
 #include "dyx_mission_manager/native_motion_authority.hpp"
+#include "dyx_mission_manager/native_authority_dispatch.hpp"
 #include "dyx_mission_manager/native_telemetry_safety_component.hpp"
 #include "dyx_mission_manager/rtk_safety_snapshot.hpp"
 #include "dyx_mission_manager/receiver_age_diagnostic.hpp"
@@ -311,15 +312,22 @@ class MissionManagerNode final : public rclcpp::Node {
     // STOP remains decision-side only; positive commands remain denied.
     const auto command_result = mission_command_executor_.drain(
         command_mailbox_, command_decisions_,
-        [this]() { owner_.force_stop(); },
+        [this]() { motion_authority_.stop(); owner_.force_stop(); },
         [this](const dyx::rpp::BackendMissionApiRequest& request) {
           // ROS executor is the only mission owner. This call cannot actuate.
           return owner_.handle_backend_action(request).accepted();
         },
-        [this](const dyx::rpp::BackendMissionApiRequest& request) {
-          // No positive dispatch here: classify command/stage for diagnostics.
-          return dyx::http_backend::assess_mission_transition(
-              request, owner_.mission().stage(), command_mailbox_.stopped_latched());
+        [this, now](const dyx::rpp::BackendMissionApiRequest& request) {
+          // Consult the independent authority model on the ROS owner thread.
+          // Its software eligibility is NEVER an actuator capability.
+          const auto decision = dyx::http_backend::assess_authority_dispatch(
+              motion_authority_, request, owner_.mission().stage(),
+              command_mailbox_.stopped_latched(), now);
+          last_authority_dispatch_reason_ = decision.authority.reason;
+          ++authority_dispatch_assessments_;
+          if (decision.authority.software_eligible)
+            ++authority_software_eligible_denied_;
+          return decision.transition;
         },
         upload_ingress_, load_ingress_,
         dyx::rpp::kBackendMissionStopPath,
@@ -1003,6 +1011,9 @@ class MissionManagerNode final : public rclcpp::Node {
         {"d1d_stage_eligible_denied", positive_stage_eligible_denied_},
         {"d1d_invalid_stage_denied", positive_invalid_stage_denied_},
         {"d1d_positive_dispatch_authorized", false},
+        {"b118_authority_dispatch_assessments", authority_dispatch_assessments_},
+        {"b118_authority_last_reason", last_authority_dispatch_reason_},
+        {"b118_authority_eligible_but_hardware_locked", authority_software_eligible_denied_},
         {"b117_motion_authority_stop_latched", motion_authority_.stop_latched()},
         {"b117_trusted_motion_lease_connected", false},
         {"b117_hardware_motion_authorized", false},
@@ -1082,6 +1093,9 @@ class MissionManagerNode final : public rclcpp::Node {
   dyx::http_backend::NativeTelemetrySafetyComponent telemetry_safety_{};
   dyx::http_backend::NativeMissionCommandExecutor mission_command_executor_{};
   dyx::http_backend::NativeMotionAuthority motion_authority_{};
+  std::string last_authority_dispatch_reason_{"NOT_EVALUATED"};
+  std::uint64_t authority_dispatch_assessments_{0};
+  std::uint64_t authority_software_eligible_denied_{0};
   dyx::http_backend::NativeMissionStateAudit mission_state_audit_{};
   dyx::rpp::NativeTerminalShadow terminal_shadow_{};
   dyx::rpp::NativePivotSequenceShadow pivot_sequence_shadow_{};

@@ -54,3 +54,13 @@ if(BUILD_TESTING)
   )
   add_test(NAME motion_authority_regression COMMAND test_motion_authority)
 endif()
+
+# B118: ROS-positive-command authority integration remains non-actuating.
+if(BUILD_TESTING)
+  add_executable(test_authority_dispatch test/test_authority_dispatch.cpp)
+  target_include_directories(test_authority_dispatch PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_mission_manager/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_rpp_cpp17_core/include
+  )
+  add_test(NAME authority_dispatch_regression COMMAND test_authority_dispatch)
+endif()
