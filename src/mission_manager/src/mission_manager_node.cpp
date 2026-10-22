@@ -275,6 +275,31 @@ class MissionManagerNode final : public rclcpp::Node {
     // This is not a PX4 hardware stop acknowledgment.
     if (telemetry_safety_.critical_battery_latched()) owner_.force_stop();
 
+    // Once PX4 estimator or yaw-rate telemetry has been observed,
+    // losing it is a mission STOP, not an automatic PAUSE/RESUME.
+    // Startup with missing hardware remains non-actuating.
+    const bool position_timed_out =
+        position_seen_ &&
+        (!std::isfinite(last_position_received_sec_) ||
+         now < last_position_received_sec_ ||
+         now - last_position_received_sec_ > 0.25);
+
+    const bool rover_rate_timed_out =
+        rover_rate_seen_ &&
+        (!std::isfinite(last_rover_rate_received_sec_) ||
+         now < last_rover_rate_received_sec_ ||
+         now - last_rover_rate_received_sec_ > 0.25);
+
+    if (position_timed_out || rover_rate_timed_out) {
+      position_fault_ = position_fault_ || position_timed_out;
+      rover_rate_fault_ = rover_rate_fault_ || rover_rate_timed_out;
+
+      if (!telemetry_loss_stop_latched_) {
+        owner_.force_stop();
+        telemetry_loss_stop_latched_ = true;
+      }
+    }
+
     const auto rtk_snapshot = dyx::http_backend::make_rtk_safety_snapshot(
         telemetry_safety_.rtk(), telemetry_safety_.rtcm(), now,
         false, false);  // No trusted receiver-age or positive safety adapters.
@@ -1040,6 +1065,7 @@ class MissionManagerNode final : public rclcpp::Node {
   rclcpp::Subscription<
       px4_msgs::msg::RoverRateStatus>::SharedPtr rover_rate_sub_;
 
+  bool telemetry_loss_stop_latched_{false};
   bool rover_rate_seen_{false};
   bool rover_rate_fault_{false};
   std::uint64_t last_rover_rate_timestamp_us_{0};
