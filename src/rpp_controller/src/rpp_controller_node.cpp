@@ -9,6 +9,7 @@
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rpp_interfaces/msg/rpp_preview.hpp>
+#include <rpp_interfaces/msg/rpp_command.hpp>
 #include <rpp_interfaces/msg/mission_safety_preview.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -41,6 +42,9 @@ public:
   // Distinct interface and topic from /rpp/command. No physical control path.
   shadow_pub_=create_publisher<rpp_interfaces::msg::RppPreview>(
     "/dyx/rpp/preview",rclcpp::QoS(5));
+  // Deliberately NOT /rpp/command: preview has no actuation authority.
+  shadow_command_pub_=create_publisher<rpp_interfaces::msg::RppCommand>(
+    "/dyx/rpp/shadow_command",rclcpp::QoS(5));
   declare_parameter<double>("lookahead_m",0.55);
   declare_parameter<double>("max_path_jump_m",0.5);
   declare_parameter<double>("preview_cruise_mps",0.6);
@@ -277,6 +281,29 @@ public:
    <<";correction_age_verified="<<(mission_correction_age_verified_?"true":"false")
    <<";mission_authorized=false;motion_authorized=false;physical_command_emitted=false";
   // A valid preview never confers START, motion, spray, or PX4 authority.
+  // Represent advisory guidance in the existing typed RPP command schema.
+  // This separate topic is NEVER consumed by the PX4 motor bridge.
+  rpp_interfaces::msg::RppCommand shadow_command{};
+  shadow_command.header = preview.header;
+  shadow_command.header.frame_id = "enu_shadow_not_authorized";
+  shadow_command.yaw_valid = false; // Hard stop if guidance/safety unavailable.
+  const bool preview_safe_to_calculate =
+      preview.guidance_valid && preview.pose_fresh && preview.semantic_valid &&
+      !safety_hold && std::isfinite(preview.preview_forward_mps) &&
+      std::isfinite(preview.preview_yaw_rate_enu_radps) &&
+      std::isfinite(preview.heading_enu_rad) &&
+      preview.preview_forward_mps >= 0.0 && preview.preview_forward_mps <= 1.0 &&
+      std::abs(preview.preview_yaw_rate_enu_radps) <= 0.18;
+  if (preview_safe_to_calculate) {
+    shadow_command.velocity_east_mps = preview.preview_forward_mps *
+        std::cos(preview.heading_enu_rad);
+    shadow_command.velocity_north_mps = preview.preview_forward_mps *
+        std::sin(preview.heading_enu_rad);
+    shadow_command.yaw_enu_rad = preview.heading_enu_rad;
+    shadow_command.yaw_rate_enu_radps = preview.preview_yaw_rate_enu_radps;
+    shadow_command.yaw_valid = true; // Numeric preview validity only; not authority.
+  }
+  shadow_command_pub_->publish(shadow_command);
   shadow_pub_->publish(preview);
   std_msgs::msg::String m;m.data=s.str();out_->publish(m);detail_->publish(m);
  }
@@ -302,6 +329,7 @@ public:
  dyx::rpp::MonotonicLegTracking leg_tracker_;
  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr out_,detail_;
  rclcpp::Publisher<rpp_interfaces::msg::RppPreview>::SharedPtr shadow_pub_;
+ rclcpp::Publisher<rpp_interfaces::msg::RppCommand>::SharedPtr shadow_command_pub_;
  rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr pos_;
  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_;
  rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr types_sub_;
