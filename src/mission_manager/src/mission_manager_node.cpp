@@ -20,6 +20,7 @@
 #include <px4_msgs/msg/sensor_gps.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
+#include <px4_msgs/msg/rover_rate_status.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/u_int64.hpp>
@@ -168,6 +169,31 @@ class MissionManagerNode final : public rclcpp::Node {
                 position_fault_ = true;
                 owner_.force_stop();
               }
+            });
+
+    rover_rate_sub_ =
+        create_subscription<px4_msgs::msg::RoverRateStatus>(
+            "/fmu/out/rover_rate_status",
+            rclcpp::SensorDataQoS(),
+            [this](px4_msgs::msg::RoverRateStatus::ConstSharedPtr msg) {
+              const double rate = msg->measured_yaw_rate;
+
+              if (msg->timestamp == 0 ||
+                  !std::isfinite(rate) ||
+                  (rover_rate_seen_ &&
+                   msg->timestamp <= last_rover_rate_timestamp_us_)) {
+                rover_rate_fault_ = true;
+                owner_.force_stop();
+                return;
+              }
+
+              rover_rate_seen_ = true;
+              last_rover_rate_timestamp_us_ = msg->timestamp;
+              last_rover_rate_received_sec_ = now_sec();
+
+              // PX4 NED yaw rate is clockwise-positive;
+              // mission RPP uses ENU counterclockwise-positive.
+              measured_yaw_rate_enu_radps_ = -rate;
             });
 
     trajectory_status_sub_ = create_subscription<std_msgs::msg::String>(
@@ -403,8 +429,16 @@ class MissionManagerNode final : public rclcpp::Node {
         now >= rpp_preview_received_sec_ &&
         now - rpp_preview_received_sec_ <= 0.25;
 
+    const bool rover_rate_fresh =
+        rover_rate_seen_ &&
+        !rover_rate_fault_ &&
+        std::isfinite(last_rover_rate_received_sec_) &&
+        now >= last_rover_rate_received_sec_ &&
+        now - last_rover_rate_received_sec_ <= 0.25;
+
     const bool rpp_guidance_valid =
         rpp_guidance_fresh &&
+        rover_rate_fresh &&
         last_rpp_preview_.path_revision != 0 &&
         last_rpp_preview_.pose_fresh &&
         last_rpp_preview_.semantic_valid &&
@@ -426,6 +460,9 @@ class MissionManagerNode final : public rclcpp::Node {
     if (rpp_guidance_valid &&
         position_seen_ && !position_fault_ &&
         std::isfinite(last_position_.heading_rad)) {
+      guidance.guidance.measured_yaw_rate_enu_radps =
+          measured_yaw_rate_enu_radps_;
+
       guidance.guidance.rover_yaw_enu_rad =
           dyx::rpp::wrap_angle(
               dyx::rpp::pi / 2.0 - last_position_.heading_rad);
@@ -995,6 +1032,15 @@ class MissionManagerNode final : public rclcpp::Node {
   rpp_interfaces::msg::RppPreview last_rpp_preview_{};
   bool rpp_preview_seen_{false};
   double rpp_preview_received_sec_{-1.0};
+
+  rclcpp::Subscription<
+      px4_msgs::msg::RoverRateStatus>::SharedPtr rover_rate_sub_;
+
+  bool rover_rate_seen_{false};
+  bool rover_rate_fault_{false};
+  std::uint64_t last_rover_rate_timestamp_us_{0};
+  double last_rover_rate_received_sec_{-1.0};
+  double measured_yaw_rate_enu_radps_{0.0};
 
   NativeControlOwner owner_{};
   dyx::http_backend::NativeTelemetrySafetyComponent telemetry_safety_{};
