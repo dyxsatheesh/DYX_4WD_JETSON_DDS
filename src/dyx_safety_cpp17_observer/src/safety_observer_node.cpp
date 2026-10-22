@@ -31,7 +31,7 @@ class DyxSafetyObserver final : public rclcpp::Node {
       throw std::invalid_argument("H6D unsupported PX4 GPS topic");
     const auto qos = rclcpp::SensorDataQoS();
     battery_sub_ = create_subscription<px4_msgs::msg::BatteryStatus>(
-      "/fmu/out/battery_status", qos,
+      "/fmu/out/battery_status_v1", qos,
       [this](px4_msgs::msg::BatteryStatus::ConstSharedPtr m) {
         dyx::rpp::DdsBatteryFrame f;
         f.timestamp_us=m->timestamp;
@@ -59,7 +59,7 @@ class DyxSafetyObserver final : public rclcpp::Node {
         gps_last_fix_=f.fix_type;
       });
     status_sub_ = create_subscription<px4_msgs::msg::VehicleStatus>(
-      "/fmu/out/vehicle_status", qos,
+      "/fmu/out/vehicle_status_v1", qos,
       [this](px4_msgs::msg::VehicleStatus::ConstSharedPtr m) {
         dyx::rpp::DdsVehicleFrame f;
         f.timestamp_us=m->timestamp;
@@ -72,7 +72,7 @@ class DyxSafetyObserver final : public rclcpp::Node {
         observe_result(telemetry_.observe_vehicle(f));
       });
     estimator_sub_ = create_subscription<px4_msgs::msg::VehicleLocalPosition>(
-      "/fmu/out/vehicle_local_position", qos,
+      "/fmu/out/vehicle_local_position_v1", qos,
       [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr m) {
         if (estimator_seen_ &&
             (m->xy_reset_counter!=initial_xy_reset_ ||

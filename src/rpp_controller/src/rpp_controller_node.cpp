@@ -51,7 +51,7 @@ public:
   declare_parameter<double>("accel_distance_m",0.8);
   declare_parameter<double>("decel_distance_m",0.8);
   declare_parameter<double>("rear_master_to_pivot_m",0.42);
-  pos_=create_subscription<px4_msgs::msg::VehicleLocalPosition>("/fmu/out/vehicle_local_position",rclcpp::SensorDataQoS(),
+  pos_=create_subscription<px4_msgs::msg::VehicleLocalPosition>("/fmu/out/vehicle_local_position_v1",rclcpp::SensorDataQoS(),
    [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr p){
     std::lock_guard<std::mutex> g(mu_);
     const auto now=std::chrono::steady_clock::now();

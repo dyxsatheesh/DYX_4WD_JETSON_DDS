@@ -57,7 +57,7 @@ class MissionManagerNode final : public rclcpp::Node {
 
     battery_sub_ =
         create_subscription<px4_msgs::msg::BatteryStatus>(
-            "/fmu/out/battery_status", qos,
+            "/fmu/out/battery_status_v1", qos,
             [this](px4_msgs::msg::BatteryStatus::ConstSharedPtr m) {
               dyx::rpp::DdsBatteryFrame f{};
               f.timestamp_us = m->timestamp;
@@ -93,7 +93,7 @@ class MissionManagerNode final : public rclcpp::Node {
 
     vehicle_sub_ =
         create_subscription<px4_msgs::msg::VehicleStatus>(
-            "/fmu/out/vehicle_status", qos,
+            "/fmu/out/vehicle_status_v1", qos,
             [this](px4_msgs::msg::VehicleStatus::ConstSharedPtr m) {
               dyx::rpp::DdsVehicleFrame f{};
               f.timestamp_us = m->timestamp;
@@ -115,7 +115,7 @@ class MissionManagerNode final : public rclcpp::Node {
 
     position_sub_ =
         create_subscription<px4_msgs::msg::VehicleLocalPosition>(
-            "/fmu/out/vehicle_local_position", qos,
+            "/fmu/out/vehicle_local_position_v1", qos,
             [this](
                 px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr m) {
               dyx::rpp::DdsEstimatorFrame f{};

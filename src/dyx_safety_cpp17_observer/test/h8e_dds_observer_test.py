@@ -19,17 +19,17 @@ class Harness(Node):
         self.statuses = []
 
         self.battery = self.create_publisher(
-            BatteryStatus, "/fmu/out/battery_status",
+            BatteryStatus, "/fmu/out/battery_status_v1",
             qos_profile_sensor_data)
         self.gps = self.create_publisher(
             SensorGps, "/fmu/out/vehicle_gps_position",
             qos_profile_sensor_data)
         self.vehicle = self.create_publisher(
-            VehicleStatus, "/fmu/out/vehicle_status",
+            VehicleStatus, "/fmu/out/vehicle_status_v1",
             qos_profile_sensor_data)
         self.position = self.create_publisher(
             VehicleLocalPosition,
-            "/fmu/out/vehicle_local_position",
+            "/fmu/out/vehicle_local_position_v1",
             qos_profile_sensor_data)
 
         self.sub = self.create_subscription(

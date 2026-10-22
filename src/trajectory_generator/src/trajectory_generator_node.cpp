@@ -52,7 +52,7 @@ public:
     declare_parameter<double>("interpolation_spacing_m",0.05);
     declare_parameter<std::string>("frame_id","map");
     origin_sub_ = create_subscription<px4_msgs::msg::VehicleLocalPosition>(
-      "/fmu/out/vehicle_local_position", rclcpp::SensorDataQoS(),
+      "/fmu/out/vehicle_local_position_v1", rclcpp::SensorDataQoS(),
       [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr m){
         std::lock_guard<std::mutex> lock(mutex_);
         dyx::trajectory::Px4OriginSample sample{};

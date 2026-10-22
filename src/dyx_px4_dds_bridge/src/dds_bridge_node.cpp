@@ -99,7 +99,7 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         });
     vehicle_status_sub_ =
         create_subscription<px4_msgs::msg::VehicleStatus>(
-            "/fmu/out/vehicle_status", rclcpp::SensorDataQoS(),
+            "/fmu/out/vehicle_status_v1", rclcpp::SensorDataQoS(),
             [this](const px4_msgs::msg::VehicleStatus::SharedPtr msg) {
               armed_ = (msg->arming_state ==
                         px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED);
