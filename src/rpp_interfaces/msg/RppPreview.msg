@@ -8,6 +8,7 @@ bool guidance_valid
 float64 preview_forward_mps
 float64 preview_yaw_rate_enu_radps
 float64 heading_enu_rad
+float64 target_heading_enu_rad
 float64 remaining_m
 bool motion_authorized
 string reason

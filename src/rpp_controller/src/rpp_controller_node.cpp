@@ -251,6 +251,9 @@ public:
         preview.preview_forward_mps = plan.forward_preview_mps;
         preview.preview_yaw_rate_enu_radps = plan.yaw_rate_preview_radps;
         preview.heading_enu_rad = heading_enu_;
+        preview.target_heading_enu_rad =
+            dyx::rpp::wrap_angle(
+                heading_enu_ + plan.heading_error_rad);
         preview.remaining_m = plan.remaining_m;
         // Preserve safety HOLD even when geometric guidance is valid.
         if (!safety_hold) preview.reason = "NON_ACTUATING_RPP_GEOMETRY_ONLY";

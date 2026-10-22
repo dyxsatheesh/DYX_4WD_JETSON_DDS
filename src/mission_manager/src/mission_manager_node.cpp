@@ -25,6 +25,7 @@
 #include <std_msgs/msg/u_int64.hpp>
 #include <rpp_interfaces/msg/mission_safety_preview.hpp>
 #include <rpp_interfaces/msg/rpp_command.hpp>
+#include <rpp_interfaces/msg/rpp_preview.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -183,6 +184,15 @@ class MissionManagerNode final : public rclcpp::Node {
           // independently trusted NativeRtcmAgeGuard or motion gates.
           receiver_age_diagnostic_.observe(m->data, now_sec());
         });
+    rpp_guidance_sub_ =
+        create_subscription<rpp_interfaces::msg::RppPreview>(
+            "/dyx/rpp/preview", rclcpp::QoS(5),
+            [this](rpp_interfaces::msg::RppPreview::ConstSharedPtr msg) {
+              last_rpp_preview_ = *msg;
+              rpp_preview_seen_ = true;
+              rpp_preview_received_sec_ = now_sec();
+            });
+
     heartbeat_pub_ = create_publisher<std_msgs::msg::UInt64>(
         "/dyx/mission/heartbeat", rclcpp::QoS(5));
 
@@ -383,6 +393,51 @@ class MissionManagerNode final : public rclcpp::Node {
     guidance.guidance.motion_enabled = false;
     guidance.guidance.telemetry_fresh = false;
     guidance.guidance.stop_requested = true;
+
+    // Mission-selected advisory path guidance. This cannot authorize
+    // START or physical motion.
+    const auto& selected = owner_.mission().status();
+    const bool rpp_guidance_fresh =
+        rpp_preview_seen_ &&
+        std::isfinite(rpp_preview_received_sec_) &&
+        now >= rpp_preview_received_sec_ &&
+        now - rpp_preview_received_sec_ <= 0.25;
+
+    const bool rpp_guidance_valid =
+        rpp_guidance_fresh &&
+        last_rpp_preview_.path_revision != 0 &&
+        last_rpp_preview_.pose_fresh &&
+        last_rpp_preview_.semantic_valid &&
+        last_rpp_preview_.guidance_valid &&
+        !last_rpp_preview_.motion_authorized &&
+        selected.stage == dyx::rpp::MissionStage::approaching &&
+        selected.current_marking <=
+            static_cast<std::size_t>(
+                std::numeric_limits<std::int32_t>::max()) &&
+        last_rpp_preview_.active_marking_index ==
+            static_cast<std::int32_t>(selected.current_marking) &&
+        std::isfinite(last_rpp_preview_.preview_forward_mps) &&
+        last_rpp_preview_.preview_forward_mps >= 0.0 &&
+        last_rpp_preview_.preview_forward_mps <= 1.0 &&
+        std::isfinite(last_rpp_preview_.target_heading_enu_rad) &&
+        std::abs(last_rpp_preview_.target_heading_enu_rad) <=
+            dyx::rpp::pi;
+
+    if (rpp_guidance_valid &&
+        position_seen_ && !position_fault_ &&
+        std::isfinite(last_position_.heading_rad)) {
+      guidance.guidance.rover_yaw_enu_rad =
+          dyx::rpp::wrap_angle(
+              dyx::rpp::pi / 2.0 - last_position_.heading_rad);
+      guidance.guidance.target_yaw_enu_rad =
+          last_rpp_preview_.target_heading_enu_rad;
+      guidance.guidance.requested_forward_speed_mps =
+          last_rpp_preview_.preview_forward_mps;
+    }
+
+    // Measured yaw rate, calibrated reference and trusted safety
+    // are NOT yet connected; motion remains disabled.
+
 
     const auto result = owner_.tick(
         now,
@@ -935,6 +990,12 @@ class MissionManagerNode final : public rclcpp::Node {
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr trajectory_status_sub_;
   dyx::http_backend::ReceiverAgeDiagnostic receiver_age_diagnostic_{};
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr receiver_age_diagnostic_sub_;
+  rclcpp::Subscription<
+      rpp_interfaces::msg::RppPreview>::SharedPtr rpp_guidance_sub_;
+  rpp_interfaces::msg::RppPreview last_rpp_preview_{};
+  bool rpp_preview_seen_{false};
+  double rpp_preview_received_sec_{-1.0};
+
   NativeControlOwner owner_{};
   dyx::http_backend::NativeTelemetrySafetyComponent telemetry_safety_{};
   dyx::http_backend::NativeMissionCommandExecutor mission_command_executor_{};
