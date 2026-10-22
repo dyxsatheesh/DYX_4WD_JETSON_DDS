@@ -64,3 +64,12 @@ if(BUILD_TESTING)
   )
   add_test(NAME authority_dispatch_regression COMMAND test_authority_dispatch)
 endif()
+
+# B119: verify complete *non-actuating* mission sequencer lifecycle.
+if(BUILD_TESTING)
+  add_executable(test_mission_lifecycle test/test_mission_lifecycle.cpp)
+  target_include_directories(test_mission_lifecycle PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_rpp_cpp17_core/include
+  )
+  add_test(NAME mission_lifecycle_regression COMMAND test_mission_lifecycle)
+endif()
