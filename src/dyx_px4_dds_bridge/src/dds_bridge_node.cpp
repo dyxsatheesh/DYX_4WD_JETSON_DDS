@@ -246,11 +246,39 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
 
     // PRE-COMMISSIONING: diagnostics only. No PX4 command is published.
     // The constructor rejects enable_motion=true, even with ROS overrides.
-    const bool command_fresh =
+    // Mission health and motion authorization are distinct.
+    // This ROS preview is only a conservative rejection input;
+    // it is not proof of operator authorization or hardware safety.
+    const bool mission_heartbeat_fresh =
+        !heartbeat_fault_latched_ &&
+        fresh(have_heartbeat_, heartbeat_received_,
+              heartbeat_timeout_s_);
+
+    const bool mission_safety_fresh =
+        fresh(mission_safety_seen_,
+              mission_safety_received_,
+              safety_input_timeout_s_);
+
+    const bool mission_preview_allows_staging =
+        mission_safety_fresh &&
+        !mission_preview_stop_ &&
+        mission_preview_authorized_ &&
+        mission_preview_rtk_fixed_ &&
+        mission_preview_correction_age_verified_;
+
+    const bool rpp_input_fresh =
         have_rpp_ && latest_rpp_.valid &&
-        fresh(true, rpp_received_, command_timeout_s_) &&
+        fresh(true, rpp_received_, command_timeout_s_);
+
+    const bool heading_fresh =
         heading_valid_ &&
         fresh(heading_seen_, heading_received_, 0.25);
+
+    const bool command_fresh =
+        rpp_input_fresh &&
+        heading_fresh &&
+        mission_heartbeat_fresh &&
+        mission_preview_allows_staging;
     const auto timestamp_ns = get_clock()->now().nanoseconds();
     const auto prepared = dyx::bridge::prepare_rover_setpoints(
         latest_wire_,
@@ -337,6 +365,14 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         ";native_mission_heartbeat_fault=" +
             std::string(heartbeat_fault_latched_ ? "true" : "false") +
         ";native_mission_heartbeat_authorizes_motion=false" +
+        ";rpp_input_fresh=" +
+            std::string(rpp_input_fresh ? "true" : "false") +
+        ";mission_heartbeat_fresh=" +
+            std::string(mission_heartbeat_fresh ? "true" : "false") +
+        ";mission_safety_gate_ready=" +
+            std::string(mission_preview_allows_staging ? "true" : "false") +
+        ";heading_fresh=" +
+            std::string(heading_fresh ? "true" : "false") +
         ";native_wire_valid=" +
             std::string(latest_wire_.valid ? "true" : "false") +
         ";native_wire_fresh=" +
