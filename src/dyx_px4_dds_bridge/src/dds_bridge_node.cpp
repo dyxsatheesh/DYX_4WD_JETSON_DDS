@@ -3,6 +3,7 @@
 #include "dyx_px4_dds_bridge/safety_freshness.hpp"
 #include "dyx_px4_dds_bridge/bridge_commissioning_guard.hpp"
 #include "dyx_px4_dds_bridge/native_rover_dds_contract.hpp"
+#include "dyx_px4_dds_bridge/rover_setpoint_builder.hpp"
 #include "dyx_px4_dds_bridge/native_writer_arbitration.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -201,6 +202,14 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         fresh(true, rpp_received_, command_timeout_s_) &&
         heading_valid_ &&
         fresh(heading_seen_, heading_received_, 0.25);
+    const auto timestamp_ns = get_clock()->now().nanoseconds();
+    const auto prepared = dyx::bridge::prepare_rover_setpoints(
+        latest_wire_,
+        timestamp_ns > 0
+            ? static_cast<std::uint64_t>(timestamp_ns / 1000)
+            : 0,
+        command_fresh);
+
     if (++tick_count_ % 50 != 0) return;
 
     try {
@@ -246,6 +255,13 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
             std::to_string(command_fresh ? latest_wire_.speed_body_x : 0.0f) +
         ";native_yaw_rate_ned_radps=" +
             std::to_string(command_fresh ? latest_wire_.yaw_rate_setpoint : 0.0f) +
+        ";px4_setpoints_prepared=" +
+            std::string(prepared.valid ? "true" : "false") +
+        ";px4_offboard_velocity_flag=" +
+            std::string(
+                prepared.valid && prepared.mode.velocity
+                ? "true" : "false") +
+        ";px4_setpoint_publish_authorized=false" +
         ";native_wire_publish_authorized=false" +
         ";motor_commands_enabled=false;physical_command_emitted=false";
     status_pub_->publish(status);
