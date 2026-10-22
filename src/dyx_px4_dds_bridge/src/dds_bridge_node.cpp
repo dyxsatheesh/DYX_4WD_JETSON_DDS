@@ -72,7 +72,7 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         "/dyx_px4_dds_bridge/status", rclcpp::QoS(10));
 
     rpp_sub_ = create_subscription<rpp_interfaces::msg::RppCommand>(
-        "/rpp/command", input_qos,
+        "/dyx/mission/owned_rpp_command", input_qos,
         [this](const rpp_interfaces::msg::RppCommand::SharedPtr msg) {
           latest_rpp_ = dyx::convert_rpp(
               msg->velocity_north_mps, msg->velocity_east_mps,

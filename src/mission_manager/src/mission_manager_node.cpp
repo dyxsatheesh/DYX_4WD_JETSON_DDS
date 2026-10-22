@@ -24,6 +24,7 @@
 #include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/u_int64.hpp>
 #include <rpp_interfaces/msg/mission_safety_preview.hpp>
+#include <rpp_interfaces/msg/rpp_command.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -184,6 +185,10 @@ class MissionManagerNode final : public rclcpp::Node {
         });
     heartbeat_pub_ = create_publisher<std_msgs::msg::UInt64>(
         "/dyx/mission/heartbeat", rclcpp::QoS(5));
+
+    owned_command_pub_ =
+        create_publisher<rpp_interfaces::msg::RppCommand>(
+            "/dyx/mission/owned_rpp_command", rclcpp::QoS(5));
 
     safety_preview_pub_ = create_publisher<rpp_interfaces::msg::MissionSafetyPreview>(
         "/dyx/mission/safety_preview", rclcpp::QoS(5));
@@ -386,6 +391,49 @@ class MissionManagerNode final : public rclcpp::Node {
         true,
         evidence,
         guidance);
+
+    // Only the single mission owner may emit this command.
+    // No permission is manufactured from RPP previews or ROS Booleans.
+    rpp_interfaces::msg::RppCommand owned_command{};
+    owned_command.header.stamp = get_clock()->now();
+    owned_command.header.frame_id = "enu_mission_owned";
+
+    const bool owned_pose_fresh =
+        position_seen_ && !position_fault_ &&
+        std::isfinite(last_position_received_sec_) &&
+        now >= last_position_received_sec_ &&
+        now - last_position_received_sec_ <= 0.25 &&
+        last_position_.xy_valid &&
+        last_position_.v_xy_valid &&
+        last_position_.heading_good_for_control &&
+        !last_position_.dead_reckoning &&
+        std::isfinite(last_position_.heading_rad);
+
+    const bool owned_command_permitted =
+        result.motion.permitted &&
+        !result.motion.latched &&
+        owned_pose_fresh &&
+        !telemetry_fault_ &&
+        !timing_fault_ &&
+        !command_mailbox_.stopped_latched() &&
+        !owner_.safe_stop_requested();
+
+    if (owned_command_permitted) {
+      owned_command.velocity_north_mps = result.motion.north_mps;
+      owned_command.velocity_east_mps = result.motion.east_mps;
+      owned_command.yaw_enu_rad =
+          dyx::rpp::wrap_angle(
+              dyx::rpp::pi / 2.0 - last_position_.heading_rad);
+      owned_command.yaw_rate_enu_radps =
+          result.motion.yaw_rate_enu_radps;
+      owned_command.yaw_valid = true;
+    } else {
+      // Invalid zero command: downstream MUST NOT interpret this
+      // as an authorized zero-speed offboard control heartbeat.
+      owned_command.yaw_valid = false;
+    }
+
+    owned_command_pub_->publish(owned_command);
 
     // D1B: explicit missing prerequisites, NOT a physical safety grant.
     // Trusted interfaces and physical commissioning are deliberately false.
@@ -947,6 +995,7 @@ class MissionManagerNode final : public rclcpp::Node {
   rclcpp::Subscription<
       px4_msgs::msg::VehicleLocalPosition>::SharedPtr position_sub_;
   rclcpp::Publisher<rpp_interfaces::msg::MissionSafetyPreview>::SharedPtr safety_preview_pub_;
+  rclcpp::Publisher<rpp_interfaces::msg::RppCommand>::SharedPtr owned_command_pub_;
 
   rclcpp::Publisher<
       std_msgs::msg::String>::SharedPtr status_pub_;
