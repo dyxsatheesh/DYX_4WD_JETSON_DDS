@@ -1,6 +1,7 @@
 // DYX native C++17 NTRIP RTCM receiver. No serial/PX4/actuator publishers.
 #include "rtcm3.hpp"
 #include "serial_rtcm_sink.hpp"
+#include "injection_ownership_lock.hpp"
 #include "receiver_gga_age.hpp"
 #include "receiver_age_serial.hpp"
 #include "ntrip_protocol.hpp"
@@ -82,11 +83,16 @@ public:
     if(receiver_age_device_.empty() || (serial_enabled_ && receiver_age_device_==serial_device_))
       throw std::invalid_argument("Receiver age requires an exclusive, separate receiver output port");
     receiver_age_serial_=std::make_unique<dyx::rtcm::ReceiverAgeSerial>(receiver_age_device_,receiver_age_baud_);
-    age_worker_=std::thread([this]{age_loop();});
+    // Start the diagnostic reader only after constructor validation.
   }
   if(serial_enabled_ && (!serial_commissioned_ || !enabled_ || serial_device_.empty()))
     throw std::invalid_argument("RTCM_SERIAL_REQUIRES_EXPLICIT_COMMISSIONING_AND_NTRIP");
-  if(serial_enabled_)serial_=std::make_unique<dyx::rtcm::SerialRtcmSink>(serial_device_,serial_baud_);
+  if(serial_enabled_){
+    // Global RTCM injection ownership, compatible with the legacy process.
+    // Never open the receiver serial writer without exclusive ownership.
+    injection_lock_=std::make_unique<dyx::rtcm::InjectionOwnershipLock>();
+    serial_=std::make_unique<dyx::rtcm::SerialRtcmSink>(serial_device_,serial_baud_);
+  }
   if(port_<1||port_>65535)throw std::invalid_argument("Invalid caster port");
   if(enabled_){(void)dyx::rtcm::request(host_,mount_,user_,pass_);worker_=std::thread([this]{loop();});}
   const auto health_qos=rclcpp::QoS(1).reliable().transient_local();
@@ -130,6 +136,7 @@ public:
       ";rtk_fixed_verified=false;motion_authorized=false";
     pub_->publish(m);
   });
+  if(receiver_age_observe_) age_worker_=std::thread([this]{age_loop();});
  }
  ~NtripObserver()override{stop_=true;if(worker_.joinable())worker_.join();if(age_worker_.joinable())age_worker_.join();}
 private:
@@ -239,6 +246,7 @@ private:
  std::mutex mu_;std::string state_{"DISABLED"};bool receiving_{false},enabled_{false},tls_required_{true};
  std::string host_,mount_,user_,pass_,serial_device_;int port_{2101},serial_baud_{230400};
  bool serial_enabled_{false},serial_commissioned_{false};
+ std::unique_ptr<dyx::rtcm::InjectionOwnershipLock> injection_lock_;
  std::unique_ptr<dyx::rtcm::SerialRtcmSink> serial_;
  std::uint64_t serial_frames_{0},serial_faults_{0};
  std::uint64_t valid_{0},bad_{0};double last_frame_{-1};
