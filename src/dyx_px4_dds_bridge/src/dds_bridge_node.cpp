@@ -5,6 +5,7 @@
 #include "dyx_px4_dds_bridge/wheel_lift_gate.hpp"
 #include "dyx_px4_dds_bridge/bench_command_pipeline.hpp"
 #include "dyx_px4_dds_bridge/bench_transport_interlock.hpp"
+#include "dyx_px4_dds_bridge/commissioned_output_gate.hpp"
 #include "dyx_px4_dds_bridge/native_rover_dds_contract.hpp"
 #include "dyx_px4_dds_bridge/rover_setpoint_builder.hpp"
 #include "dyx_px4_dds_bridge/native_writer_arbitration.hpp"
@@ -272,7 +273,7 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
             : 0,
         command_fresh);
 
-    if (++tick_count_ % 50 != 0) return;
+    // Output policy is evaluated at every 20 ms tick; diagnostics are throttled below.
 
     try {
     const auto mode = count_publishers("/fmu/in/offboard_control_mode");
@@ -285,6 +286,39 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     counts.legacy_trajectory = count_publishers("/fmu/in/trajectory_setpoint");
     counts.rover_attitude = count_publishers("/fmu/in/rover_attitude_setpoint");
     const auto graph = dyx::bridge::inspect_writer_graph(counts, true, false);
+    // Real PX4 output calls are implemented, but fail closed. None of the
+    // ROS Bool topics or operator-written parameters proves a *physical*
+    // interlock or deadman. Those inputs must arrive via a separately
+    // certified hardware adapter before this writer may operate.
+    dyx::bridge::CommissionedEvidence output_evidence{};
+    output_evidence.requested_enable = enable_motion_;
+    output_evidence.px4_status_fresh = fresh(have_px4_status_, px4_status_received_, 0.25);
+    output_evidence.px4_armed = armed_;
+    output_evidence.px4_offboard = in_offboard_;
+    output_evidence.mission_stop = mission_preview_stop_;
+    output_evidence.mission_authorized = mission_preview_authorized_ && mission_safety_fresh;
+    output_evidence.command_fresh = command_fresh;
+    output_evidence.heartbeat_fresh = mission_heartbeat_fresh;
+    output_evidence.estimator_valid = heading_fresh;
+    output_evidence.writer_quiet = graph.graph_quiet;
+    output_evidence.estop_fresh = fresh(have_estop_, estop_received_, 0.25);
+    output_evidence.estop_released_verified = false;  // ROS is not physical proof.
+    output_evidence.independent_hardware_interlock_ok = false;
+    output_evidence.operator_deadman_verified = false;
+    output_evidence.rc_takeover_verified = false;
+    output_evidence.forward_mps = latest_wire_.speed_body_x;
+    output_evidence.yaw_rate_radps = latest_wire_.yaw_rate_setpoint;
+    const auto output_decision = dyx::bridge::evaluate_commissioned_output(output_evidence);
+    if (output_decision.allow_publish && prepared.valid && prepared.publish_authorized) {
+      // Only executed after hardware adapter + controller authorization
+      // are independently implemented, reviewed and bench-tested.
+      px4_mode_pub_->publish(prepared.mode);
+      px4_rover_speed_pub_->publish(prepared.speed);
+      px4_rover_rate_pub_->publish(prepared.rate);
+    }
+
+    if (++tick_count_ % 50 != 0) return;
+
     // Native bench pipeline validates candidate conversion but NEVER sends PX4 outputs.
     dyx::bridge::BenchCommandInput bench_input{};
     bench_input.motion_request_seen = have_rpp_;
@@ -419,7 +453,9 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         ";sim_transport_latched=" +
            std::string(simulated_receipt.latched_stop ? "true" : "false") +
         ";sim_transport_reason=" + simulated_receipt.reason +
-        ";sim_transport_physical_authorized=false";
+        ";sim_transport_physical_authorized=false" +
+        ";commissioned_output_policy_reason=" + output_decision.reason +
+        ";commissioned_output_policy_authorized=false";
     status_pub_->publish(status);
     } catch (const std::exception&) {
       // Graph operations can race with Ctrl+C context shutdown.
