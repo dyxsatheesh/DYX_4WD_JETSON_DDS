@@ -50,6 +50,8 @@ public:
     declare_parameter<double>("diagnostic_px4_origin_longitude_deg", 999.0);
     declare_parameter<bool>("explicit_enu_preparation_enabled", false);
     declare_parameter<bool>("extension_enabled",false);
+    // Zero-based marking point indices for operator-skipped row-end extensions.
+    declare_parameter<std::vector<int64_t>>("skip_row_end_indices", std::vector<int64_t>{});
     declare_parameter<double>("extension_distance_m",4.0);
     declare_parameter<double>("extension_trigger_m",3.0);
     declare_parameter<double>("interpolation_spacing_m",0.05);
@@ -150,6 +152,13 @@ private:
     }
     dyx::rpp::TrajectoryBuildConfig cfg;
     cfg.extension_enabled=get_parameter("extension_enabled").as_bool();
+    const auto skips=get_parameter("skip_row_end_indices").as_integer_array();
+    for (const auto index : skips) {
+      if (index < 0 || static_cast<std::size_t>(index) >= source.size()-1)
+        throw std::invalid_argument("INVALID_ROW_END_SKIP_INDEX");
+      if (!cfg.skip_row_end_indices.insert(static_cast<std::size_t>(index)).second)
+        throw std::invalid_argument("DUPLICATE_ROW_END_SKIP_INDEX");
+    }
     cfg.extension_distance_m=get_parameter("extension_distance_m").as_double();
     cfg.extension_trigger_m=get_parameter("extension_trigger_m").as_double();
     cfg.interpolation_spacing_m=get_parameter("interpolation_spacing_m").as_double();
@@ -173,6 +182,13 @@ private:
     std::ostringstream summary;summary<<"ENU_PREVIEW_ONLY:n="<<source.size()<<":nav="<<nav_.poses.size()
                                     <<":dummy="<<result.dummy_count;
     signature_.data=summary.str();
+    // Explain operator choices; these are diagnostic decisions, not motion authorizations.
+    std::ostringstream transitions;
+    for (const auto &row : result.transitions) {
+      transitions << ";row" << row.from_marking_index << "="
+                  << dyx::rpp::row_transition_name(row.reason);
+    }
+    signature_.data += transitions.str();
     survey_.data=geodetic_survey;
     if (using_live_geo && !origin_guard_.good(std::chrono::steady_clock::now()))
       throw std::runtime_error("PX4 origin changed during trajectory compilation");

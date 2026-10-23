@@ -39,4 +39,10 @@ if(BUILD_TESTING)
     NAME geo_origin_regression
     COMMAND test_geo_origin
   )
+
+  add_executable(test_row_end_skip test_row_end_skip.cpp)
+  target_include_directories(test_row_end_skip PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_rpp_cpp17_core/include)
+  target_compile_options(test_row_end_skip PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME row_end_skip_regression COMMAND test_row_end_skip)
 endif()
