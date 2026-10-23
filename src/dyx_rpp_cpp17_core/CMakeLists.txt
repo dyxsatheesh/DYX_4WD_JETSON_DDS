@@ -13,6 +13,8 @@ if(BUILD_TESTING)
   foreach(test_name IN ITEMS
     path_index_native_test
     native_active_leg_integration_test
+    native_rpp_executor_test
+    native_mission_rpp_pipeline_test
   )
     add_executable(
       ${test_name}
