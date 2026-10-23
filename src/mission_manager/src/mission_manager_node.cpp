@@ -230,6 +230,26 @@ class MissionManagerNode final : public rclcpp::Node {
           // independently trusted NativeRtcmAgeGuard or motion gates.
           receiver_age_diagnostic_.observe(m->data, now_sec());
         });
+    // DYX_B197_OBSERVER_INTEGRATION
+    // Diagnostic observations only; neither can authorize motion.
+    obstacle_observation_sub_ =
+        create_subscription<std_msgs::msg::String>(
+            "/obstacle/status", rclcpp::QoS(10),
+            [this](std_msgs::msg::String::ConstSharedPtr msg) {
+              obstacle_observation_seen_ = true;
+              obstacle_observation_time_ = now_sec();
+              obstacle_observation_ = msg->data.substr(0, 512);
+            });
+
+    spray_observation_sub_ =
+        create_subscription<std_msgs::msg::String>(
+            "/dyx/spray_controller/observation", rclcpp::QoS(5),
+            [this](std_msgs::msg::String::ConstSharedPtr msg) {
+              spray_observation_seen_ = true;
+              spray_observation_time_ = now_sec();
+              spray_observation_ = msg->data.substr(0, 512);
+            });
+
     rpp_guidance_sub_ =
         create_subscription<rpp_interfaces::msg::RppPreview>(
             "/dyx/rpp/preview", rclcpp::QoS(5),
@@ -1085,6 +1105,18 @@ class MissionManagerNode final : public rclcpp::Node {
         {"d4b_spray_eligibility_diagnostic", spray_shadow.eligibility_diagnostic},
         {"d4b_spray_dispatch_authorized", false},
         {"d4b_spray_physical_off_verified", false},
+        {"obstacle_observation_fresh",
+          obstacle_observation_seen_ &&
+          now >= obstacle_observation_time_ &&
+          now - obstacle_observation_time_ <= 0.5},
+        {"spray_observation_fresh",
+          spray_observation_seen_ &&
+          now >= spray_observation_time_ &&
+          now - spray_observation_time_ <= 0.5},
+        {"obstacle_observation_diagnostic", obstacle_observation_},
+        {"spray_observation_diagnostic", spray_observation_},
+        {"obstacle_observation_motion_authorized", false},
+        {"spray_observation_actuation_authorized", false},
         {"mission_start_enabled", false},
         {"http_upload_staging_only", true},
         {"px4_disarmed_attestation_fresh", !telemetry_fault_ &&
@@ -1101,6 +1133,18 @@ class MissionManagerNode final : public rclcpp::Node {
         {"physical_command_emitted", false}
     });
   }
+
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr
+      obstacle_observation_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr
+      spray_observation_sub_;
+
+  bool obstacle_observation_seen_{false};
+  bool spray_observation_seen_{false};
+  double obstacle_observation_time_{-1.0};
+  double spray_observation_time_{-1.0};
+  std::string obstacle_observation_{"UNAVAILABLE"};
+  std::string spray_observation_{"UNAVAILABLE"};
 
   bool trajectory_seen_{false};
   std::string trajectory_status_{"UNAVAILABLE"};
