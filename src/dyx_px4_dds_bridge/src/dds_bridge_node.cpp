@@ -2,6 +2,7 @@
 #include "dyx_px4_dds_bridge/body_speed_projection.hpp"
 #include "dyx_px4_dds_bridge/safety_freshness.hpp"
 #include "dyx_px4_dds_bridge/bridge_commissioning_guard.hpp"
+#include "dyx_px4_dds_bridge/wheel_lift_gate.hpp"
 #include "dyx_px4_dds_bridge/native_rover_dds_contract.hpp"
 #include "dyx_px4_dds_bridge/rover_setpoint_builder.hpp"
 #include "dyx_px4_dds_bridge/native_writer_arbitration.hpp"
@@ -282,6 +283,20 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     counts.legacy_trajectory = count_publishers("/fmu/in/trajectory_setpoint");
     counts.rover_attitude = count_publishers("/fmu/in/rover_attitude_setpoint");
     const auto graph = dyx::bridge::inspect_writer_graph(counts, true, false);
+    // Precommissioning diagnostics only. Do not infer mechanical safety from ROS topics.
+    dyx::bridge::WheelLiftEvidence commissioning{};
+    commissioning.px4_armed = armed_;
+    commissioning.offboard_active = in_offboard_;
+    commissioning.px4_status_fresh = fresh(have_px4_status_, px4_status_received_, 0.25);
+    commissioning.command_fresh = command_fresh;
+    commissioning.heartbeat_fresh = mission_heartbeat_fresh;
+    commissioning.estop_signal_fresh = fresh(have_estop_, estop_received_, 0.25);
+    commissioning.estop_asserted = emergency_stop_;
+    commissioning.writer_graph_quiet = graph.graph_quiet;
+    commissioning.speed_mps = latest_wire_.speed_body_x;
+    commissioning.yaw_rate_radps = latest_wire_.yaw_rate_setpoint;
+    // Physical confirmation / takeover / certification are NOT attested on this bench.
+    const auto wheel_lift = dyx::bridge::inspect_wheel_lift(commissioning);
     std_msgs::msg::String status;
     status.data = std::string("INHIBITED:NATIVE_ROVER_DDS_NON_ACTUATING") +
         ";native_rover_publishers_created=true" +
@@ -371,7 +386,9 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
                 ? "true" : "false") +
         ";px4_setpoint_publish_authorized=false" +
         ";native_wire_publish_authorized=false" +
-        ";motor_commands_enabled=false;physical_command_emitted=false";
+        ";motor_commands_enabled=false;physical_command_emitted=false" +
+        ";wheel_lift_gate_reason=" + wheel_lift.reason +
+        ";wheel_lift_publish_authorized=false";
     status_pub_->publish(status);
     } catch (const std::exception&) {
       // Graph operations can race with Ctrl+C context shutdown.
