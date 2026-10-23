@@ -2,6 +2,7 @@
 // No VehicleCommand, TrajectorySetpoint, OffboardControlMode or actuator publishers.
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <rpp_interfaces/msg/rpp_preview.hpp>
 #include "jetson_4wd_control/stream_observation.hpp"
 #include <chrono>
 #include <memory>
@@ -19,9 +20,9 @@ public:
       });
     // DYX_CXX17_CONSOLIDATED_PARITY: observe upstream traffic without
     // publishing any physical command or modifying DDS command ownership.
-    rpp_preview_sub_ = create_subscription<std_msgs::msg::String>(
-      "/dyx/rpp/preview", rclcpp::QoS(10),
-      [this](std_msgs::msg::String::ConstSharedPtr) {
+    rpp_preview_sub_ = create_subscription<rpp_interfaces::msg::RppPreview>(
+      "/dyx/rpp/preview", rclcpp::QoS(5),
+      [this](rpp_interfaces::msg::RppPreview::ConstSharedPtr) {
         rpp_preview_stats_.observe(monotonic_sec());
       });
     obstacle_sub_ = create_subscription<std_msgs::msg::String>(
@@ -64,7 +65,7 @@ private:
   dyx::control::StreamObservation rpp_preview_stats_{};
   dyx::control::StreamObservation obstacle_stats_{};
   bool observed_obstacle_near_{false};
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr rpp_preview_sub_;
+  rclcpp::Subscription<rpp_interfaces::msg::RppPreview>::SharedPtr rpp_preview_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr obstacle_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_;
   rclcpp::TimerBase::SharedPtr timer_;
