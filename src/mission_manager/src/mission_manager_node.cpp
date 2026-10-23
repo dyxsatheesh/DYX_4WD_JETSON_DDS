@@ -25,6 +25,7 @@
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/rover_rate_status.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/u_int64.hpp>
 #include <rpp_interfaces/msg/mission_safety_preview.hpp>
@@ -211,6 +212,17 @@ class MissionManagerNode final : public rclcpp::Node {
           trajectory_seen_ = true;
           trajectory_status_ = m->data.substr(0, 160);
         });
+    // DYX_B195_TRAJECTORY_INTEGRATION
+    // Preview readiness is diagnostic evidence, never motion authority.
+    trajectory_preview_sub_ = create_subscription<std_msgs::msg::Bool>(
+        "/trajectory_generator/preview_ready",
+        rclcpp::QoS(1).reliable().transient_local(),
+        [this](std_msgs::msg::Bool::ConstSharedPtr m) {
+          trajectory_preview_seen_ = true;
+          trajectory_preview_ready_ = m->data;
+          trajectory_preview_received_sec_ = now_sec();
+        });
+
     receiver_age_diagnostic_sub_ = create_subscription<std_msgs::msg::String>(
         "/rtk_correction_bridge/status", rclcpp::QoS(10),
         [this](std_msgs::msg::String::ConstSharedPtr m) {
@@ -478,7 +490,20 @@ class MissionManagerNode final : public rclcpp::Node {
         now >= last_rover_rate_received_sec_ &&
         now - last_rover_rate_received_sec_ <= 0.25;
 
+    // A prepared diagnostic trajectory is required before evaluating
+    // advisory RPP guidance. Stale or cleared trajectories invalidate it.
+    // This cannot grant START or physical motion permission.
+    const bool trajectory_preview_fresh =
+        trajectory_preview_seen_ &&
+        std::isfinite(trajectory_preview_received_sec_) &&
+        now >= trajectory_preview_received_sec_ &&
+        now - trajectory_preview_received_sec_ <= 2.5;
+
+    const bool trajectory_preview_usable =
+        trajectory_preview_fresh && trajectory_preview_ready_;
+
     const bool rpp_guidance_valid =
+        trajectory_preview_usable &&
         rpp_guidance_fresh &&
         rover_rate_fresh &&
         last_rpp_preview_.path_revision != 0 &&
@@ -1079,7 +1104,11 @@ class MissionManagerNode final : public rclcpp::Node {
 
   bool trajectory_seen_{false};
   std::string trajectory_status_{"UNAVAILABLE"};
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr trajectory_status_sub_;
+   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr trajectory_status_sub_;
+   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr trajectory_preview_sub_;
+   bool trajectory_preview_seen_{false};
+   bool trajectory_preview_ready_{false};
+   double trajectory_preview_received_sec_{-1.0};
   dyx::http_backend::ReceiverAgeDiagnostic receiver_age_diagnostic_{};
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr receiver_age_diagnostic_sub_;
   rclcpp::Subscription<

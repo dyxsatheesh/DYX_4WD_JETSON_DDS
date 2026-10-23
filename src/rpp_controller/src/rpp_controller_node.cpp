@@ -247,6 +247,21 @@ public:
          <<";tracked_lookahead_east_m="<<tracked.lookahead.x
          <<";tracked_lookahead_north_m="<<tracked.lookahead.y
          <<";tracked_clamped="<<(tracked.monotonic_clamped?"true":"false");
+        // DYX_B194_FORWARD_ONLY: reverse-then-pivot is excluded.
+        // Do not publish usable guidance for a reverse maneuver.
+        const bool forward_only_plan =
+            !plan.reverse_pivot_required &&
+            std::isfinite(plan.forward_preview_mps) &&
+            plan.forward_preview_mps >= 0.0 &&
+            plan.forward_preview_mps <= 1.0 &&
+            std::isfinite(plan.yaw_rate_preview_radps) &&
+            std::abs(plan.yaw_rate_preview_radps) <= 0.18;
+
+        if (!forward_only_plan) {
+          throw std::runtime_error(
+              "FORWARD_ONLY_POLICY_REJECTED_REVERSE_OR_INVALID_PLAN");
+        }
+
         preview.guidance_valid = true;
         preview.preview_forward_mps = plan.forward_preview_mps;
         preview.preview_yaw_rate_enu_radps = plan.yaw_rate_preview_radps;

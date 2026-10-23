@@ -36,6 +36,9 @@ public:
     signature_pub_ = create_publisher<std_msgs::msg::String>("/trajectory_generator/path_signature", qos);
     survey_pub_ = create_publisher<std_msgs::msg::String>("/trajectory_generator/survey_targets", qos);
     ready_pub_ = create_publisher<std_msgs::msg::Bool>("/trajectory_generator/ready", qos);
+    // DYX_B194_PREVIEW_READY: diagnostic geometry, never motion authority.
+    preview_ready_pub_ = create_publisher<std_msgs::msg::Bool>(
+        "/trajectory_generator/preview_ready", qos);
     status_pub_ = create_publisher<std_msgs::msg::String>("/trajectory_generator/status", qos);
     preview_pub_ = create_publisher<std_msgs::msg::String>("/dyx/trajectory_generator/preview_status", 5);
     declare_parameter<std::vector<double>>("markings_enu_flat", std::vector<double>{});
@@ -182,7 +185,13 @@ private:
   }
   void publish_all() {
     // Publish no false readiness: /ready remains FALSE until geo/PX4 reference parity.
-    std_msgs::msg::Bool ready; ready.data=false; ready_pub_->publish(ready);
+    std_msgs::msg::Bool ready;
+    ready.data = false;  // Physical readiness remains inhibited.
+    ready_pub_->publish(ready);
+
+    std_msgs::msg::Bool preview_ready;
+    preview_ready.data = ready_;  // Diagnostic path successfully prepared.
+    preview_ready_pub_->publish(preview_ready);
     const auto stamp=now();nav_.header.stamp=stamp;marking_.header.stamp=stamp;
     for(auto& p:nav_.poses)p.header.stamp=stamp;
     for(auto& p:marking_.poses)p.header.stamp=stamp;
@@ -206,6 +215,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr indexes_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr signature_pub_,survey_pub_,status_pub_,preview_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr ready_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr preview_ready_pub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr prepare_srv_,clear_srv_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
