@@ -201,24 +201,6 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
                   m->correction_age_verified;
             });
 
-    mission_safety_sub_ =
-        create_subscription<rpp_interfaces::msg::MissionSafetyPreview>(
-            "/dyx/mission/safety_preview",
-            rclcpp::QoS(5),
-            [this](
-                rpp_interfaces::msg::MissionSafetyPreview::ConstSharedPtr m) {
-              mission_safety_seen_ = true;
-              mission_safety_received_ = Steady::now();
-
-              // Diagnostic state only. ROS topic publication alone
-              // cannot grant mission or actuator authority.
-              mission_preview_stop_ = m->stop_requested;
-              mission_preview_authorized_ = m->motion_authorized;
-              mission_preview_rtk_fixed_ = m->rtk_fixed;
-              mission_preview_correction_age_verified_ =
-                  m->correction_age_verified;
-            });
-
     mission_status_sub_ = create_subscription<std_msgs::msg::String>(
         "/mission_manager/status", rclcpp::QoS(10),
         [this](std_msgs::msg::String::ConstSharedPtr m) {
