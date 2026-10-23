@@ -15,6 +15,11 @@ if(BUILD_TESTING)
     native_active_leg_integration_test
     native_rpp_executor_test
     native_mission_rpp_pipeline_test
+    native_control_owner_test
+    native_prepared_mission_owner_test
+    native_backend_owner_test
+    rear_marking_reference_test
+    motion_command_gate_test
   )
     add_executable(
       ${test_name}
