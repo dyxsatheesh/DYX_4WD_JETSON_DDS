@@ -15,3 +15,28 @@ target_include_directories(trajectory_generator_node PRIVATE ${CMAKE_CURRENT_SOU
 ament_target_dependencies(trajectory_generator_node rclcpp std_msgs nav_msgs geometry_msgs std_srvs px4_msgs dyx_rpp_cpp17_core)
 install(TARGETS trajectory_generator_node DESTINATION lib/${PROJECT_NAME})
 ament_package()
+
+# Native C++17 geographic projection and PX4 origin regression.
+if(BUILD_TESTING)
+  enable_testing()
+
+  add_executable(
+    test_geo_origin
+    test_geo_origin.cpp
+  )
+
+  target_include_directories(
+    test_geo_origin PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_rpp_cpp17_core/include
+  )
+
+  target_compile_options(
+    test_geo_origin PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG
+  )
+
+  add_test(
+    NAME geo_origin_regression
+    COMMAND test_geo_origin
+  )
+endif()
