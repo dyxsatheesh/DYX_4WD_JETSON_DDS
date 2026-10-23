@@ -22,4 +22,24 @@ ament_target_dependencies(dyx_px4_dds_bridge_node
 )
 
 install(TARGETS dyx_px4_dds_bridge_node DESTINATION lib/${PROJECT_NAME})
+
+# Native C++17 commissioning gate regression
+if(BUILD_TESTING)
+  enable_testing()
+
+  add_executable(
+    wheel_lift_gate_test
+    test/wheel_lift_gate_test.cpp
+  )
+
+  target_include_directories(
+    wheel_lift_gate_test PRIVATE include
+  )
+
+  add_test(
+    NAME wheel_lift_gate_regression
+    COMMAND wheel_lift_gate_test
+  )
+endif()
+
 ament_package()
