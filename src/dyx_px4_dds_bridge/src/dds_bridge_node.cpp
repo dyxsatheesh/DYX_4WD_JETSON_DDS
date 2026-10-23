@@ -4,6 +4,7 @@
 #include "dyx_px4_dds_bridge/bridge_commissioning_guard.hpp"
 #include "dyx_px4_dds_bridge/wheel_lift_gate.hpp"
 #include "dyx_px4_dds_bridge/bench_command_pipeline.hpp"
+#include "dyx_px4_dds_bridge/bench_transport_interlock.hpp"
 #include "dyx_px4_dds_bridge/native_rover_dds_contract.hpp"
 #include "dyx_px4_dds_bridge/rover_setpoint_builder.hpp"
 #include "dyx_px4_dds_bridge/native_writer_arbitration.hpp"
@@ -298,6 +299,11 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     bench_input.forward_mps = latest_wire_.speed_body_x;
     bench_input.yaw_rate_radps = latest_wire_.yaw_rate_setpoint;
     const auto bench_candidate = dyx::bridge::evaluate_bench_command(bench_input);
+    // Live diagnostic integration deliberately never invokes reset_simulation:
+    // incomplete physical safety evidence must remain latched after startup.
+    const auto simulated_receipt = bench_transport_.evaluate(
+        bench_candidate, mission_preview_stop_, emergency_stop_,
+        !graph.graph_quiet, mission_heartbeat_fresh, heading_fresh);
     // Precommissioning diagnostics only. Do not infer mechanical safety from ROS topics.
     dyx::bridge::WheelLiftEvidence commissioning{};
     commissioning.px4_armed = armed_;
@@ -409,7 +415,11 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         ";bench_candidate_reason=" + bench_candidate.reason +
         ";bench_candidate_forward_mps=" + std::to_string(bench_candidate.staged_speed_mps) +
         ";bench_candidate_yaw_rate_radps=" + std::to_string(bench_candidate.staged_yaw_rate_radps) +
-        ";bench_candidate_publish_authorized=false";
+        ";bench_candidate_publish_authorized=false" +
+        ";sim_transport_latched=" +
+           std::string(simulated_receipt.latched_stop ? "true" : "false") +
+        ";sim_transport_reason=" + simulated_receipt.reason +
+        ";sim_transport_physical_authorized=false";
     status_pub_->publish(status);
     } catch (const std::exception&) {
       // Graph operations can race with Ctrl+C context shutdown.
@@ -420,6 +430,7 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     }
   }
 
+  dyx::bridge::BenchTransportInterlock bench_transport_{};
   dyx::bridge::BridgeAudit audit_{};
 
   rclcpp::Subscription<
