@@ -3,6 +3,7 @@
 #include "dyx_px4_dds_bridge/safety_freshness.hpp"
 #include "dyx_px4_dds_bridge/bridge_commissioning_guard.hpp"
 #include "dyx_px4_dds_bridge/wheel_lift_gate.hpp"
+#include "dyx_px4_dds_bridge/bench_command_pipeline.hpp"
 #include "dyx_px4_dds_bridge/native_rover_dds_contract.hpp"
 #include "dyx_px4_dds_bridge/rover_setpoint_builder.hpp"
 #include "dyx_px4_dds_bridge/native_writer_arbitration.hpp"
@@ -283,6 +284,20 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     counts.legacy_trajectory = count_publishers("/fmu/in/trajectory_setpoint");
     counts.rover_attitude = count_publishers("/fmu/in/rover_attitude_setpoint");
     const auto graph = dyx::bridge::inspect_writer_graph(counts, true, false);
+    // Native bench pipeline validates candidate conversion but NEVER sends PX4 outputs.
+    dyx::bridge::BenchCommandInput bench_input{};
+    bench_input.motion_request_seen = have_rpp_;
+    bench_input.mission_preview_fresh = mission_safety_fresh;
+    bench_input.mission_stop_requested = mission_preview_stop_;
+    bench_input.mission_motion_authorized = mission_preview_authorized_;
+    bench_input.heading_fresh = heading_fresh;
+    bench_input.yaw_valid = latest_rpp_.valid;
+    bench_input.command_fresh = rpp_input_fresh;
+    bench_input.heartbeat_fresh = mission_heartbeat_fresh;
+    bench_input.output_writer_quiet = graph.graph_quiet;
+    bench_input.forward_mps = latest_wire_.speed_body_x;
+    bench_input.yaw_rate_radps = latest_wire_.yaw_rate_setpoint;
+    const auto bench_candidate = dyx::bridge::evaluate_bench_command(bench_input);
     // Precommissioning diagnostics only. Do not infer mechanical safety from ROS topics.
     dyx::bridge::WheelLiftEvidence commissioning{};
     commissioning.px4_armed = armed_;
@@ -388,7 +403,13 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         ";native_wire_publish_authorized=false" +
         ";motor_commands_enabled=false;physical_command_emitted=false" +
         ";wheel_lift_gate_reason=" + wheel_lift.reason +
-        ";wheel_lift_publish_authorized=false";
+        ";wheel_lift_publish_authorized=false" +
+        ";bench_candidate_valid=" +
+            std::string(bench_candidate.candidate_valid ? "true" : "false") +
+        ";bench_candidate_reason=" + bench_candidate.reason +
+        ";bench_candidate_forward_mps=" + std::to_string(bench_candidate.staged_speed_mps) +
+        ";bench_candidate_yaw_rate_radps=" + std::to_string(bench_candidate.staged_yaw_rate_radps) +
+        ";bench_candidate_publish_authorized=false";
     status_pub_->publish(status);
     } catch (const std::exception&) {
       // Graph operations can race with Ctrl+C context shutdown.

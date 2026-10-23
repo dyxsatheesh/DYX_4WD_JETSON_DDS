@@ -40,6 +40,9 @@ if(BUILD_TESTING)
     NAME wheel_lift_gate_regression
     COMMAND wheel_lift_gate_test
   )
+  add_executable(bench_command_pipeline_test test/bench_command_pipeline_test.cpp)
+  target_include_directories(bench_command_pipeline_test PRIVATE include)
+  add_test(NAME bench_command_pipeline_regression COMMAND bench_command_pipeline_test)
 endif()
 
 ament_package()
