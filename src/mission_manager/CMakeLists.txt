@@ -73,3 +73,12 @@ if(BUILD_TESTING)
   )
   add_test(NAME mission_lifecycle_regression COMMAND test_mission_lifecycle)
 endif()
+
+# B136: independently track real PX4 ROS-message receipt versus safety acceptance.
+if(BUILD_TESTING)
+  add_executable(test_px4_ingress_observation test/test_px4_ingress_observation.cpp)
+  target_include_directories(test_px4_ingress_observation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_mission_manager/include
+  )
+  add_test(NAME px4_ingress_observation_regression COMMAND test_px4_ingress_observation)
+endif()

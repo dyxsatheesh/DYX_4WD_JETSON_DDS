@@ -3,6 +3,7 @@
 #include "dyx_mission_manager/native_command_mailbox.hpp"
 #include "dyx_mission_manager/native_mission_command_executor.hpp"
 #include "dyx_mission_manager/native_motion_authority.hpp"
+#include "dyx_mission_manager/native_px4_ingress_observation.hpp"
 #include "dyx_mission_manager/native_authority_dispatch.hpp"
 #include "dyx_mission_manager/native_telemetry_safety_component.hpp"
 #include "dyx_mission_manager/rtk_safety_snapshot.hpp"
@@ -68,6 +69,7 @@ class MissionManagerNode final : public rclcpp::Node {
               dyx::rpp::DdsBatteryFrame f{};
               f.timestamp_us = m->timestamp;
               f.received_sec = now_sec();
+              px4_ingress_.observe_battery(f.received_sec);
               f.voltage_v = m->voltage_v;
               f.connected = m->connected;
               f.powering_off = m->is_powering_off;
@@ -86,6 +88,7 @@ class MissionManagerNode final : public rclcpp::Node {
               dyx::rpp::DdsGpsFrame f{};
               f.gps_timestamp_sample_us = m->timestamp_sample;
               f.received_sec = now_sec();
+              px4_ingress_.observe_gps(f.received_sec);
               f.device_id = m->device_id;
               f.latitude_deg = m->latitude_deg;
               f.longitude_deg = m->longitude_deg;
@@ -104,6 +107,7 @@ class MissionManagerNode final : public rclcpp::Node {
               dyx::rpp::DdsVehicleFrame f{};
               f.timestamp_us = m->timestamp;
               f.received_sec = now_sec();
+              px4_ingress_.observe_vehicle(f.received_sec);
               f.arming_state = m->arming_state;
               f.nav_state = m->nav_state;
               f.vehicle_type = m->vehicle_type;
@@ -127,6 +131,7 @@ class MissionManagerNode final : public rclcpp::Node {
               dyx::rpp::DdsEstimatorFrame f{};
               f.timestamp_sample_us = m->timestamp_sample;
               f.received_sec = now_sec();
+              px4_ingress_.observe_position(f.received_sec);
               f.xy_valid = m->xy_valid;
               f.v_xy_valid = m->v_xy_valid;
               f.heading_good_for_control =
@@ -178,7 +183,8 @@ class MissionManagerNode final : public rclcpp::Node {
             "/fmu/out/rover_rate_status",
             rclcpp::SensorDataQoS(),
             [this](px4_msgs::msg::RoverRateStatus::ConstSharedPtr msg) {
-              const double rate = msg->measured_yaw_rate;
+              px4_ingress_.observe_rover_rate(now_sec());
+               const double rate = msg->measured_yaw_rate;
 
               if (msg->timestamp == 0 ||
                   !std::isfinite(rate) ||
@@ -942,6 +948,9 @@ class MissionManagerNode final : public rclcpp::Node {
          dyx::rpp::mission_stage_name(owner_.mission().stage())},
         {"mission_loaded", owner_.has_active_mission()},
         {"safe_stop_requested", owner_.safe_stop_requested()},
+        // Raw topic receipt is independent of the strict safety adapter.
+        // A recent packet is NOT evidence of valid vehicle/battery/navigation state.
+        {"px4_ingress", px4_ingress_.snapshot(now)},
         {"px4_vehicle_fresh", result.mission.telemetry.px4_vehicle_fresh},
         {"gps_fresh", result.mission.telemetry.gps_sample_fresh},
         {"battery_fresh", result.mission.telemetry.battery_sample_fresh && telemetry_safety_.power().battery_fresh(now)},
@@ -1093,6 +1102,7 @@ class MissionManagerNode final : public rclcpp::Node {
   dyx::http_backend::NativeTelemetrySafetyComponent telemetry_safety_{};
   dyx::http_backend::NativeMissionCommandExecutor mission_command_executor_{};
   dyx::http_backend::NativeMotionAuthority motion_authority_{};
+  dyx::http_backend::NativePx4IngressObservation px4_ingress_{};
   std::string last_authority_dispatch_reason_{"NOT_EVALUATED"};
   std::uint64_t authority_dispatch_assessments_{0};
   std::uint64_t authority_software_eligible_denied_{0};
