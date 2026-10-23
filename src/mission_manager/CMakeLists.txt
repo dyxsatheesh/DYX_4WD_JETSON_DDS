@@ -17,6 +17,7 @@ ament_target_dependencies(mission_manager_node rclcpp std_msgs rpp_interfaces dy
 target_include_directories(mission_manager_node PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_mission_manager/include
   ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_rpp_cpp17_core/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(mission_manager_node Boost::system Threads::Threads OpenSSL::Crypto SQLite::SQLite3)
 install(TARGETS mission_manager_node DESTINATION lib/${PROJECT_NAME})
@@ -81,4 +82,12 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/../dyx_mission_manager/include
   )
   add_test(NAME px4_ingress_observation_regression COMMAND test_px4_ingress_observation)
+endif()
+
+# B200: Python-to-C++17 marking arrival source parity; no ROS/hardware needed.
+if(BUILD_TESTING)
+  add_executable(test_marking_arrival_parity test/test_marking_arrival_parity.cpp)
+  target_include_directories(test_marking_arrival_parity PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  add_test(NAME marking_arrival_source_parity COMMAND test_marking_arrival_parity)
 endif()

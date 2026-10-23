@@ -9,6 +9,7 @@
 #include "dyx_mission_manager/rtk_safety_snapshot.hpp"
 #include "dyx_mission_manager/receiver_age_diagnostic.hpp"
 #include "dyx_mission_manager/native_positive_command_preflight.hpp"
+#include "dyx_mission_manager/marking_arrival_policy.hpp"
 #include "dyx_mission_manager/native_mission_state_audit.hpp"
 #include "dyx_mission_manager/native_mission_transition_gate.hpp"
 #include "dyx_rpp_cpp17_core/rear_marking_reference.hpp"
@@ -764,6 +765,39 @@ class MissionManagerNode final : public rclcpp::Node {
     }
     const auto terminal_shadow = terminal_shadow_.observe(terminal_evidence);
 
+    // DYX_B200_ARRIVAL_SOURCE_PARITY
+    // Ported Python policy is now evaluated in the real C++17 ROS owner.
+    // This is an estimator-frame DIAGNOSTIC only. It is NOT survey truth,
+    // never enters the mission stage machine, and cannot start spray/marking.
+    // Unknown pose or velocity cannot be interpreted as a stationary arrival.
+    const bool arrival_pose_observed = position_fresh && reference_available &&
+        last_velocity_valid_ && std::isfinite(last_velocity_north_mps_) &&
+        std::isfinite(last_velocity_east_mps_) &&
+        std::isfinite(terminal_evidence.along_m) &&
+        terminal_evidence.along_m >= 0.0;
+    const double arrival_speed_mps = arrival_pose_observed ?
+        std::hypot(last_velocity_north_mps_, last_velocity_east_mps_) :
+        std::numeric_limits<double>::infinity();
+    const bool arrival_inside_30mm = arrival_pose_observed &&
+        !terminal_evidence.goal_identity.empty() &&
+        terminal_evidence.along_m <= 0.030;
+    const bool arrival_stationary = arrival_pose_observed &&
+        arrival_speed_mps <= 0.050;
+    // No trusted RPP terminal outcome or approach-goal-plane crossing is
+    // connected. Do NOT manufacture CAPTURED or MISSED from preview strings.
+    const auto arrival_phase_a = dyx::mission::arrival::phase_a_decision(
+        arrival_inside_30mm, arrival_stationary);
+    const bool arrival_captured_preview = arrival_pose_observed &&
+        dyx::mission::arrival::should_publish_rpp_captured(
+            terminal_evidence.along_m, arrival_speed_mps, 0.030, 0.050);
+    const char* arrival_phase_name =
+        !arrival_pose_observed ? "UNKNOWN_NO_FRESH_POSE_VELOCITY" :
+        arrival_phase_a == dyx::mission::arrival::PhaseA::START_VERIFICATION ?
+            "START_VERIFICATION_DIAGNOSTIC" :
+        arrival_phase_a == dyx::mission::arrival::PhaseA::FAIL_NOW ?
+            "FAIL_NOW_DIAGNOSTIC" : "KEEP_APPROACHING_DIAGNOSTIC";
+
+
     // D4B: mission-owned spray intent shadow; no physical spray grant.
     dyx::rpp::SprayIntentShadowInput spray_shadow_input{};
     const auto& spray_stage = owner_.mission().status();
@@ -936,6 +970,11 @@ class MissionManagerNode final : public rclcpp::Node {
         << ";d2d_terminal_radial_m=" << terminal_shadow.radial_error_m
         << ";d2d_stop_estimator_only=" << terminal_shadow.stopped_in_estimator_frame
         << ";d2d_marking_authorized=false"
+        << ";b200_arrival_phase=" << arrival_phase_name
+        << ";b200_inside_30mm_estimator=" << arrival_inside_30mm
+        << ";b200_stationary_estimator=" << arrival_stationary
+        << ";b200_rpp_captured_diagnostic=" << arrival_captured_preview
+        << ";b200_verification_or_spray_authorized=false"
         << ";d4b_spray_intent_reason=" << spray_shadow.reason
         << ";d4b_spray_eligibility_diagnostic=" << spray_shadow.eligibility_diagnostic
         << ";d4b_spray_dispatch_authorized=false"
@@ -1025,6 +1064,13 @@ class MissionManagerNode final : public rclcpp::Node {
         {"position_fault", position_fault_},
         {"rear_reference_available", reference_available},
         {"rear_reference_calibrated", false},
+        {"arrival_phase_a_diagnostic", arrival_phase_name},
+        {"arrival_pose_velocity_observed", arrival_pose_observed},
+        {"arrival_inside_30mm_estimator", arrival_inside_30mm},
+        {"arrival_stationary_estimator", arrival_stationary},
+        {"arrival_captured_diagnostic", arrival_captured_preview},
+        {"arrival_survey_certified", false},
+        {"arrival_verification_authorized", false},
         // These sources are not integrated and must default fail-closed.
         {"rtk_fixed", !telemetry_fault_ && !telemetry_safety_.rtk().fault() &&
              result.mission.telemetry.gps_sample_fresh &&
