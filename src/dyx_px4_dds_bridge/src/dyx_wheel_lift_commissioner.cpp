@@ -1,5 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include "dyx_px4_dds_bridge/wheel_lift_stop_policy.hpp"
+#include "dyx_px4_dds_bridge/wheel_lift_runtime_faults.hpp"
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/rover_speed_setpoint.hpp>
 #include <px4_msgs/msg/rover_rate_setpoint.hpp>
@@ -59,8 +60,11 @@ class WheelLiftCommissioner final : public rclcpp::Node {
         if(!awaiting_ack_ || p->command!=pending_command_) return;
         last_ack_result_=p->result;
         awaiting_ack_=false;
-        if(p->result!=px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED)
-          latch_=true;
+        if(p->result!=px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED) {
+          const auto fault=dyx::bridge::wheel_lift_runtime_fault(armed_,true,false,was_offboard_,offboard_);
+          if(fault.latch) latch_=true;
+          if(fault.request_disarm) stop_requested_=true;
+        }
       });
     // 1=ARM; 2=OFFBOARD; 3=STOP+DISARM. Single, deliberate operator events.
     operation_=create_subscription<std_msgs::msg::UInt8>(
@@ -163,11 +167,16 @@ class WheelLiftCommissioner final : public rclcpp::Node {
         requested_offboard_=false;
       }
     }
-    if(awaiting_ack_ && !fresh(request_sent_,0.8)) {
-      awaiting_ack_=false; latch_=true;
-    }
-    // Losing an established Offboard/armed state is a stop condition.
-    if(was_offboard_ && (!offboard_ || !armed_)) latch_=true;
+    const bool ack_expired=awaiting_ack_ && !fresh(request_sent_,0.8);
+    if(ack_expired) awaiting_ack_=false;
+    // A rejected/timed-out command or unexpected Offboard loss cannot leave
+    // an armed rover running with only a latched heartbeat inhibition.
+    const auto runtime_fault=dyx::bridge::wheel_lift_runtime_fault(
+        armed_,false,ack_expired,was_offboard_,offboard_);
+    if(runtime_fault.latch) latch_=true;
+    if(runtime_fault.request_disarm) stop_requested_=true;
+    // Losing armed state after Offboard also requires a fresh commissioning session.
+    if(was_offboard_ && !armed_) latch_=true;
     if(offboard_ && armed_) was_offboard_=true;
     const auto now_ns=get_clock()->now().nanoseconds();
     const auto ts=now_ns>0?static_cast<uint64_t>(now_ns/1000):0;

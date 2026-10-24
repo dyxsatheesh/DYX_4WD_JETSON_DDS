@@ -69,4 +69,10 @@ if(BUILD_TESTING)
   add_test(NAME wheel_lift_stop_policy_regression COMMAND wheel_lift_stop_policy_test)
 endif()
 
+if(BUILD_TESTING)
+  add_executable(wheel_lift_runtime_faults_test test/wheel_lift_runtime_faults_test.cpp)
+  target_include_directories(wheel_lift_runtime_faults_test PRIVATE include)
+  add_test(NAME wheel_lift_runtime_faults_regression COMMAND wheel_lift_runtime_faults_test)
+endif()
+
 ament_package()
