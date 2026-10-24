@@ -49,6 +49,9 @@ if(BUILD_TESTING)
   add_executable(commissioned_output_gate_test test/commissioned_output_gate_test.cpp)
   target_include_directories(commissioned_output_gate_test PRIVATE include)
   add_test(NAME commissioned_output_gate_regression COMMAND commissioned_output_gate_test)
+  add_executable(wheel_lift_lifecycle_test test/wheel_lift_lifecycle_test.cpp)
+  target_include_directories(wheel_lift_lifecycle_test PRIVATE include)
+  add_test(NAME wheel_lift_lifecycle_regression COMMAND wheel_lift_lifecycle_test)
 endif()
 
 
