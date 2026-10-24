@@ -9,6 +9,7 @@
 #include <sstream>
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <cstdlib>
 #include <functional>
 #include <memory>
@@ -138,6 +139,9 @@ public:
         send(cb,drogon::k200OK,{{"success",true},{"token",result.token},
           {"token_type","Bearer"},{"session_id",result.session_id},
           {"expires_at_epoch",result.expires_at},
+          {"expires_at",epoch_iso(result.expires_at)},
+          {"rover",{{"id",env_or("DYX_ROVER_ID","dyx-4wd-001")},
+                    {"name",env_or("DYX_ROVER_NAME","DYX 4WD Rover")}}},
           {"user",{{"username",result.username}}},
           {"mission_commands_enabled",false}});
       },{drogon::Post});
@@ -166,6 +170,86 @@ public:
         send(cb,drogon::k200OK,{{"success",true},{"message","Logged out successfully."}});
       },{drogon::Post});
 
+    // Phase 3A: Android-visible read-only discovery/status routes.
+    // Never fabricate a vehicle/RTK fix from mission-owner text.
+    drogon::app().registerHandler("/api/health",
+      [this,port](const drogon::HttpRequestPtr&,ResponseCallback&& cb){
+        send(cb,drogon::k200OK,{{"ok",true},{"type","rover_backend"},
+          {"rover_id",env_or("DYX_ROVER_ID","dyx-4wd-001")},
+          {"rover_name",env_or("DYX_ROVER_NAME","DYX 4WD Rover")},
+          {"port",port},
+          {"version","2.0.0"}});
+      },{drogon::Get});
+    drogon::app().registerHandler("/api/ping",
+      [this,port](const drogon::HttpRequestPtr&,ResponseCallback&& cb){
+        send(cb,drogon::k200OK,{{"success",true},
+          {"application","DYX 4WD Rover Backend"},{"service","rover_backend"},
+          {"version","2.0.0"},
+          {"rover_id",env_or("DYX_ROVER_ID","dyx-4wd-001")},
+          {"rover_name",env_or("DYX_ROVER_NAME","DYX 4WD Rover")},
+          {"ip","127.0.0.1"},{"port",port},
+          {"base_url","http://127.0.0.1:"+std::to_string(port)},
+          {"timestamp",utc_iso_now()}});
+      },{drogon::Get});
+
+    // Read-only endpoints require an active, unrevoked SQLite session.
+    auto observation=[this](const drogon::HttpRequestPtr& req,ResponseCallback&& cb,
+                            const std::string& kind){
+      if(!sessions_->configured()) {
+        send(cb,drogon::k503ServiceUnavailable,{{"detail","NATIVE_SESSION_DB_NOT_CONFIGURED"}});return;
+      }
+      if(!sessions_->verify(get_token(req)).authenticated) {
+        send(cb,drogon::k401Unauthorized,{{"detail","AUTHENTICATION_REQUIRED"}});return;
+      }
+      std::string snapshot;
+      double age=-1;
+      {
+        std::lock_guard<std::mutex> lk(mu_);
+        if(status_seen_) {
+          age=std::chrono::duration<double>(std::chrono::steady_clock::now()-last_status_at_).count();
+          snapshot=latest_status_;
+        }
+      }
+      if(kind=="safety") {
+        // Unknown motor/estop hardware state is NOT reported as healthy.
+        send(cb,drogon::k503ServiceUnavailable,
+          {{"detail","SAFETY_TELEMETRY_NOT_COMMISSIONED"},
+           {"mission_commands_enabled",false},{"physical_command_emitted",false}});
+        return;
+      }
+      if(age<0.0 || age>0.5) {
+        send(cb,drogon::k503ServiceUnavailable,
+          {{"detail","MISSION_OWNER_STATUS_STALE_OR_MISSING"},
+           {"ready_for_physical_motion",false}});
+        return;
+      }
+      // Raw ROS status is diagnostic observation only, never an authenticated
+      // command or proof of GNSS/PX4 health. Structured telemetry remains pending.
+      send(cb,drogon::k200OK,{{"source","mission_manager/status"},
+        {"mission_status_observation",snapshot},{"observation_age_sec",age},
+        {"structured_telemetry_available",false},
+        {"ready_for_physical_motion",false},
+        {"physical_command_emitted",false}});
+    };
+    for(const auto& endpoint : {"/api/telemetry/latest","/api/mission/status",
+                                "/api/healthz","/api/safety/status"}) {
+      const std::string kind=std::string(endpoint)=="/api/safety/status" ? "safety" : "observation";
+      drogon::app().registerHandler(endpoint,
+        [observation,kind](const drogon::HttpRequestPtr& req,ResponseCallback&& cb){
+          observation(req,std::move(cb),kind);
+        },{drogon::Get});
+    }
+    // No fabricated RTK or network observations while bridges are not wired.
+    for(const auto& endpoint : {"/api/network","/api/rtk/status"}) {
+      drogon::app().registerHandler(endpoint,
+        [this](const drogon::HttpRequestPtr& req,ResponseCallback&& cb){
+          if(!sessions_->verify(get_token(req)).authenticated) {
+            send(cb,drogon::k401Unauthorized,{{"detail","AUTHENTICATION_REQUIRED"}});return;
+          }
+          send(cb,drogon::k503ServiceUnavailable,{{"detail","SOURCE_NOT_COMMISSIONED"}});
+        },{drogon::Get});
+    }
+
     drogon::app().setThreadNum(2).addListener("127.0.0.1",static_cast<uint16_t>(port));
     server_=std::thread([]{drogon::app().run();});
 
@@ -176,6 +260,24 @@ public:
     if(server_.joinable())server_.join();
   }
 private:
+  static std::string env_or(const char* name,const char* fallback) {
+    const char* v=std::getenv(name);
+    return (v && *v) ? std::string(v) : std::string(fallback);
+  }
+  static std::string epoch_iso(std::int64_t epoch) {
+    const std::time_t t=static_cast<std::time_t>(epoch);
+    std::tm utc{};
+    if(!gmtime_r(&t,&utc)) return "";
+    char buf[32]{};
+    return std::strftime(buf,sizeof(buf),"%Y-%m-%dT%H:%M:%SZ",&utc) ? std::string(buf) : "";
+  }
+  static std::string utc_iso_now() {
+    const std::time_t t=std::time(nullptr);
+    std::tm utc{};
+    if(!gmtime_r(&t,&utc)) return "";
+    char buf[32]{};
+    return std::strftime(buf,sizeof(buf),"%Y-%m-%dT%H:%M:%SZ",&utc) ? std::string(buf) : "";
+  }
   static std::string get_token(const drogon::HttpRequestPtr& req){
     const std::string header=req->getHeader("authorization");
     if(header.rfind("Bearer ",0)==0)return header.substr(7);
