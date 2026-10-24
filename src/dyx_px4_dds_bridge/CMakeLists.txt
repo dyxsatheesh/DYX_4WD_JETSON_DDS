@@ -76,3 +76,10 @@ if(BUILD_TESTING)
 endif()
 
 ament_package()
+
+if(BUILD_TESTING)
+  add_executable(rover_speed_heading_test test/rover_speed_heading_test.cpp)
+  target_include_directories(rover_speed_heading_test PRIVATE include)
+  ament_target_dependencies(rover_speed_heading_test px4_msgs)
+  add_test(NAME rover_speed_heading_regression COMMAND rover_speed_heading_test)
+endif()
