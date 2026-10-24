@@ -1,6 +1,7 @@
 // DYX native Drogon C++17 backend phase 1: parity-safe read-only HTTP.
 // Production mission authority stays with mission_manager; no actuator route.
 #include "dyx_mission_manager/native_session_auth.hpp"
+#include "dyx_drogon_auth.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <drogon/drogon.h>
@@ -25,6 +26,7 @@ public:
   RoverBackend():Node("rover_backend") {
     const char* db=std::getenv("DYX_CPP17_AUTH_DB");
     sessions_=std::make_shared<dyx::http_backend::NativeSessionAuth>(db?db:"");
+    auth_store_=std::make_shared<dyx::drogon_auth::Store>(db?db:"");
     mission_sub_=create_subscription<std_msgs::msg::String>(
       "/mission_manager/status",rclcpp::QoS(10),
       [this](std_msgs::msg::String::ConstSharedPtr m){
@@ -113,6 +115,57 @@ public:
         },
         {drogon::Post});
 
+    // Phase 2: Python-compatible REST authentication. SQLite user provisioning
+    // remains an explicit administrative process; login never creates users.
+    drogon::app().registerHandler("/api/auth/login",
+      [this](const drogon::HttpRequestPtr& req,ResponseCallback&& cb){
+        if(req->getBody().size()>8192){send(cb,drogon::k400BadRequest,{{"detail","REQUEST_TOO_LARGE"}});return;}
+        const auto body=req->getJsonObject();
+        if(!body || !body->isObject() || !body->isMember("username") ||
+           !body->isMember("password") || !(*body)["username"].isString() ||
+           !(*body)["password"].isString()) {
+          send(cb,drogon::k400BadRequest,{{"detail","INVALID_LOGIN_REQUEST"}});return;
+        }
+        // Restrict to loopback while authentication and Android parity are in development.
+        const auto ip=req->peerAddr().toIp();
+        const auto result=auth_store_->login(
+          (*body)["username"].asString(),(*body)["password"].asString(),
+          ip,req->getHeader("user-agent"));
+        if(!result.success){
+          const auto code=static_cast<drogon::HttpStatusCode>(result.code);
+          send(cb,code,{{"detail",result.detail}});return;
+        }
+        send(cb,drogon::k200OK,{{"success",true},{"token",result.token},
+          {"token_type","Bearer"},{"session_id",result.session_id},
+          {"expires_at_epoch",result.expires_at},
+          {"user",{{"username",result.username}}},
+          {"mission_commands_enabled",false}});
+      },{drogon::Post});
+
+    drogon::app().registerHandler("/api/auth/session",
+      [this](const drogon::HttpRequestPtr& req,ResponseCallback&& cb){
+        if(!sessions_->configured()){
+          send(cb,drogon::k503ServiceUnavailable,{{"detail","NATIVE_SESSION_DB_NOT_CONFIGURED"}});return;
+        }
+        std::string token=get_token(req);
+        auto session=sessions_->verify(token);
+        if(!session.authenticated){send(cb,drogon::k401Unauthorized,{{"detail","AUTHENTICATION_REQUIRED"}});return;}
+        send(cb,drogon::k200OK,{{"authenticated",true},
+          {"session",{{"session_id",session.session_id},{"username",session.username}}},
+          {"mission_commands_enabled",false}});
+      },{drogon::Get});
+
+    drogon::app().registerHandler("/api/auth/logout",
+      [this](const drogon::HttpRequestPtr& req,ResponseCallback&& cb){
+        const auto token=get_token(req);
+        const auto verified=sessions_->verify(token);
+        if(!verified.authenticated){send(cb,drogon::k401Unauthorized,{{"detail","AUTHENTICATION_REQUIRED"}});return;}
+        if(!auth_store_->logout(token)){
+          send(cb,drogon::k503ServiceUnavailable,{{"detail","SESSION_REVOCATION_FAILED"}});return;
+        }
+        send(cb,drogon::k200OK,{{"success",true},{"message","Logged out successfully."}});
+      },{drogon::Post});
+
     drogon::app().setThreadNum(2).addListener("127.0.0.1",static_cast<uint16_t>(port));
     server_=std::thread([]{drogon::app().run();});
 
@@ -123,6 +176,11 @@ public:
     if(server_.joinable())server_.join();
   }
 private:
+  static std::string get_token(const drogon::HttpRequestPtr& req){
+    const std::string header=req->getHeader("authorization");
+    if(header.rfind("Bearer ",0)==0)return header.substr(7);
+    return req->getHeader("x-rover-token");
+  }
   static void send(const ResponseCallback& cb,drogon::HttpStatusCode status,const nlohmann::json& body){
     Json::Value payload;
     Json::CharReaderBuilder parser;
@@ -134,6 +192,7 @@ private:
     cb(response);
   }
   std::shared_ptr<dyx::http_backend::NativeSessionAuth> sessions_;
+  std::shared_ptr<dyx::drogon_auth::Store> auth_store_;
   std::mutex mu_;
   std::string latest_status_;
   std::chrono::steady_clock::time_point last_status_at_{};
