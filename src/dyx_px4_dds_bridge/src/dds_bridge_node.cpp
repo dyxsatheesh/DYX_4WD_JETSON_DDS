@@ -94,10 +94,23 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
               measured_heading_enu_rad_,
               msg->yaw_valid && estimator_fresh,
               maximum_speed_mps_);
+          // Desired velocity magnitude + desired heading are references.
+          // PX4 owns heading and yaw-rate PID; do not close heading on Jetson.
+          const double desired_speed = std::hypot(
+              msg->velocity_north_mps, msg->velocity_east_mps);
+          const bool desired_vector_valid =
+              msg->yaw_valid && estimator_fresh && latest_rpp_.valid &&
+              std::isfinite(desired_speed) &&
+              desired_speed <= maximum_speed_mps_ &&
+              std::isfinite(msg->yaw_enu_rad) &&
+              (desired_speed <= 1e-6 ||
+               ((msg->velocity_east_mps * std::cos(msg->yaw_enu_rad) +
+                 msg->velocity_north_mps * std::sin(msg->yaw_enu_rad)) /
+                desired_speed) >= 0.95);
           latest_wire_ = dyx::bridge::rover_speed_rate_wire(
-              latest_body_.forward_mps,
-              msg->yaw_rate_enu_radps,
-              latest_rpp_.valid && latest_body_.valid,
+              desired_vector_valid ? desired_speed : 0.0,
+              0.0,  // no Jetson yaw-rate command in autonomous transport
+              desired_vector_valid,
               maximum_speed_mps_,
               maximum_yaw_rate_radps_);
 
