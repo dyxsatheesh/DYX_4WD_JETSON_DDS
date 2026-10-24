@@ -592,6 +592,7 @@ class MissionManagerNode final : public rclcpp::Node {
     const bool owned_command_permitted =
         result.motion.permitted &&
         !result.motion.latched &&
+        rpp_guidance_valid &&
         owned_pose_fresh &&
         !telemetry_fault_ &&
         !timing_fault_ &&
@@ -602,9 +603,10 @@ class MissionManagerNode final : public rclcpp::Node {
     if (owned_command_permitted) {
       owned_command.velocity_north_mps = result.motion.north_mps;
       owned_command.velocity_east_mps = result.motion.east_mps;
+      // Jetson supplies the RPP target heading.
+      // PX4 owns heading/yaw-rate and motor feedback control.
       owned_command.yaw_enu_rad =
-          dyx::rpp::wrap_angle(
-              dyx::rpp::pi / 2.0 - last_position_.heading_rad);
+          last_rpp_preview_.target_heading_enu_rad;
       owned_command.yaw_rate_enu_radps =
           result.motion.yaw_rate_enu_radps;
       owned_command.yaw_valid = true;
