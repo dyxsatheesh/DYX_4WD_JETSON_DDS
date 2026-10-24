@@ -51,4 +51,19 @@ if(BUILD_TESTING)
   add_test(NAME commissioned_output_gate_regression COMMAND commissioned_output_gate_test)
 endif()
 
+
+# Dedicated physically interlocked wheel-lift command publisher.
+# Never launch at the same time as dyx_px4_dds_bridge_node.
+add_executable(dyx_wheel_lift_commissioner src/dyx_wheel_lift_commissioner.cpp)
+target_include_directories(dyx_wheel_lift_commissioner PRIVATE include)
+ament_target_dependencies(dyx_wheel_lift_commissioner rclcpp px4_msgs std_msgs)
+install(TARGETS dyx_wheel_lift_commissioner DESTINATION lib/${PROJECT_NAME})
+
+
+if(BUILD_TESTING)
+  add_executable(wheel_lift_stop_policy_test test/wheel_lift_stop_policy_test.cpp)
+  target_include_directories(wheel_lift_stop_policy_test PRIVATE include)
+  add_test(NAME wheel_lift_stop_policy_regression COMMAND wheel_lift_stop_policy_test)
+endif()
+
 ament_package()
