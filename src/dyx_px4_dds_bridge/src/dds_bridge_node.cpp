@@ -14,7 +14,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/rover_speed_setpoint.hpp>
-#include <px4_msgs/msg/rover_attitude_setpoint.hpp>
+#include <px4_msgs/msg/rover_rate_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <rpp_interfaces/msg/rpp_command.hpp>
@@ -71,8 +71,8 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
         "/fmu/in/offboard_control_mode", px4_pub_qos);
     px4_rover_speed_pub_ = create_publisher<px4_msgs::msg::RoverSpeedSetpoint>(
         "/fmu/in/rover_speed_setpoint", px4_pub_qos);
-    px4_rover_attitude_pub_ = create_publisher<px4_msgs::msg::RoverAttitudeSetpoint>(
-        "/fmu/in/rover_attitude_setpoint", px4_pub_qos);
+    px4_rover_rate_pub_ = create_publisher<px4_msgs::msg::RoverRateSetpoint>(
+        "/fmu/in/rover_rate_setpoint", px4_pub_qos);
     status_pub_ = create_publisher<std_msgs::msg::String>(
         "/dyx_px4_dds_bridge/status", rclcpp::QoS(10));
 
@@ -109,7 +109,7 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
                 desired_speed) >= 0.95);
           latest_wire_ = dyx::bridge::rover_speed_rate_wire(
               desired_vector_valid ? desired_speed : 0.0,
-              0.0,  // no Jetson yaw-rate command in autonomous transport
+              -static_cast<double>(latest_rpp_.yaw_rate_ned_radps),
               desired_vector_valid,
               maximum_speed_mps_,
               maximum_yaw_rate_radps_);
@@ -299,10 +299,10 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
     dyx::bridge::WriterCounts counts{};
     counts.offboard_mode = mode > 0 ? mode - 1 : 0;
     counts.rover_speed = speed > 0 ? speed - 1 : 0;
-    counts.rover_rate = rate;
+    counts.rover_rate = rate > 0 ? rate - 1 : 0;
     counts.legacy_trajectory = count_publishers("/fmu/in/trajectory_setpoint");
     const auto attitude = count_publishers("/fmu/in/rover_attitude_setpoint");
-    counts.rover_attitude = attitude > 0 ? attitude - 1 : 0;
+    counts.rover_attitude = attitude;
     const auto graph = dyx::bridge::inspect_writer_graph(counts, true, false);
     // Real PX4 output calls are implemented, but fail closed. None of the
     // ROS Bool topics or operator-written parameters proves a *physical*
@@ -332,7 +332,10 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
       // are independently implemented, reviewed and bench-tested.
       px4_mode_pub_->publish(prepared_heading.mode);
       px4_rover_speed_pub_->publish(prepared_heading.speed);
-      px4_rover_attitude_pub_->publish(prepared_heading.attitude);
+      px4_msgs::msg::RoverRateSetpoint prepared_rate{};
+      prepared_rate.timestamp = prepared_heading.speed.timestamp;
+      prepared_rate.yaw_rate_setpoint = latest_wire_.yaw_rate_setpoint;
+      px4_rover_rate_pub_->publish(prepared_rate);
     }
 
     if (++tick_count_ % 50 != 0) return;
@@ -548,7 +551,7 @@ class DyxPx4DdsBridge final : public rclcpp::Node {
 
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr px4_mode_pub_;
   rclcpp::Publisher<px4_msgs::msg::RoverSpeedSetpoint>::SharedPtr px4_rover_speed_pub_;
-  rclcpp::Publisher<px4_msgs::msg::RoverAttitudeSetpoint>::SharedPtr px4_rover_attitude_pub_;
+  rclcpp::Publisher<px4_msgs::msg::RoverRateSetpoint>::SharedPtr px4_rover_rate_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Subscription<rpp_interfaces::msg::RppCommand>::SharedPtr rpp_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_sub_;
