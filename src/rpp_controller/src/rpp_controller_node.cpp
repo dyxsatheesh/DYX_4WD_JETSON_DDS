@@ -1,3 +1,4 @@
+#include "desired_heading_reference.hpp"
 #include "dyx_rpp_cpp17_core/path_index.hpp"
 #include "guidance_preview.hpp"
 #include "semantic_metadata.hpp"
@@ -313,11 +314,11 @@ public:
       preview.preview_forward_mps >= 0.0 && preview.preview_forward_mps <= 1.0 &&
       std::abs(preview.preview_yaw_rate_enu_radps) <= 0.18;
   if (preview_safe_to_calculate) {
-    shadow_command.velocity_east_mps = preview.preview_forward_mps *
-        std::cos(preview.heading_enu_rad);
-    shadow_command.velocity_north_mps = preview.preview_forward_mps *
-        std::sin(preview.heading_enu_rad);
-    shadow_command.yaw_enu_rad = preview.heading_enu_rad;
+    const auto ref = dyx::rpp::desired_heading_reference(
+        preview.preview_forward_mps, preview.target_heading_enu_rad);
+    shadow_command.velocity_east_mps = ref.east_mps;
+    shadow_command.velocity_north_mps = ref.north_mps;
+    shadow_command.yaw_enu_rad = ref.yaw_enu_rad;
     shadow_command.yaw_rate_enu_radps = preview.preview_yaw_rate_enu_radps;
     shadow_command.yaw_valid = true; // Numeric preview validity only; not authority.
   }
